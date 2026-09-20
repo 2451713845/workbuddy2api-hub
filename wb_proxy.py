@@ -2040,26 +2040,53 @@ def cleanup_orphan_tool_calls(messages):
 # ---------------------------------------------------------------------------
 # DeepSeek Multi-turn Consistency: reasoning_content backfill
 # ---------------------------------------------------------------------------
-def backfill_reasoning_content(messages, model):
+# Upstream (code 11155 "the reasoning content from the previous turn must be
+# passed back in thinking mode") requires every assistant message to carry a
+# `reasoning_content` string while thinking is on. Two halves gate the fix,
+# mirroring the official client's ReasoningContentBackfillRule:
+#   - thinkingEnabled: deepseek + thinking enabled -> always backfill, even
+#     when a third-party client dropped reasoning entirely (this was the bug:
+#     only the hasTrace half existed, so zero-trace histories were forwarded
+#     untouched and rejected).
+#   - hasTrace: any existing reasoning trace -> backfill regardless of the
+#     thinking flag.
+# Upstream also validates len(reasoning) > 0, so an empty placeholder is not
+# enough on its own: `reasoning` is mirrored with a non-empty value.
+def backfill_reasoning_content(messages, model, thinking_enabled=None):
     if not model or not str(model).lower().startswith("deepseek"):
         return messages
+    if thinking_enabled is None:
+        thinking_enabled = False
     has_trace = False
     for m in messages:
-        if isinstance(m, dict):
-            if m.get("reasoning") or "reasoning_content" in m:
-                has_trace = True
-                break
-    if not has_trace:
+        if not isinstance(m, dict):
+            continue
+        reasoning = m.get("reasoning")
+        if isinstance(reasoning, str) and reasoning:
+            has_trace = True
+            break
+        if "reasoning_content" in m:
+            has_trace = True
+            break
+    if not thinking_enabled and not has_trace:
         return messages
     out = []
     for m in messages:
         if isinstance(m, dict) and m.get("role") == "assistant":
             item = dict(m)
-            if "reasoning_content" not in item:
-                if item.get("reasoning"):
-                    item["reasoning_content"] = str(item["reasoning"])
-                else:
-                    item["reasoning_content"] = ""
+            rc = item.get("reasoning_content")
+            if not isinstance(rc, str):
+                # Non-string (null/number/absent) counts as missing, matching
+                # the official `typeof !== "string"` check.
+                legacy = item.get("reasoning")
+                rc = legacy if isinstance(legacy, str) else ""
+                item["reasoning_content"] = rc
+            # Mirror onto `reasoning` with a non-empty value: upstream rejects
+            # an empty/absent reasoning, while a whitespace placeholder passes
+            # its length check and carries no model-visible semantics.
+            existing = item.get("reasoning")
+            if not (isinstance(existing, str) and existing):
+                item["reasoning"] = rc if rc else " "
             out.append(item)
         else:
             out.append(m)
@@ -2158,9 +2185,25 @@ def translate_max_completion_tokens(obj):
         pass
 def build_upstream_body(payload):
     model = payload.get("model") or ""
+    # Resolve the effective thinking state before the backfill below: while
+    # thinking is on, the upstream requires reasoning_content on every
+    # assistant message, whether or not the client kept a reasoning trace.
+    thinking = payload.get("thinking")
+    thinking_type = ""
+    if isinstance(thinking, dict):
+        thinking_type = str(thinking.get("type") or "").strip().lower()
+    effort = payload.get("reasoning_effort") or payload.get("reasoningEffort")
+    thinking_enabled = False
+    if str(model).lower().startswith("deepseek"):
+        if thinking_type == "enabled":
+            thinking_enabled = True
+        elif thinking_type != "disabled" and str(effort or "").strip().lower() != "none":
+            thinking_enabled = True
     messages = normalize_roles(payload.get("messages") or [])
     messages = sanitize_messages(messages)
-    messages = backfill_reasoning_content(messages, model)
+    messages = backfill_reasoning_content(
+        messages, model, thinking_enabled=thinking_enabled
+    )
     if not messages or (messages[0].get("role") != "system"):
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
     body = dict(payload)

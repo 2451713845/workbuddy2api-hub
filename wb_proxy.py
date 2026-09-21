@@ -4330,7 +4330,7 @@ class Handler(BaseHTTPRequestHandler):
             # "keep what is stored" for that row rather than "clear it".
             existing = {entry.get("id"): entry for entry in configured_keys()}
             cleaned = []
-            for index, item in enumerate(raw):
+            for item in raw:
                 if not isinstance(item, dict):
                     return self._error(400, "each api key must be an object",
                                        "invalid_request_error")
@@ -4338,8 +4338,10 @@ class Handler(BaseHTTPRequestHandler):
                 value = str(item.get("key") or "").strip()
                 if not value and entry_id and entry_id in existing:
                     value = existing[entry_id].get("key") or ""
-                if not entry_id:
-                    entry_id = "k%d" % index
+                # A new row keeps an empty id here; wb_settings mints a random
+                # one on write. Deriving it from the row's position reused ids
+                # of rows deleted earlier, and two rows sharing an id made
+                # /settings/reveal answer with the wrong key.
                 if value and len(value) < 4:
                     return self._error(400, "api key must be at least 4 characters",
                                        "invalid_request_error")

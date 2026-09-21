@@ -5651,7 +5651,7 @@ class Handler(BaseHTTPRequestHandler):
                          account=account.uid)
             return self._error(502, f"upstream stream error: {exc}")
         wall = int((time.time() - t_start) * 1000)
-        result = chat_to_response(chat_obj, model, custom_names, request_meta, ns_map)
+        result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map)
         record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall, fp=fp,
                      account=account.uid)
         return self._json(200, result)

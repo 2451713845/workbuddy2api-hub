@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.4.9-2496ED?style=flat-square" alt="Version 1.4.9"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.5.0-2496ED?style=flat-square" alt="Version 1.5.0"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -203,6 +203,16 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、版本更新记录 (Changelog)
+
+### v1.5.0
+
+- **Codex App namespace 工具支持**（PR #33，感谢 [@Cekxri](https://github.com/Cekxri)）：新版 Codex App 把 MCP／插件／子代理的工具包在 `namespace` 里声明，此前原样转发导致上游看不懂、工具全部消失，回程的 `function_call` 又缺 `namespace` 字段，客户端找不到执行器。现展开 namespace 后转发，并在回程补上 namespace；同时支持 `agent_message`（子代理）与无 `call_id` 的 `function_call_output`。
+- **出站身分标头修正**（PR #33）：原 `X-Product: WorkBuddy` / `X-IDE-Type: WorkBuddy` 是自创组合，官方为 `X-Product: SaaS` 且区分 CLI 与 WorkBuddy 两套身分（各自对应不同端点）。新增 `wb_identity.py` 定义两套身分，并在看板账号行提供 CLI/WB 切换。默认仍为 CLI，行为与旧版一致。
+- **本地 `web_search` / `web_fetch`**（PR #33）：客户端声明时由网关代跑（DuckDuckGo HTML，纯标准库）。
+- **DeepSeek 多轮 `reasoning_content` 回填补全**（PR #36，感谢 [@ayeaaaa](https://github.com/ayeaaaa)）：补上官方 `ReasoningContentBackfillRule` 的 `thinkingEnabled` 半边——只要 thinking 开启就回填，不再只依赖历史里已有推理痕迹；同时把字段镜像到 `reasoning` 且保证非空（上游校验 `len(reasoning) > 0`），非字符串值按缺失处理。与 v1.4.9 的档位注入互补：那个让上游真的返回思维链，这个让丢失思维链的历史不被拒。
+- **看板移动端布局**（PR #37，感谢 [@ayeaaaa](https://github.com/ayeaaaa)）：新增 `≤640px` 手机布局（表格转卡片、指标卡两列换行、触控目标 ≥40px）与 `≤400px` 小屏微调；`>860px` 桌面布局完全不变。
+- **API Key 行 id 唯一化**（PR #40，感谢 [@wiggins-kong](https://github.com/wiggins-kong)）：新行 id 原本由列表下标生成，删除一行后再新增会复用仍在行的 id，两行同 id 时 `/settings/reveal` 只返回第一个匹配，导致第二行的复制按钮拿到别人的 key。现改为写入时生成唯一 id，重复者带数字后缀（`k6` / `k6-2`）以便 reveal 仍能解析；读取时也去重，历史文件无需等下次保存即自愈。
+- **修复 `/v1/responses` 非流式路径崩溃**：PR #33 在该路径引用了未定义的 `ns_map`（函数形参名为 `namespace_map`），任何非流式 Responses 请求都会在拿到上游响应后抛 `NameError`、连接被直接断开。实测发现并修复，流式路径不受影响。
 
 ### v1.4.9
 

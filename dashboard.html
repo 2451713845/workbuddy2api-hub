@@ -595,7 +595,7 @@ a:hover{text-decoration:underline}
     <!-- 顶层核心 KPI 弹性看板 -->
     <div id="analyticsKpiCards" style="margin-bottom:20px">
       <div class="card think">
-        <div class="k">今日消耗 Token</div>
+        <div class="k" id="kpiRangeTokenTitle">今日消耗 Token</div>
         <div class="v" id="kpiTodayTokens">0</div>
         <div class="s" id="kpiTodayTokensDetail">输入 0 / 输出 0 / 思考 0</div>
       </div>
@@ -622,13 +622,49 @@ a:hover{text-decoration:underline}
     </div>
 
     <!-- 表格 1：各账号用量透视与各模型消耗明细 -->
-    
+    <section>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <h2 style="margin:0">各账号用量透视与模型消耗分布 <em id="analyticsAcctCount"></em></h2>
+        <div style="font-size:12px;color:var(--dim)">支持查看各账号的总消耗及调用的每个具体模型细分占比</div>
+      </div>
+      <div style="overflow-x:auto">
+        <table id="analyticsAccountTable" class="data-cards">
+          <thead>
+            <tr>
+              <th style="text-align:left">账号 (昵称 / UID)</th>
+              <th>所属区域</th>
+              <th>剩余积分 / 额度</th>
+              <th>请求次数</th>
+              <th>消耗总 Token</th>
+              <th style="text-align:left">调用的模型分布明细 (请求数 · 消耗)</th>
+            </tr>
+          </thead>
+          <tbody id="analyticsAccountTbody"></tbody>
+        </table>
+      </div>
+    </section>
 
     <!-- 表格 2：模型用量透视与响应指标 -->
     <section>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
       <h2 style="margin:0">模型性能指标与用量一览 <em id="matrixModelCount"></em></h2>
-      <div style="font-size:12px;color:var(--dim)">融合首字延迟 (TTFT)、生成速度、耗时与 Token 统计　·　含国际版与国内版全部渠道</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">
+          账号
+          <select id="matrixAcctFilter" class="slot-select" style="min-width:150px"
+                  onchange="matrixAcctFilter = this.value; if(cachedMatrixData) renderPerfMatrix(cachedMatrixData.usage, cachedMatrixData.perf);">
+            <option value="">全部账号</option>
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">
+          模型
+          <select id="matrixModelFilter" class="slot-select" style="min-width:170px"
+                  onchange="matrixModelFilter = this.value; if(cachedMatrixData) renderPerfMatrix(cachedMatrixData.usage, cachedMatrixData.perf);">
+            <option value="">全部模型</option>
+          </select>
+        </label>
+        <span style="font-size:12px;color:var(--dim)">融合首字延迟 (TTFT)、生成速度、耗时与 Token 统计　·　含国际版与国内版全部渠道</span>
+      </div>
     </div>
     <div id="perfMatrix" style="overflow-x:auto"></div>
     <div class="legend" style="margin-top:12px">
@@ -2207,6 +2243,9 @@ const MAIN_TAB_STORE = 'wb-proxy-main-tab';
 let currentMainTab = 'gateway';
 let analyticsRange = 'today';
 let cachedAnalyticsData = null;
+let cachedMatrixData = null;
+let matrixAcctFilter = '';
+let matrixModelFilter = '';
 // Model allowlist for the combined matrix; filled by loadAnalyticsMatrix().
 let MATRIX_MODELS = new Set();
 
@@ -3183,6 +3222,11 @@ function setAnalyticsRange(range){
   } else {
     loadAnalytics();
   }
+  // The model matrix reads /usage and /usage/perf directly, so it has to be
+  // refetched: without this the table kept showing all-time figures while the
+  // page said "today", which is the inconsistency the range buttons were
+  // meant to remove.
+  loadAnalyticsMatrix();
 }
 
 /* 模型性能指标与用量一览
@@ -3192,17 +3236,66 @@ function setAnalyticsRange(range){
  * models this page exists to compare. */
 async function loadAnalyticsMatrix(){
   try{
+    const q = '?realm=all&range=' + encodeURIComponent(analyticsRange || 'today');
     const [usage, perf, models] = await Promise.all([
-      getJSON('/usage?realm=all'),
-      getJSON('/usage/perf?realm=all'),
+      getJSON('/usage' + q),
+      getJSON('/usage/perf' + q),
       // The catalog is only a display filter, so a failure here must not
       // blank the table; null keeps the previous allowlist.
       getJSON('/v1/models?realm=all').catch(() => null),
     ]);
     if(models && models.data) MATRIX_MODELS = new Set(models.data.map(m => m.id));
+    cachedMatrixData = { usage: usage, perf: perf };
+    fillMatrixFilters(usage);
     renderPerfMatrix(usage, perf);
   }catch(err){
     if(!isAuthError(err)) console.error('loadAnalyticsMatrix failed:', err);
+  }
+}
+
+/* Rebuild the two matrix filter dropdowns from the payload just fetched.
+ *
+ * Options are derived from the data rather than from the account pool, so the
+ * list only offers accounts and models that actually have rows - a filter that
+ * can only ever yield an empty table is worse than no filter. A previously
+ * chosen value is kept when it is still present, and cleared when it is not,
+ * which is what happens when the range flips and an account drops out.
+ */
+function fillMatrixFilters(usage){
+  const acctSel = document.getElementById('matrixAcctFilter');
+  const modelSel = document.getElementById('matrixModelFilter');
+  const names = (usage && usage.accounts_map) || {};
+  const modelCount = {};
+  Object.keys((usage && usage.by_model) || {}).forEach(id => {
+    if(!id.endsWith('-model')) modelCount[id] = (usage.by_model[id] || {}).requests || 0;
+  });
+  if(acctSel){
+    const seen = new Set();
+    Object.values((usage && usage.by_model_acct) || {}).forEach(byRealm => {
+      Object.values(byRealm || {}).forEach(byAcct => {
+        Object.keys(byAcct || {}).forEach(uid => {
+          if(uid && uid !== '(unattributed)') seen.add(uid);
+        });
+      });
+    });
+    const opts = Array.from(seen).sort((a, b) => {
+      const na = (names[a] || {}).nickname || a;
+      const nb = (names[b] || {}).nickname || b;
+      return na.localeCompare(nb);
+    });
+    if(matrixAcctFilter && !seen.has(matrixAcctFilter)) matrixAcctFilter = '';
+    acctSel.innerHTML = '<option value="">全部账号</option>' + opts.map(uid => {
+      const info = names[uid] || {};
+      const label = (info.nickname || uid.slice(0, 8)) + ' (' + uid.slice(0, 6) + ')';
+      return '<option value="' + esc(uid) + '"' + (uid === matrixAcctFilter ? ' selected' : '') + '>' + esc(label) + '</option>';
+    }).join('');
+  }
+  if(modelSel){
+    const ids = Object.keys(modelCount).filter(id => modelCount[id] > 0).sort();
+    if(matrixModelFilter && ids.indexOf(matrixModelFilter) === -1) matrixModelFilter = '';
+    modelSel.innerHTML = '<option value="">全部模型</option>' + ids.map(id =>
+      '<option value="' + esc(id) + '"' + (id === matrixModelFilter ? ' selected' : '') + '>' + esc(id) + '</option>'
+    ).join('');
   }
 }
 
@@ -3240,6 +3333,7 @@ function renderPerfMatrix(usage, perf){
   Object.values(modelMap)
     .sort((a,b) => (b.total_tokens || b.requests) - (a.total_tokens || a.requests))
     .forEach(m => {
+      if(matrixModelFilter && m.id !== matrixModelFilter) return;
       const per = realmMap[m.id];
       const realms = per ? Object.keys(per).filter(r => (per[r].requests || 0) > 0) : [];
       if(realms.length > 1){
@@ -3263,17 +3357,20 @@ function renderPerfMatrix(usage, perf){
                  (p.requests || 0) > 0 || (p.errors || 0) > 0 ||
                  (p.client_aborted || 0) > 0;
         });
-        if(keys.length){
-          keys.sort((x, y) =>
+        // The account filter narrows the rows themselves, not just their
+        // visibility, so the summary below always matches what is shown.
+        const shown = matrixAcctFilter ? keys.filter(a => a === matrixAcctFilter) : keys;
+        if(shown.length){
+          shown.sort((x, y) =>
             ((accts[y] || {}).total_tokens || 0) - ((accts[x] || {}).total_tokens || 0));
-          keys.forEach(a => {
+          shown.forEach(a => {
             // Tokens come from usage; a failure-only bucket has none.
             const u = accts[a] || {requests: 0, prompt_tokens: 0, completion_tokens: 0,
                                    reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0};
             parts.push({ stat: u, realm: r, acct: a,
                          accts: { [a]: u.requests || 0 } });
           });
-        } else {
+        } else if(!matrixAcctFilter){
           // No per-account data for this exit (an older log, say): fall back
           // to the exit totals rather than dropping the row.
           const fallback = per ? per[r] : m;
@@ -3292,29 +3389,69 @@ function renderPerfMatrix(usage, perf){
   const countEm = document.getElementById("matrixModelCount");
   if(countEm){
     const nModels = new Set(rowsData.map(r => r.id)).size;
+    const anyFilter = !!(matrixAcctFilter || matrixModelFilter);
     countEm.textContent = nModels ? ("(有调用的模型: " + nModels +
-      " 个·共 " + rowsData.length + " 行明细)") : "";
+      " 个·共 " + rowsData.length + " 行明细" + (anyFilter ? " · 已筛选" : "") + ")") : "";
   }
 
   if(!rowsData.length){
     matrixEl.innerHTML = '<div class="empty">当前版本暂无模型请求或性能数据</div>';
   } else {
     const maxTok = Math.max(1, ...rowsData.map(m => m.total_tokens));
-    // 汇总行 (Total / All Models)
-    const totTtft = perf.ttft_ms ? (ms(perf.ttft_ms.avg) + " (P50 " + ms(perf.ttft_ms.p50) + ")") : "-";
-    const totTps = perf.tokens_per_sec ? (perf.tokens_per_sec.avg.toFixed(1) + " tok/s") : "-";
-    const totWall = perf.wall_ms ? ms(perf.wall_ms.avg) : "-";
-    const totCache = perf.cache_hit_pct ? (perf.cache_hit_pct.avg.toFixed(1) + "%") : "-";
+    /* Summary row (Total / All Models).
+     *
+     * With no filter this is the endpoint-wide figure, as before. With a
+     * filter active it is recomputed from the visible rows instead, because a
+     * total that ignores the filter contradicts the rows directly beneath it -
+     * the exact confusion the filter is meant to remove. Latency, speed and
+     * wall time are averages over the filtered rows' own sample counts, so a
+     * barely-used row cannot outvote a heavily-used one.
+     */
+    const filtering = !!(matrixAcctFilter || matrixModelFilter);
+    let sumReq, sumErr, sumTok, sumP, sumC, sumR, totTtft, totTps, totWall, totCache;
+    if(!filtering){
+      sumReq = usage.requests; sumErr = perf.errors; sumTok = usage.total_tokens;
+      sumP = usage.prompt_tokens; sumC = usage.completion_tokens; sumR = usage.reasoning_tokens;
+      totTtft = perf.ttft_ms ? (ms(perf.ttft_ms.avg) + " (P50 " + ms(perf.ttft_ms.p50) + ")") : "-";
+      totTps = perf.tokens_per_sec ? (perf.tokens_per_sec.avg.toFixed(1) + " tok/s") : "-";
+      totWall = perf.wall_ms ? ms(perf.wall_ms.avg) : "-";
+      totCache = perf.cache_hit_pct ? (perf.cache_hit_pct.avg.toFixed(1) + "%") : "-";
+    } else {
+      sumReq = 0; sumErr = 0; sumTok = 0; sumP = 0; sumC = 0; sumR = 0;
+      let ttftW = 0, ttftN = 0, tpsW = 0, tpsN = 0, wallW = 0, wallN = 0, cacheW = 0, cacheN = 0;
+      rowsData.forEach(m => {
+        sumReq += m.requests || 0;
+        sumTok += m.total_tokens || 0;
+        sumP += m.prompt_tokens || 0;
+        sumC += m.completion_tokens || 0;
+        sumR += m.reasoning_tokens || 0;
+        const mp = ((perf && perf.by_model_realm) || {})[m.id] || {};
+        const mpAcctAll = ((perf && perf.by_model_acct) || {})[m.id] || {};
+        const mpRealm = m.realm ? (mp[m.realm] || null) : null;
+        const mpAcct = (m.realm && m.acct && mpAcctAll[m.realm])
+          ? (mpAcctAll[m.realm][m.acct] || null) : null;
+        const e = mpAcct || mpRealm || bmPerf[m.id] || {};
+        sumErr += e.errors || 0;
+        if(e.ttft_ms && e.ttft_ms.samples){ ttftW += e.ttft_ms.avg * e.ttft_ms.samples; ttftN += e.ttft_ms.samples; }
+        if(e.tokens_per_sec && e.tokens_per_sec.samples){ tpsW += e.tokens_per_sec.avg * e.tokens_per_sec.samples; tpsN += e.tokens_per_sec.samples; }
+        if(e.wall_ms && e.wall_ms.samples){ wallW += e.wall_ms.avg * e.wall_ms.samples; wallN += e.wall_ms.samples; }
+        if(e.cache_hit_pct && e.cache_hit_pct.samples){ cacheW += e.cache_hit_pct.avg * e.cache_hit_pct.samples; cacheN += e.cache_hit_pct.samples; }
+      });
+      totTtft = ttftN ? ms(ttftW / ttftN) : "-";
+      totTps = tpsN ? (((tpsW / tpsN)).toFixed(1) + " tok/s") : "-";
+      totWall = wallN ? ms(wallW / wallN) : "-";
+      totCache = cacheN ? ((cacheW / cacheN).toFixed(1) + "%") : "-";
+    }
     const summaryRow = '<tr style="background:rgba(37,99,235,.06);font-weight:600">'
-      + '<td style="text-align:left" data-label="模型"><b>全部模型合计 (Total)</b></td>'
+      + '<td style="text-align:left" data-label="模型"><b>' + (filtering ? '筛选结果合计 (Filtered)' : '全部模型合计 (Total)') + '</b></td>'
       + '<td style="text-align:center" data-label="区域"><span style="color:var(--dim)">—</span></td>'
-      + '<td style="text-align:left" data-label="账号"><span style="color:var(--dim)">全部账号</span></td>'
-      + '<td data-label="请求数">' + fmt(usage.requests) + '</td>'
-      + '<td data-label="失败">' + (perf.errors
-          ? ('<span style="color:var(--bad)">' + fmt(perf.errors) + '</span>')
+      + '<td style="text-align:left" data-label="账号"><span style="color:var(--dim)">' + (filtering ? '已筛选' : '全部账号') + '</span></td>'
+      + '<td data-label="请求数">' + fmt(sumReq) + '</td>'
+      + '<td data-label="失败">' + (sumErr
+          ? ('<span style="color:var(--bad)">' + fmt(sumErr) + '</span>')
           : '<span style="color:var(--dim)">0</span>') + '</td>'
-      + '<td data-label="总 Token"><b style="color:var(--accent)">' + fmt(usage.total_tokens) + '</b></td>'
-      + '<td class="triple" data-label="输入 / 输出 / 思考">' + tripleTokens(usage.prompt_tokens, usage.completion_tokens, usage.reasoning_tokens) + '</td>'
+      + '<td data-label="总 Token"><b style="color:var(--accent)">' + fmt(sumTok) + '</b></td>'
+      + '<td class="triple" data-label="输入 / 输出 / 思考">' + tripleTokens(sumP, sumC, sumR) + '</td>'
       + '<td data-label="首字延迟">' + totTtft + '</td>'
       + '<td data-label="生成速度"><b style="color:var(--accent2)">' + totTps + '</b></td>'
       + '<td data-label="端到端耗时">' + totWall + '</td>'
@@ -3432,23 +3569,34 @@ function renderAnalytics(data){
   const sumAll = data.summary.all_time || {};
   const currentSum = isToday ? sumToday : sumAll;
 
-  // KPI 1: 今日消耗 Token
+  // KPI 1: follows the range selector. It used to be hard-wired to the Today
+  // bucket while the card next to it was hard-wired to All Time, so the range
+  // buttons appeared to do nothing to the headline number.
   const elTodayTok = document.getElementById('kpiTodayTokens');
   const elTodayDetail = document.getElementById('kpiTodayTokensDetail');
-  if(elTodayTok) elTodayTok.textContent = fmt(sumToday.total_tokens || 0);
+  const elTodayTitle = document.getElementById('kpiRangeTokenTitle');
+  if(elTodayTitle) elTodayTitle.textContent = isToday ? '今日消耗 Token' : '全部历史消耗 Token';
+  if(elTodayTok) elTodayTok.textContent = fmt(currentSum.total_tokens || 0);
   if(elTodayDetail) elTodayDetail.innerHTML =
-    '<span style="color:var(--accent)">输入 ' + fmt(sumToday.prompt_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmt(sumToday.completion_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(sumToday.reasoning_tokens || 0) + '</span>';
+    '<span style="color:var(--accent)">输入 ' + fmt(currentSum.prompt_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmt(currentSum.completion_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(currentSum.reasoning_tokens || 0) + '</span>';
 
-  // KPI 2: 累计消耗 Token
+  // KPI 2: always the all-time figure, as the stable reference next to KPI 1.
   const elTotalTok = document.getElementById('kpiTotalTokens');
   const elTotalDetail = document.getElementById('kpiTotalTokensDetail');
   if(elTotalTok) elTotalTok.textContent = fmt(sumAll.total_tokens || 0);
   if(elTotalDetail) elTotalDetail.innerHTML =
     '<span style="color:var(--accent)">输入 ' + fmt(sumAll.prompt_tokens || 0) + '</span>' +
     ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmt(sumAll.completion_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(sumAll.reasoning_tokens || 0) + '</span>';
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(sumAll.reasoning_tokens || 0) + '</span>' +
+    // Two cards showing the same number reads as a broken counter rather than
+    // as "there is nothing older to show", so say which case it is.
+    ((!isToday && (sumAll.total_tokens || 0) > 0)
+      ? '<br><span style="color:var(--dim);font-size:11px">当前为「全部历史」视图，两张卡片口径相同</span>'
+      : ((isToday && (sumAll.total_tokens || 0) === (sumToday.total_tokens || 0) && (sumAll.total_tokens || 0) > 0)
+        ? '<br><span style="color:var(--dim);font-size:11px">与今日相同：日志中暂无更早的数据</span>'
+        : ''));
 
   // KPI 3: 网关平均生成速度
   const elAvgSpeed = document.getElementById('kpiAvgSpeed');

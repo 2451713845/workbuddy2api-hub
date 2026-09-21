@@ -288,6 +288,24 @@ def realm_scope(realm, fallback=None):
     if realm == "all":
         return None
     return realm or fallback
+
+
+def range_since(value):
+    """Epoch cutoff for the dashboard's time-range selector, or None for "all".
+
+    "today" is local midnight rather than a rolling 24 hours, matching the
+    definition the analytics payload has always used for its Today figures;
+    two different meanings of "today" on one page would be worse than either.
+
+    Anything unrecognised - including "all", an empty value and a client that
+    omits the parameter entirely - disables the filter, so existing callers
+    keep receiving the full history they used to get.
+    """
+    v = str(value or "").strip().lower()
+    if v in ("today", "day", "1d"):
+        now = time.localtime()
+        return time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
+    return None
 def row_outcome(row):
     """Terminal state of a request row.
 
@@ -449,7 +467,7 @@ _perf_cache = {}
 _perf_lock = threading.Lock()
 
 
-def perf_stats(sample=5000, realm=None, ttl=None):
+def perf_stats(sample=5000, realm=None, ttl=None, range=None):
     """Cached wrapper: parsing thousands of rows is CPU-heavy, and the
     dashboard polls this endpoint every few seconds.
 
@@ -457,21 +475,22 @@ def perf_stats(sample=5000, realm=None, ttl=None):
     scan of the log."""
     ttl = _STATS_TTL if ttl is None else ttl
     r = realm_scope(realm, CURRENT_REALM)
+    since = range_since(range)
     try:
-        key = (int(sample), r or "all")
+        key = (int(sample), r or "all", "today" if since else "all")
     except Exception:
-        key = (5000, r or "all")
+        key = (5000, r or "all", "today" if since else "all")
     now = time.time()
     with _perf_lock:
         hit = _perf_cache.get(key)
         if hit is not None and (now - hit[0]) < ttl:
             return hit[1]
-        data = _perf_stats_uncached(sample, r)
+        data = _perf_stats_uncached(sample, r, since=since)
         _perf_cache[key] = (time.time(), data)
     return data
 
 
-def _perf_stats_uncached(sample=5000, realm=None):
+def _perf_stats_uncached(sample=5000, realm=None, since=None):
     """Latency percentiles + derived rates, computed from the JSONL log."""
     ttfts, gens, walls, rates, hits, tok_rates = [], [], [], [], [], []
     total = ok = err = aborted = 0
@@ -494,6 +513,10 @@ def _perf_stats_uncached(sample=5000, realm=None):
         except Exception:
             continue
         if realm and not row_matches_realm(r, realm):
+            continue
+        # Same window as the usage snapshot, so the latency and speed columns
+        # of the matrix describe the same requests as its token columns.
+        if since and (r.get("at") or 0) < since:
             continue
         total += 1
         outcome = row_outcome(r)
@@ -643,7 +666,7 @@ _snap_lock = threading.Lock()
 _STATS_TTL = float(os.environ.get("WB_STATS_TTL", 15))
 
 
-def usage_snapshot(realm=None, ttl=None):
+def usage_snapshot(realm=None, ttl=None, range=None):
     """Cached wrapper: the dashboard polls this every few seconds.
 
     The rebuild happens while holding the lock on purpose. Releasing it first
@@ -653,17 +676,19 @@ def usage_snapshot(realm=None, ttl=None):
     """
     ttl = _STATS_TTL if ttl is None else ttl
     r = realm_scope(realm, CURRENT_REALM)
+    since = range_since(range)
     now = time.time()
     with _snap_lock:
-        hit = _snap_cache.get(r or "all")
+        key = "%s|%s" % (r or "all", "today" if since else "all")
+        hit = _snap_cache.get(key)
         if hit is not None and (now - hit[0]) < ttl:
             return hit[1]
-        data = _usage_snapshot_uncached(r)
-        _snap_cache[r or "all"] = (time.time(), data)
+        data = _usage_snapshot_uncached(r, since=since)
+        _snap_cache[key] = (time.time(), data)
     return data
 
 
-def _usage_snapshot_uncached(realm=None):
+def _usage_snapshot_uncached(realm=None, since=None):
     # None means every realm; usage_snapshot() has already mapped "all"
     # onto it, so the filter below is simply skipped.
     r = realm
@@ -681,6 +706,11 @@ def _usage_snapshot_uncached(realm=None):
                 except Exception:
                     continue
                 if r and not row_matches_realm(row, r):
+                    continue
+                # The window is applied before the request is counted, so every
+                # total below - requests, tokens, per-model and per-account
+                # breakdowns - describes the same slice of the log.
+                if since and (row.get("at") or 0) < since:
                     continue
                 outcome = row_outcome(row)
                 if outcome != "completed":
@@ -1291,7 +1321,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.5.0",
+        "version": "1.5.1",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -4119,7 +4149,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.5.0"
+    server_version = "wb-proxy/1.5.1"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -4590,7 +4620,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         req_realm = query.get('realm', [None])[0] or self.headers.get('X-Realm') or CURRENT_REALM
-        return self._json(200, usage_snapshot(realm=req_realm))
+        req_range = query.get('range', [None])[0]
+        return self._json(200, usage_snapshot(realm=req_realm, range=req_range))
 
     def _get_usage_recent(self, query):
         if not self._authorized():
@@ -4686,7 +4717,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             sample = 5000
         req_realm = query.get('realm', [None])[0] or self.headers.get('X-Realm') or CURRENT_REALM
-        return self._json(200, perf_stats(sample, realm=req_realm))
+        req_range = query.get('range', [None])[0]
+        return self._json(200, perf_stats(sample, realm=req_realm, range=req_range))
 
     def _get_tasks(self, query):
         if not self._authorized():

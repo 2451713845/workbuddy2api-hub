@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.5.0-2496ED?style=flat-square" alt="Version 1.5.0"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.5.1-2496ED?style=flat-square" alt="Version 1.5.1"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -203,6 +203,14 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、版本更新记录 (Changelog)
+
+### v1.5.1
+
+- **数据看板「今日 / 全部历史」口径修正**（issue #39）：切换按钮此前只影响部分指标卡，第一张卡被写死为今日、第二张写死为累计，因此按钮看起来「不起作用」；而当日志中只有当天的数据时，两张卡天然显示同一个数字，看起来就像「今天和全部一样」。现在首张卡跟随切换（标题同步变为「今日消耗 Token」/「全部历史消耗 Token」），第二张固定为累计作为对照；当两者数值相同时会明确标注原因（日志中暂无更早数据 / 当前为全部历史视图）。
+- **模型性能表跟随时间范围**：该表此前直接读取全量数据，与页面顶部的时间范围无关。`/usage` 与 `/usage/perf` 新增 `range` 参数（`range=today` 取本地零点起算，与「今日」指标的既有口径一致；缺省或未知值不过滤，既有调用方行为不变），表格数据随之切换。
+- **修复账号用量透视表丢失**：`renderAnalytics()` 一直在向 `analyticsAccountTbody` 写入数据，但该表格的标记在一次「移除冗余区块」的改动中被误删，`getElementById` 恒为 `null`，导致整个「各账号用量透视与模型消耗分布」区块从未渲染。已恢复表格并适配移动端卡片布局。
+- **模型性能表新增筛选**（issue #39）：表格标题栏新增「账号」「模型」两个下拉，可单独或组合筛选。汇总行会随筛选重算（标签变为「筛选结果合计」，延迟/速度按各自样本数加权平均），不会出现合计与明细互相矛盾；下拉选项由当前数据动态生成，某项在切换范围后消失时会自动清除该筛选，避免停留在必然空结果的状态。
+- **新增测试**：`_test_usage_range.py`（22 项断言，时间范围过滤语义、缓存隔离、与 analytics 口径一致性）与 `_test_matrix_filters.js`（19 项断言，以 Node 驱动真实 dashboard 代码验证筛选、汇总重算与失效应答）。全部测试合计 290 项断言通过。
 
 ### v1.5.0
 

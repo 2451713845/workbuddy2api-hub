@@ -167,22 +167,53 @@ def _clean_key_entry(entry):
     }
 
 
+def _unique_key_id(candidate, used):
+    """Return `candidate`, or a variant that is not already in `used`.
+
+    Ids used to be minted from the row's index in the submitted list, so a
+    settings file written by an older build can hold two rows carrying the same
+    id. `/settings/reveal` then answered with whichever row came first, which
+    made the copy button on the other row hand out a different key. Later
+    duplicates get a numeric suffix: the suffix is deterministic, so the id a
+    `/settings` read just returned still resolves on the follow-up reveal.
+    """
+    candidate = str(candidate or "").strip()
+    if candidate and candidate not in used:
+        return candidate
+    if candidate:
+        suffix = 2
+        while True:
+            alt = "%s-%d" % (candidate, suffix)
+            if alt not in used:
+                return alt
+            suffix += 1
+    while True:
+        alt = secrets.token_hex(6)
+        if alt not in used:
+            return alt
+
+
 def api_keys(accounts_dir):
     """Every configured key, newest shape first.
 
     A settings file written by an older build only has the single
     `api_key`/`api_key_set` pair; that is surfaced as one unbound entry so
-    upgrades keep working without a migration step.
+    upgrades keep working without a migration step. Ids are made unique here
+    as well as on write, so a file that already holds a duplicate (and no
+    longer has to be saved before it behaves) reads back as distinct rows.
     """
     data = load(accounts_dir)
     stored = data.get("api_keys")
     if isinstance(stored, list):
         out = []
         seen = set()
+        seen_ids = set()
         for raw in stored:
             entry = _clean_key_entry(raw)
             if entry and entry["key"] not in seen:
                 seen.add(entry["key"])
+                entry["id"] = _unique_key_id(entry["id"], seen_ids)
+                seen_ids.add(entry["id"])
                 out.append(entry)
         return out
 
@@ -204,10 +235,13 @@ def set_api_keys(accounts_dir, keys):
     with _lock:
         cleaned = []
         seen = set()
+        seen_ids = set()
         for raw in keys or []:
             entry = _clean_key_entry(raw)
             if entry and entry["key"] not in seen:
                 seen.add(entry["key"])
+                entry["id"] = _unique_key_id(entry["id"], seen_ids)
+                seen_ids.add(entry["id"])
                 cleaned.append(entry)
         data = load(accounts_dir)
         data["api_keys"] = cleaned

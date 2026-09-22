@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.5.1-2496ED?style=flat-square" alt="Version 1.5.1"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.5.2-2496ED?style=flat-square" alt="Version 1.5.2"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -203,6 +203,12 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、版本更新记录 (Changelog)
+
+### v1.5.2
+
+- **修复 Docker 镜像缺少运行时模块**（PR #41，感谢 [@wiggins-kong](https://github.com/wiggins-kong)）：v1.5.0 新增 `wb_identity.py` 与 `wb_webtools.py` 后，Dockerfile 仍沿用 v1.5.0 之前的显式 COPY 清单，两个模块未进入镜像。容器启动即报 `ModuleNotFoundError: No module named 'wb_identity'`，Docker 部署完全不可用。现改为 `COPY wb_*.py dashboard.html ./`，按既有 `wb_*.py` 命名约定自动纳入，后续新增模块不会再漏。
+
+  > 影响范围：**仅 Docker 部署**。v1.5.0 / v1.5.1 的标签提交与 ghcr 镜像受影响；便携绿色包始终包含全部模块，Windows / macOS 直接运行不受影响。使用 Docker 的用户请升级到本版本。
 
 ### v1.5.1
 

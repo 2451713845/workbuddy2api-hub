@@ -38,7 +38,6 @@ import uuid
 import wb_accounts
 import wb_catalog
 import wb_settings
-import wb_webtools
 import wb_identity
 IS_WINDOWS = os.name == "nt"
 def launcher_hint(port):
@@ -1321,7 +1320,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.5.2",
+        "version": "1.5.3",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -3507,21 +3506,6 @@ def responses_to_chat(payload):
         flat_tools, ns_map = expand_namespace_tools(payload["tools"])
         chat["tools"] = _tools_for_chat(flat_tools)
         chat["_namespace_map"] = ns_map
-    # 客戶端宣告 web_search 時，主動注入 web_search + web_fetch 兩個 function。
-    # WorkBuddy 上游沒有這種服務端工具，所以由反代自己代跑（見 wb_webtools）。
-    if wb_webtools.wants_web_tools(payload.get("tools")):
-        existing = set()
-        for t in chat.get("tools") or []:
-            fn = t.get("function") if isinstance(t, dict) else None
-            nm = (fn or {}).get("name") or (t or {}).get("name")
-            if nm:
-                existing.add(nm)
-        chat.setdefault("tools", [])
-        if wb_webtools.WEB_SEARCH_NAME not in existing:
-            chat["tools"].append(wb_webtools.web_search_tool_def())
-        if wb_webtools.WEB_FETCH_NAME not in existing:
-            chat["tools"].append(wb_webtools.web_fetch_tool_def())
-        chat["_web_tools"] = True
     if payload.get("tool_choice"):
         chat["tool_choice"] = payload["tool_choice"]
     if payload.get("parallel_tool_calls") is not None:
@@ -3636,41 +3620,6 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
     if finish == "length":
         obj["incomplete_details"] = {"reason": "max_output_tokens"}
     return obj
-def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_start):
-    """執行內部 web 工具，把結果餵回模型，回傳新的上游連線。"""
-    convo = holder.get("convo_messages")
-    if convo is None:
-        convo = list(holder.get("base_messages") or [])
-        holder["convo_messages"] = convo
-
-    tool_calls = []
-    for i, c in enumerate(internal_calls):
-        tool_calls.append({
-            "id": "call_web_%d_%d" % (int(t_start * 1000) % 1000000, i),
-            "type": "function",
-            "function": {"name": c["name"], "arguments": c.get("arguments") or "{}"},
-        })
-    convo.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
-
-    for tc in tool_calls:
-        nm = tc["function"]["name"]
-        args = tc["function"]["arguments"]
-        result = wb_webtools.execute_web_tool(nm, args)
-        log("web tool %s -> %d chars" % (nm, len(result or "")), level="INFO")
-        convo.append({
-            "role": "tool",
-            "tool_call_id": tc["id"],
-            "name": nm,
-            "content": result,
-        })
-
-    body = dict(holder.get("base_body") or {})
-    body["messages"] = convo
-    body["stream"] = True
-    return open_upstream(body, session_key=session_key,
-                         target_realm=holder.get("realm"))
-
-
 def stream_responses_events(upstream, model, holder):
     """Yield Responses-API SSE frames translated from chat-completions chunks."""
     resp_id, msg_id, rs_id = _new_id("resp_"), _new_id("msg_"), _new_id("rs_")
@@ -3687,7 +3636,6 @@ def stream_responses_events(upstream, model, holder):
     dsml_tool_calls = []
     custom_names = set(holder.get("custom_names") or ())
     ns_map = holder.get("namespace_map") or {}
-    _internal_calls = {}
     # Echo the request capabilities the client actually sent, same as the
     # non-streaming path; these were hardcoded before.
     meta = holder.get("request_meta") or {}
@@ -3838,12 +3786,6 @@ def stream_responses_events(upstream, model, holder):
                     "output_index": out_idx,
                     "item": fc_item,
                 })
-        if _internal_calls:
-            holder.setdefault("internal_calls", []).extend(
-                {"name": v["name"], "arguments": v["arguments"]}
-                for v in _internal_calls.values()
-            )
-            holder["suppress_completion"] = True
         # 3. Emit message item only if text was emitted OR no other output item exists
         has_other_items = any(o for o in outputs if o)
         if msg_index is not None or full_text or not has_other_items:
@@ -3887,8 +3829,7 @@ def stream_responses_events(upstream, model, holder):
         final = resp_obj(status)
         if finish == "length":
             final["incomplete_details"] = {"reason": "max_output_tokens"}
-        if not holder.get("suppress_completion"):
-            yield ev("response.completed", {"response": final})
+        yield ev("response.completed", {"response": final})
 
     yield ev("response.created", {"response": resp_obj("in_progress")})
     yield ev("response.in_progress", {"response": resp_obj("in_progress")})
@@ -3929,14 +3870,6 @@ def stream_responses_events(upstream, model, holder):
                 fn_name = fn.get("name") or ""
                 fn_args = fn.get("arguments") or ""
                 call_id = tc.get("id") or ""
-                if idx in _internal_calls or (fn_name and wb_webtools.is_internal_tool(fn_name)):
-                    if idx not in _internal_calls:
-                        _internal_calls[idx] = {"name": fn_name, "arguments": ""}
-                    if fn_name:
-                        _internal_calls[idx]["name"] = fn_name
-                    if fn_args:
-                        _internal_calls[idx]["arguments"] += fn_args
-                    continue
                 if idx not in tool_calls_map:
                     out_idx = len(outputs)
                     outputs.append(None)
@@ -4149,7 +4082,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.5.2"
+    server_version = "wb-proxy/1.5.3"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -5527,7 +5460,6 @@ class Handler(BaseHTTPRequestHandler):
         custom_names = custom_tool_names(payload.get("tools"))
         chat_req = responses_to_chat(payload)
         ns_map = chat_req.pop("_namespace_map", None)
-        web_tools_on = bool(chat_req.pop("_web_tools", False))
         # Echo these back on the response object; see chat_to_response.
         request_meta = {
             "tools": payload.get("tools") or [],
@@ -5603,37 +5535,11 @@ class Handler(BaseHTTPRequestHandler):
                   "realm": realm}
         first_ms = None
         try:
-            rounds = 0
-            while True:
-                holder.pop("internal_calls", None)
-                for frame in stream_responses_events(upstream, model, holder):
-                    if first_ms is None:
-                        first_ms = int((time.time() - t_start) * 1000)
-                    self.wfile.write(clean_responses_frame(frame))
-                    self.wfile.flush()
-                internal = holder.get("internal_calls") or []
-                if not internal or rounds >= wb_webtools.MAX_WEB_ROUNDS:
-                    break
-                rounds += 1
-                try:
-                    upstream.close()
-                except Exception:
-                    pass
-                try:
-                    upstream, account = follow_up_with_tool_results(
-                        internal, holder, model, session_key, t_start)
-                except Exception as exc:
-                    log("web tool follow-up failed: %s" % exc, level="WARN")
-                    try:
-                        _p = {"type": "error", "sequence_number": 999999, "code": None,
-                              "message": "web tool follow-up failed: %s" % exc}
-                        _b = json.dumps(_p, ensure_ascii=False)
-                        _fr = ("event: error" + chr(10) + "data: " + _b + chr(10) + chr(10)).encode("utf-8")
-                        self.wfile.write(clean_responses_frame(_fr))
-                        self.wfile.flush()
-                    except Exception:
-                        pass
-                    break
+            for frame in stream_responses_events(upstream, model, holder):
+                if first_ms is None:
+                    first_ms = int((time.time() - t_start) * 1000)
+                self.wfile.write(clean_responses_frame(frame))
+                self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             wall = int((time.time() - t_start) * 1000)
             record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
@@ -5656,17 +5562,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return
-        if holder.get("suppress_completion"):
-            try:
-                _p = {"type": "response.completed", "sequence_number": 1000000,
-                      "response": {"id": "resp_wrapup", "object": "response",
-                                   "status": "completed", "output": []}}
-                _b = json.dumps(_p, ensure_ascii=False)
-                _fr = ("event: response.completed" + chr(10) + "data: " + _b + chr(10) + chr(10)).encode("utf-8")
-                self.wfile.write(clean_responses_frame(_fr))
-                self.wfile.flush()
-            except Exception:
-                pass
         wall = int((time.time() - t_start) * 1000)
         record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
                      ttft_ms=first_ms,

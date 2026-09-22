@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.5.2-2496ED?style=flat-square" alt="Version 1.5.2"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.5.3-2496ED?style=flat-square" alt="Version 1.5.3"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -203,6 +203,14 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、版本更新记录 (Changelog)
+
+### v1.5.3
+
+- **移除网关内置的 `web_search` / `web_fetch` 代跑**（修复 issue #43）：v1.5.0 曾让网关在客户端声明这两个工具时自行注入定义、拦截调用、在本地执行搜索并把结果喂回模型。该实现有三个缺陷：参数名只认 `query`（模型若传 `queries` 数组会被判成"查询为空"）、客户端原有的声明未被去重导致工具被重复下发、以及内部循环耗尽后发出一条合成的 `resp_wrapup`（`status=completed`、`output=[]`）——把一次工具失败伪装成"回答正常结束"，用户看到的是回答说到一半突然停住。
+
+  实测确认**上游本来就没有服务端 `web_search` 能力**：直接向上游声明 `{"type":"web_search"}` / `web_search_preview` / `web_fetch`，国际版与国内版的模型反应均与"不声明任何工具"完全一致（都回答"我无法联网搜索"），调用次数为 0。因此不再由网关代跑，**工具声明原样透传**：客户端能拿到自己声明的工具调用，模型在无搜索能力时如实回答"我无法联网"。
+
+  行为变化：声明 `web_search` 的客户端不再获得网关代跑的搜索结果；如果客户端自己声明的是普通函数形式的搜索工具，工具调用现在会正常返回给客户端（此前会被网关吞掉）。
 
 ### v1.5.2
 

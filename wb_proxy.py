@@ -1135,6 +1135,7 @@ def _new_analytics_stat():
             "requests": 0, "errors": 0,
             "prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0,
             "cached_tokens": 0, "total_tokens": 0,
+            "credit": 0.0,
             "ttft_sum": 0.0, "ttft_n": 0,
             "speed_sum": 0.0, "speed_n": 0,
             "elapsed_sum": 0.0, "elapsed_n": 0,
@@ -1183,6 +1184,7 @@ def _scan_usage_log(all_summary, today_summary, acct_map, model_map, today_ts, r
                         stat_obj["reasoning_tokens"] += (r.get("reasoning_tokens") or 0)
                         stat_obj["cached_tokens"] += (r.get("cached_tokens") or 0)
                         stat_obj["total_tokens"] += (r.get("total_tokens") or 0)
+                        stat_obj["credit"] += (r.get("credit") or 0)
                         if r.get("ttft_ms"):
                             stat_obj["ttft_sum"] += r["ttft_ms"]
                             stat_obj["ttft_n"] += 1

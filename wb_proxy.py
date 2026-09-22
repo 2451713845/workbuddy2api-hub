@@ -714,6 +714,14 @@ def _usage_snapshot_uncached(realm=None, since=None):
                 outcome = row_outcome(row)
                 if outcome != "completed":
                     snap["errors"] += 1
+                    # Credit is money already spent: a request that failed
+                    # after the upstream had billed for it still consumed
+                    # credit, so it is summed here exactly like the analytics
+                    # page sums it. Token totals keep the completed-only rule
+                    # this page has always used, and a client abort is skipped
+                    # because its usage block is incomplete.
+                    if outcome != "client_aborted":
+                        snap["credit"] += (row.get("credit") or 0)
                 else:
                     snap["requests"] += 1
                     for k in USAGE_FIELDS:

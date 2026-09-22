@@ -636,7 +636,7 @@ a:hover{text-decoration:underline}
               <th>剩余积分 / 额度</th>
               <th>请求次数</th>
               <th>消耗总 Token</th>
-              <th>消耗积分</th>
+              <th>消耗积分 (全出口)</th>
               <th style="text-align:left">调用的模型分布明细 (请求数 · 消耗)</th>
             </tr>
           </thead>
@@ -2118,7 +2118,7 @@ async function refreshInner(){
   document.getElementById('cards').innerHTML =
     card('可用账号池', activeAccts + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">/ ' + totalAccts + ' 正常</span>', (totalAccts - activeAccts > 0 ? (totalAccts - activeAccts) + ' 个停用' : '全部启用 · 状态健康'), 'accent') +
     card('积分余额', hasCreds ? (fmt(totRemain) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">积分</span>') : '正常可用', subCredit, 'accent2') +
-    card('网关调用量', fmt(t.requests) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">次</span>', '累计消耗 ' + fmt(t.total_tokens) + ' Token · ' + Number(t.credit || 0).toFixed(2) + ' 积分', '') +
+    card('网关调用量', fmt(t.requests) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">次</span>', '本出口累计消耗 ' + fmt(t.total_tokens) + ' Token · ' + Number(t.credit || 0).toFixed(2) + ' 积分', '') +
     card('请求成功率', succStr, errSub, perf.errors ? 'warn' : 'accent2');
 
   const total = recent.total || 0;
@@ -2181,7 +2181,7 @@ async function refreshInner(){
         + '<td style="color:var(--think)" data-label="思考">' + fmt(r.reasoning_tokens) + '</td>'
         + '<td data-label="缓存">' + (r.cache_hit_pct!=null ? r.cache_hit_pct+'%' : '—') + '</td>'
         + '<td data-label="总 token"><b>' + fmt(r.total_tokens) + '</b></td>'
-        + '<td data-label="积分" style="color:var(--accent2)">' + (r.credit ? r.credit.toFixed(2) : '—') + '</td>'
+        + '<td data-label="积分" style="color:var(--accent2)">' + (r.credit != null ? Number(r.credit).toFixed(2) : '—') + '</td>'
       + '</tr>').join('') + '</tbody></table>'
     : '<div class="empty">还没有请求记录</div>';
 }
@@ -3677,7 +3677,7 @@ function renderAnalytics(data){
           + '<td>' + creditStr + '</td>'
           + '<td>' + fmt(st.requests || 0) + '</td>'
           + '<td><b style="color:var(--accent)">' + fmt(st.total_tokens || 0) + '</b></td>'
-          + '<td><b style="color:var(--accent2)">' + (st.credit ? Number(st.credit).toFixed(2) : '0.00') + '</b></td>'
+          + '<td><b style="color:var(--accent2)">' + (st.credit != null ? Number(st.credit).toFixed(2) : '0.00') + '</b></td>'
           + '<td style="text-align:left;max-width:440px">' + pills + '</td>'
           + '</tr>';
       }).join('');

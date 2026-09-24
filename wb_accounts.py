@@ -210,6 +210,9 @@ class Account(object):
         # minted token can be overwritten by a stale snapshot.
         self._refresh_lock = threading.Lock()
         self._save_lock = threading.Lock()
+        # The dashboard snapshots this state while request threads update it.
+        # Keep it separate from _refresh_lock, which spans network requests.
+        self._throttle_lock = threading.Lock()
 
     def to_dict(self):
         return {
@@ -234,8 +237,25 @@ class Account(object):
             "lastCheckin": self.last_checkin,
         }
 
+    def _throttle_snapshot(self, now):
+        """Return one consistent view of account and per-model cooldowns."""
+        with self._throttle_lock:
+            error = self.last_error
+            deadline = self.cooldown_until
+            active = [(model, until) for model, until in self.model_cooldowns.items()
+                      if until > now]
+        active.sort(key=lambda pair: (pair[1], pair[0]))
+        models = [{"model": model, "expiresAt": int(until)} for model, until in active]
+        return error, deadline, models
+
+    def model_cooldowns_snapshot(self):
+        """Active model cooldowns, ordered by recovery time (epoch seconds)."""
+        return self._throttle_snapshot(time.time())[2]
+
     def public(self):
         exp = self.expires_at or jwt_exp(self.access_token)
+        now = time.time()
+        last_error, deadline, models = self._throttle_snapshot(now)
         return {
             "uid": self.uid,
             "nickname": self.nickname or (self.uid[:8] if self.uid else "?"),
@@ -251,9 +271,10 @@ class Account(object):
             "expiresAt": exp,
             "expiresIn": _human_delta(exp - time.time()) if exp else None,
             "hasRefreshToken": bool(self.refresh_token),
-            "lastError": self.last_error,
-            "inCooldown": self.cooldown_until > time.time(),
-            "cooldownFor": round(max(0.0, self.cooldown_until - time.time())) or None,
+            "lastError": last_error,
+            "inCooldown": deadline > now,
+            "cooldownFor": round(max(0.0, deadline - now)) or None,
+            "modelCooldowns": models,
             "addedAt": self.added_at,
             "file": os.path.basename(self.path) if self.path else None,
             "credits": self.credits,
@@ -296,9 +317,7 @@ class Account(object):
     def ready(self, model=None):
         if not self.enabled or not self.access_token:
             return False
-        if self.cooldown_until > time.time():
-            return False
-        if model and self.model_cooldowns.get(model, 0.0) > time.time():
+        if self.throttle_wait(model=model) > 0:
             return False
         exp = self.expires_at or jwt_exp(self.access_token)
         if not exp:
@@ -399,7 +418,7 @@ class Account(object):
 
     def _refresh_locked(self):
         if not self.refresh_token:
-            self.last_error = "no refresh token; sign in again"
+            self._set_last_error("no refresh token; sign in again")
             return False
         cfg = get_realm_config(self.realm)
         url = cfg["chat_upstream"] + REFRESH_PATH
@@ -423,19 +442,20 @@ class Account(object):
             payload = http_json(url, data=b"{}", method="POST", headers=headers, timeout=30,
                                 proxy=self.proxy)
         except Exception as exc:
-            self.last_error = "refresh failed: %s" % exc
+            self._set_last_error("refresh failed: %s" % exc)
             return False
         data = (payload.get("data") or {})
         data = data.get("data") or data
         token = data.get("accessToken")
         if not token:
-            self.last_error = "refresh returned no token (%s)" % payload.get("msg")
+            self._set_last_error("refresh returned no token (%s)" % payload.get("msg"))
             return False
         self.access_token = token
         self.refresh_token = data.get("refreshToken") or self.refresh_token
         self.expires_at = jwt_exp(token) or self.expires_at
-        self.last_error = ""
-        self.cooldown_until = 0
+        with self._throttle_lock:
+            self.last_error = ""
+            self.cooldown_until = 0
         if self.path and os.path.exists(os.path.dirname(self.path)):
             self.save(os.path.dirname(self.path))
         return True
@@ -523,35 +543,43 @@ class Account(object):
             self.save(os.path.dirname(self.path))
         return {"ok": True, "credits": self.credits}
 
+    def _set_last_error(self, message):
+        """Record refresh errors alongside the state shown in the panel."""
+        with self._throttle_lock:
+            self.last_error = str(message)[:200]
+
     def note_error(self, message, cooldown=60, single_account=False, model=None, until=None):
-        self.last_error = str(message)[:200]
-        if model:
-            # Model-scoped throttle: keep the account usable for every other model.
-            wait = max(1.0, float(until) - time.time()) if until else (
-                3.0 if single_account else float(cooldown))
-            self.model_cooldowns[model] = time.time() + wait
-            return
-        actual_cooldown = 3 if single_account else cooldown
-        self.cooldown_until = time.time() + actual_cooldown
+        with self._throttle_lock:
+            self.last_error = str(message)[:200]
+            if model:
+                # Model-scoped throttle: keep the account usable for every other model.
+                wait = max(1.0, float(until) - time.time()) if until else (
+                    3.0 if single_account else float(cooldown))
+                self.model_cooldowns[model] = time.time() + wait
+                return
+            actual_cooldown = 3 if single_account else cooldown
+            self.cooldown_until = time.time() + actual_cooldown
 
     def throttle_wait(self, model=None):
         """Seconds until this account can serve `model` again (0 = right now)."""
         if not self.enabled or not self.access_token:
             return 0.0
         now = time.time()
-        wait = max(0.0, self.cooldown_until - now)
-        if model:
-            wait = max(wait, max(0.0, self.model_cooldowns.get(model, 0.0) - now))
+        with self._throttle_lock:
+            wait = max(0.0, self.cooldown_until - now)
+            if model:
+                wait = max(wait, max(0.0, self.model_cooldowns.get(model, 0.0) - now))
         return wait
 
     def clear_error(self, model=None):
-        if model:
-            self.model_cooldowns.pop(model, None)
-        else:
-            self.model_cooldowns.clear()
-        if self.last_error or self.cooldown_until:
-            self.last_error = ""
-            self.cooldown_until = 0
+        with self._throttle_lock:
+            if model:
+                self.model_cooldowns.pop(model, None)
+            else:
+                self.model_cooldowns.clear()
+            if self.last_error or self.cooldown_until:
+                self.last_error = ""
+                self.cooldown_until = 0
 
 def _human_delta(seconds):
     if seconds is None: return None

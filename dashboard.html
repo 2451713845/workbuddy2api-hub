@@ -1140,8 +1140,6 @@ function renderAvailableModels(){
     const c = (m.credits || '').toString().toLowerCase().replace('x', '');
     if(c === '0.00' || c === '0' || m.id === 'hy3' || m.id === 'hy4-preview-f' || (m.id === 'deepseek-v4.1-flash' && window.VIEW_REALM === 'intl')){
       credBadge = '<span class="badge ok" style="background:rgba(38,187,130,.15);color:#26bb82">限时免费 0.00x</span>';
-    } else if(m.id === 'deepseek-v4.1-flash' && window.VIEW_REALM === 'cn'){
-      credBadge = '<span class="badge" style="background:rgba(255,77,79,.15);color:#ff4d4f;border:1px solid rgba(255,77,79,.3)">独家优惠 0.03x</span>';
     } else if((m.id === 'glm-5.2' || m.id === 'deepseek-v4-pro') && window.VIEW_REALM === 'cn'){
       const raw = m.credits ? (m.credits.startsWith('x') ? m.credits.slice(1) + 'x' : m.credits) : '0.79x';
       credBadge = '<span class="badge s">' + raw + ' <span style="font-size:10px;color:var(--accent)">(夜间0.5x)</span></span>';
@@ -3553,7 +3551,7 @@ function renderPerfMatrix(usage, perf){
         // spans both realms, so the gateway's current exit
         // would mislabel domestic-only models.
         const isIntlOnly = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex', 'gemini-3.5-flash'].includes(m.id);
-        const isCnOnly = ['deepseek-v4-pro', 'glm-5.3-flash', 'glm-5.1', 'glm-5v-turbo', 'kimi-k3-1', 'kimi-k2.8-preview', 'kimi-k2.7', 'minimax-m3'].includes(m.id);
+        const isCnOnly = ['deepseek-v4-pro', 'glm-5.1', 'glm-5v-turbo', 'kimi-k3-1', 'kimi-k2.7', 'minimax-m3'].includes(m.id);
         realmCell = isIntlOnly ? '<span class="realm-badge-intl">国际版</span>'
           : (isCnOnly ? '<span class="realm-badge-cn">国内版</span>'
             : '<span style="color:var(--dim)">—</span>');

@@ -86,6 +86,9 @@ tbody tr:hover{background:rgba(241,245,249,.6)}
 .badge.warn{color:#b45309;background:rgba(245,158,11,.14);border-color:rgba(245,158,11,.35)}
 .badge.bad{color:#b91c1c;background:rgba(239,68,68,.14);border-color:rgba(239,68,68,.35)}
 .badge.mini{padding:1px 6px;font-size:10px}
+.cool-list{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.cool-pill{display:inline-block;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:600;
+  color:#b45309;background:rgba(245,158,11,.14);border:1px solid rgba(245,158,11,.35);white-space:nowrap}
 .empty{color:var(--dim);text-align:center;padding:28px 0;font-size:13px}
 .legend{display:flex;gap:16px;color:var(--dim);font-size:11px;margin-top:12px;flex-wrap:wrap}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
@@ -1540,6 +1543,26 @@ function toast(msg, kind){
 /* ------------------------------- accounts ------------------------------- */
 let USAGE_BY_ACCOUNT = {};
 
+/* The API sends epoch seconds; display the recovery in the browser's local time. */
+function fmtCoolAt(epoch){
+  const seconds = Number(epoch);
+  if(!Number.isFinite(seconds) || seconds <= 0) return '';
+  const d = new Date(seconds * 1000);
+  if(!Number.isFinite(d.getTime())) return '';
+  const two = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate())
+    + ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
+}
+function coolPills(a){
+  const list = a && Array.isArray(a.modelCooldowns) ? a.modelCooldowns : [];
+  const pills = list.map(c => {
+    const at = c && fmtCoolAt(c.expiresAt);
+    return at ? '<span class="cool-pill" title="该账号仅此模型受限；时间为本地时间">'
+      + esc(c.model) + ' · ' + at + ' 恢复</span>' : '';
+  }).filter(Boolean);
+  return pills.length ? '<div class="cool-list">' + pills.join('') + '</div>' : '';
+}
+
 function accountRow(a){
   const realmBadge = a.realm === 'cn'
     ? '<span class="realm-badge-cn">国内版</span>'
@@ -1554,7 +1577,9 @@ function accountRow(a){
               : a.inCooldown ? '<span class="badge warn">冷却 ' + (a.cooldownFor||0) + 's</span>'
               : a.expiresIn === 'expired' ? '<span class="badge bad">已过期</span>'
               : '<span class="badge ok">可用</span>';
-  const err = a.lastError ? '<div class="hint" style="color:var(--warn);margin:2px 0 0">' + esc(a.lastError) + '</div>' : '';
+  const pills = coolPills(a);
+  const err = a.lastError && !(pills && a.lastError === 'HTTP 429 (model throttled)')
+    ? '<div class="hint" style="color:var(--warn);margin:2px 0 0">' + esc(a.lastError) + '</div>' : '';
   const cred = a.credits;
   const credText = cred ? ('<b style="color:var(--accent2)">' + fmt(cred.remain) + '</b> / ' + fmt(cred.size)) : '<span style="color:var(--dim)">未查询</span>';
   return '<tr>'
@@ -1563,7 +1588,7 @@ function accountRow(a){
     +   '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(a.nickname) + '</div>'
     + '<div class="mono" style="color:var(--dim);font-size:11px">' + esc(a.uid.slice(0,8)) + ' · ' + esc(a.source) + ' · 到期 ' + esc(a.expiresIn || '?') + '</div>'
     + (a.machineId ? ('<div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px" title="由账号UID稳定派生的专属设备码，防多号关联风控">设备码: ' + esc(a.machineId.slice(0,14)) + '...</div>') : '')
-    + err + '</td>'
+    + err + pills + '</td>'
     + '<td style="text-align:center" data-label="状态">' + state + '</td>'
     + '<td style="text-align:center" data-label="出口">' + slotSelectHtml(a) + '</td>'
     + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'

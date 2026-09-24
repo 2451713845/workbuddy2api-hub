@@ -2570,8 +2570,13 @@ def _try_switch_product(account, model):
     count = _switch_count(account, model)
     if count >= MAX_PRODUCT_SWITCHES:
         return False
-    current = getattr(account, "product", "cli")
-    target = "workbuddy" if current == "cli" else "cli"
+    current = getattr(account, "product", wb_identity.PRODUCT_DESKTOP)
+    if current == wb_identity.PRODUCT_DESKTOP:
+        target = wb_identity.PRODUCT_VSCODE
+    elif current == wb_identity.PRODUCT_VSCODE:
+        target = wb_identity.PRODUCT_CLI
+    else:
+        target = wb_identity.PRODUCT_DESKTOP
     try:
         changed = account.set_product(target)
     except Exception as exc:
@@ -5077,7 +5082,7 @@ class Handler(BaseHTTPRequestHandler):
         realm = payload.get("realm")
 
         if target not in wb_identity.VALID_PRODUCTS:
-            return self._error(400, "product must be 'cli' or 'workbuddy'",
+            return self._error(400, "product must be 'workbuddy', 'vscode', or 'cli'",
                                "invalid_request_error")
 
         if uid:

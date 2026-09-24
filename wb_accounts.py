@@ -172,15 +172,23 @@ class Account(object):
         self.path = path
         token = str(data.get("accessToken") or "")
         self.uid = str(data.get("uid") or jwt_uid(token))
-        self.nickname = str(data.get("nickname") or "")
+        # The CN desktop build stores its nickname as an encrypted envelope
+        # ({"$wbEncrypted": ...}) rather than plain text. Stringifying that would
+        # paint an entire dictionary into the account row, so anything that is not
+        # a plain string is dropped and the uid prefix is shown instead.
+        raw_nickname = data.get("nickname")
+        if isinstance(raw_nickname, str) and "$wbEncrypted" not in raw_nickname:
+            self.nickname = raw_nickname.strip()
+        else:
+            self.nickname = ""
         self.domain = str(data.get("domain") or "")
         self.realm = str(data.get("realm") or detect_realm_from_token(token, self.domain))
         if not self.domain:
             self.domain = get_realm_config(self.realm)["domain"]
         self.platform = str(data.get("platform") or "CLI")
-        # 出站身分一律以 cli 開局：這是「預設 cli」的實際落點。
-        # 面板手動切換或 429 自動切換只影響這次執行；重啟就回到 cli。
-        self.product = wb_identity.PRODUCT_CLI
+        # 出站身分預設以 WorkBuddy 獨立桌面端 (workbuddy) 開局。
+        # 面板手動切換或 429 自動切換只影響這次執行；重啟就回到預設的 workbuddy 桌面端。
+        self.product = wb_identity.PRODUCT_DESKTOP
         self.saved_product = wb_identity.normalize_product(data.get("product"))
         self.enterprise_id = str(data.get("enterpriseId") or "")
         self.access_token = token

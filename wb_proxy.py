@@ -4531,7 +4531,7 @@ class Handler(BaseHTTPRequestHandler):
             "realm": CURRENT_REALM,
             "accounts": len(POOL.accounts) if POOL else 0,
             "accounts_ready": POOL.count_ready() if POOL else 0,
-            "api_key_required": bool(API_KEY),
+            "api_key_required": auth_required(),
         }
         if self._key_ok():
             info.update({

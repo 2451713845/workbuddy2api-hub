@@ -102,6 +102,10 @@ button.sec:hover{background:var(--panel2);border-color:var(--line-hover)}
 button.danger{border-color:rgba(220,38,38,.3);background:rgba(220,38,38,.06);color:var(--bad)}
 button.danger:hover{background:var(--bad);color:#fff;border-color:var(--bad)}
 button.mini{padding:3px 9px;font-size:11px}
+.id-btn-group{display:inline-flex;gap:2px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px}
+.id-btn{background:transparent;border:none;color:var(--dim);padding:2px 6px;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;transition:all .15s}
+.id-btn:hover{color:var(--fg)}
+.id-btn.active{background:var(--accent);color:#fff;font-weight:600;box-shadow:var(--shadow-sm)}
 .slot-select{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
   padding:5px 8px;color:var(--fg);font:inherit;font-size:12px;max-width:140px}
 .slot-input{width:100%;background:var(--panel2);border:1px solid var(--line);
@@ -1603,7 +1607,11 @@ function accountRow(a){
     +     '<button class="sec mini" onclick="refreshOne(&quot;' + uidAttr + '&quot;, this)">刷新</button>'
     +   '</div>'
     +   '<div class="acct-actions-row">'
-    +     '<button class="sec mini" title="切换出站身分：CLI ↔ WorkBuddy" onclick="switchProduct(&quot;' + uidAttr + '&quot;, this)">' + ((a.product === 'workbuddy') ? 'WB' : 'CLI') + '</button>'
+    +     '<div class="id-btn-group" title="出站身分：默认 WorkBuddy 桌面端 (WB) / 官方 VSCode 插件 (VSC) / 官方 CodeBuddy CLI (CLI)">'
+    +       '<button class="id-btn' + ((!a.product || a.product === 'workbuddy') ? ' active' : '') + '" onclick="setAccountProduct(&quot;' + uidAttr + '&quot;, &quot;workbuddy&quot;, this)">WB</button>'
+    +       '<button class="id-btn' + (a.product === 'vscode' ? ' active' : '') + '" onclick="setAccountProduct(&quot;' + uidAttr + '&quot;, &quot;vscode&quot;, this)">VSC</button>'
+    +       '<button class="id-btn' + (a.product === 'cli' ? ' active' : '') + '" onclick="setAccountProduct(&quot;' + uidAttr + '&quot;, &quot;cli&quot;, this)">CLI</button>'
+    +     '</div>'
     +     '<button class="sec mini" onclick="exportOne(&quot;' + uidAttr + '&quot;)">导出</button>'
     +     '<button class="danger mini" onclick="deleteAccount(&quot;' + uidAttr + '&quot;,&quot;' + nameAttr + '&quot;, this)">删除</button>'
     +   '</div>'
@@ -1646,8 +1654,9 @@ function renderAccounts(){
     + '<th style="text-align:right;width:70px">请求</th>'
     + '<th style="text-align:right;width:88px">总 token</th>'
     + '<th style="text-align:right;width:80px">缓存</th>'
-    + '<th style="text-align:center;width:150px">操作</th>'
+    + '<th style="text-align:center;width:232px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
+    + '<div class="legend"><span>出站身分：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额通道。</span></div>'
     + '<div class="legend"><span>多个账号按会话粘性 + 轮询使用；某个账号被上游拒绝时自动切到下一个</span></div>';
 }
 
@@ -1700,22 +1709,26 @@ async function toggleAccount(uid, enable, btn){
     if(btn) btn.disabled = false;
   }
 }
-async function switchProduct(uid, btn){
-  const cur = ((btn && btn.textContent) || 'CLI').trim();
-  const next = (cur === 'CLI') ? 'workbuddy' : 'cli';
-  const label = (next === 'workbuddy') ? 'WorkBuddy (VSCode)' : 'CLI (CodeBuddy)';
-  if(!confirm('Switch this account to ' + label + ' ?\n\nThe two identities use different endpoints and different quota pools.')) return;
+async function setAccountProduct(uid, prod, btn){
+  const names = {
+    'workbuddy': 'WorkBuddy 独立桌面客户端 (WB)',
+    'vscode': '官方 VSCode 插件 (VSC)',
+    'cli': '官方 CodeBuddy CLI (CLI)'
+  };
+  const label = names[prod] || prod;
+  if(!confirm('将该账号的出站身分切换为 ' + label + '？\n\n不同身分对应不同的出站指纹、端点和配额通道。')) return;
   if(btn){ btn.disabled = true; }
   try {
-    const r = await postJSON('/accounts/product', {uid: uid, product: next});
-    toast('Switched to ' + label + ' (' + (r.changed || []).length + ' account)', 'ok');
+    const r = await postJSON('/accounts/product', {uid: uid, product: prod});
+    toast('已切换为 ' + label, 'ok');
     await loadAccounts();
   } catch(e) {
-    toast('Switch failed: ' + e.message, 'bad');
+    toast('切换失败: ' + e.message, 'bad');
   } finally {
     if(btn){ btn.disabled = false; }
   }
 }
+async function switchProduct(uid, btn){ return setAccountProduct(uid, 'workbuddy', btn); }
 
 async function refreshOne(uid, btn){
   if(btn){ btn.disabled = true; btn.textContent = '刷新中...'; }

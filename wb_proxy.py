@@ -63,13 +63,17 @@ def detect_model_realm(model_id):
         return "intl"
     cn_only = {
         "deepseek-v4-pro", "minimax-m3", "minimax-m2.7", "minimax-m2.5",
-        "glm-5.3-flash", "glm-5.1", "glm-5.0-turbo", "glm-4.6v",
-        "kimi-k3-1", "kimi-k2.8-preview", "kimi-k2.7", "kimi-k2-thinking",
+        "glm-5.1", "glm-5.0-turbo", "glm-4.6v",
+        "kimi-k3-1", "kimi-k2.7", "kimi-k2-thinking",
         "hy3-x", "hy4-preview-dev", "hy4-preview-x"
     }
     if m in cn_only or any(m.startswith(p) for p in ("minimax-", "deepseek-v4-pro")):
         return "cn"
     return CURRENT_REALM
+# glm-5.3-flash was listed as cn-only, but the international exit serves it:
+# an official intl account posting to www.workbuddy.ai gets HTTP 200, and the
+# intl desktop client ships it in its own model list. Only deepseek-v4-pro
+# still answers "service info not found" there.
 # Models that exist on one side only. Everything else (deepseek-v4.1-flash,
 # hy3, glm-5.3 ...) is served by both exits, so it must not be treated as a
 # conflict.
@@ -80,8 +84,8 @@ INTL_EXCLUSIVE = {
     "gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gemini-3.5-flash",
 }
 CN_EXCLUSIVE = {
-    "deepseek-v4-pro", "glm-5.3-flash", "glm-5.1", "glm-5v-turbo",
-    "kimi-k3-1", "kimi-k2.8-preview", "kimi-k2.7", "minimax-m3",
+    "deepseek-v4-pro", "glm-5.1", "glm-5v-turbo",
+    "kimi-k3-1", "kimi-k2.7", "minimax-m3",
     "hy3-x", "hy4-preview-dev", "hy4-preview-x",
 }
 def exclusive_realm(model_id):
@@ -1510,22 +1514,22 @@ CN_UI_ORDER = [
     "deepseek-v4-pro",
 ]
 INTL_UI_ORDER = [
+    "hy4-preview-f",
+    "hy3",
     "deepseek-v4.1-flash",
     "gpt-6-astra",
-    "hy4-preview-f",
-    "hy4-preview",
-    "hy3",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
-    "gpt-5.3-codex",
     "gemini-3.5-flash",
+    "glm-5.3-flash",
     "glm-5.3",
     "glm-5.2",
     "kimi-k3",
     "kimi-k2.6",
+    "kimi-k2.8-preview",
 ]
 def merge_catalog(primary, realm=None):
     r = realm or CURRENT_REALM

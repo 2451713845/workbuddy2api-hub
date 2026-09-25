@@ -1331,6 +1331,7 @@ def runtime_settings_view():
         "api_key_masked": masked,
         "auth_required": auth_required(),
         "api_keys": keys,
+        "reserve_credits": wb_settings.reserve_credits(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
@@ -4905,6 +4906,19 @@ class Handler(BaseHTTPRequestHandler):
         if "auth_disabled" in payload:
             wb_settings.set_auth_disabled(ACCOUNTS_DIR, payload.get("auth_disabled"))
             reply["auth_disabled"] = bool(payload.get("auth_disabled"))
+        if "reserve_credits" in payload:
+            try:
+                reserve = int(payload.get("reserve_credits"))
+            except (TypeError, ValueError):
+                return self._error(400, "reserve_credits must be a whole number",
+                                   "invalid_request_error")
+            if reserve < 0:
+                return self._error(400, "reserve_credits cannot be negative",
+                                   "invalid_request_error")
+            wb_settings.set_reserve_credits(ACCOUNTS_DIR, reserve)
+            if POOL:
+                POOL.apply_reserve_credits(reserve)
+            reply["reserve_credits"] = reserve
         new_key = payload.get("api_key")
         if new_key is not None:
             new_key = str(new_key).strip()
@@ -5956,6 +5970,7 @@ def _bootstrap_runtime(args):
     POOL = wb_accounts.AccountPool(ACCOUNTS_DIR, log=log)
     POOL.load()
     POOL.apply_proxy_slots()
+    POOL.apply_reserve_credits()
     load_persisted_realm()
     global SCHEDULER
     from wb_scheduler import Scheduler

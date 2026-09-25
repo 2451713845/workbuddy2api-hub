@@ -211,6 +211,11 @@ class Account(object):
         self.model_cooldowns = {}
         self.credits = data.get("credits") or None
         self.last_checkin = data.get("lastCheckin") or None
+        # Low-credit guard: once the balance reaches this level the account
+        # stops being handed out, so it never drops to zero (a zero balance is
+        # what makes the upstream start sending nagging SMS). Resolved from the
+        # global setting by AccountPool.apply_reserve_credits(); 0 disables it.
+        self.reserve_credits = 0
         # Serialise token refresh and file writes. Request threads, /health,
         # dashboard polls and the scheduler can all reach refresh()/save() for
         # the same account at once; without a lock the upstream rotates the
@@ -286,6 +291,8 @@ class Account(object):
             "addedAt": self.added_at,
             "file": os.path.basename(self.path) if self.path else None,
             "credits": self.credits,
+            "reserveCredits": int(self.reserve_credits or 0),
+            "reserveBlocked": self.reserve_blocked(),
             "lastCheckin": self.last_checkin,
             "canCheckin": self.realm == "cn",
             "machineId": derive_id(self.uid, "machine"),
@@ -322,10 +329,35 @@ class Account(object):
         if self.path and os.path.exists(self.path):
             os.remove(self.path)
 
+    def reserve_blocked(self):
+        """True when the low-credit guard should keep this account idle.
+
+        Only a *known* balance can block: an account whose credits were never
+        fetched stays usable, otherwise a fresh install would look empty.
+        """
+        reserve = int(self.reserve_credits or 0)
+        if reserve <= 0:
+            return False
+        credits = self.credits
+        if not isinstance(credits, dict):
+            return False
+        remain = credits.get("remain")
+        if remain is None:
+            return False
+        try:
+            remain = int(remain)
+        except (TypeError, ValueError):
+            return False
+        return remain <= reserve
+
     def ready(self, model=None):
         if not self.enabled or not self.access_token:
             return False
         if self.throttle_wait(model=model) > 0:
+            return False
+        # Parked below the reserve: serving a request here is what would push
+        # the balance to zero and trigger the upstream reminder SMS.
+        if self.reserve_blocked():
             return False
         exp = self.expires_at or jwt_exp(self.access_token)
         if not exp:
@@ -659,6 +691,7 @@ class AccountPool(object):
                         except Exception:
                             pass
                     self.accounts.append(account)
+            self.apply_reserve_credits()
             return self.accounts
 
     def list_public(self, realm=None):
@@ -691,6 +724,7 @@ class AccountPool(object):
                 self.accounts.append(account)
             account.save(self.dir)
             self.apply_proxy_slots()
+            self.apply_reserve_credits()
             return account
 
     def remove(self, uid):
@@ -818,6 +852,26 @@ class AccountPool(object):
                     account.proxy = slot["url"]
                 else:
                     account.proxy = account.proxy_legacy
+
+    def apply_reserve_credits(self, value=None):
+        """Re-resolve the low-credit guard for every account.
+
+        Same shape as apply_proxy_slots(): settings.json is the source of
+        truth and the per-account value is derived here, so the request path
+        needs no extra settings lookup.
+        """
+        import wb_settings
+
+        if value is None:
+            value = wb_settings.reserve_credits(self.dir)
+        try:
+            value = max(0, int(value or 0))
+        except (TypeError, ValueError):
+            value = 0
+        with self._lock:
+            for account in self.accounts:
+                account.reserve_credits = value
+        return value
 
     def set_proxy_slot(self, uid, slot_id):
         account = self.get(uid)

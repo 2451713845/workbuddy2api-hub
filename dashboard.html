@@ -740,6 +740,25 @@ a:hover{text-decoration:underline}
     </section>
 
     <section>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+        <div>
+          <h2 style="margin:0">保留积分 <em id="setReserveState"></em></h2>
+          <div style="font-size:12px;color:var(--dim);margin-top:4px">
+            账号余额低于该值时不再接单，避免余额被用尽后触发上游的短信提醒。填 0 表示关闭。
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+          <div>
+            <div style="font-size:12px;color:var(--dim);margin-bottom:4px">最低保留积分</div>
+            <input id="setReserveCredits" type="number" min="0" step="1" value="0"
+                   style="width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+          </div>
+          <button onclick="saveReserveCredits(this)">保存</button>
+        </div>
+      </div>
+    </section>
+
+    <section>
       <h2>运行信息</h2>
       <table>
         <tbody>
@@ -1576,6 +1595,7 @@ function accountRow(a){
   const nameAttr = esc(String(a.nickname || '').replace(/["'\\<>]/g, ''));
   const usage = USAGE_BY_ACCOUNT[a.uid] || {};
   const state = !a.enabled ? '<span class="badge off">已停用</span>'
+              : a.reserveBlocked ? '<span class="badge warn">保留积分</span>'
               : a.inCooldown ? '<span class="badge warn">冷却 ' + (a.cooldownFor||0) + 's</span>'
               : a.expiresIn === 'expired' ? '<span class="badge bad">已过期</span>'
               : '<span class="badge ok">可用</span>';
@@ -2144,15 +2164,24 @@ async function refreshInner(){
     }
   });
 
-  const activeAccts = (window.ACCOUNTS || []).filter(a => a.enabled).length;
-  const totalAccts = (window.ACCOUNTS || []).length;
+  // An account parked by the low-credit guard is enabled but not serving, so
+  // the pool card must not count it as "正常".
+  const accts = window.ACCOUNTS || [];
+  const activeAccts = accts.filter(a => a.enabled && !a.reserveBlocked).length;
+  const totalAccts = accts.length;
+  const parkedAccts = accts.filter(a => a.enabled && a.reserveBlocked).length;
+  const disabledAccts = accts.filter(a => !a.enabled).length;
+  const poolNotes = [];
+  if(parkedAccts) poolNotes.push(parkedAccts + ' 个保留积分');
+  if(disabledAccts) poolNotes.push(disabledAccts + ' 个停用');
+  const poolSub = poolNotes.length ? poolNotes.join(' · ') : '全部启用 · 状态健康';
   const pctRemain = totSize > 0 ? ((totRemain / totSize) * 100).toFixed(1) + '%' : '';
   const subCredit = totSize > 0 ? ('总积分 ' + fmt(totSize) + ' · 剩余 ' + pctRemain) : '当前账号正常';
   const succStr = perf.success_rate_pct != null ? pct(perf.success_rate_pct) : '100.0%';
   const errSub = perf.errors ? (perf.errors + ' 次异常拦截') : '服务运行平稳';
 
   document.getElementById('cards').innerHTML =
-    card('可用账号池', activeAccts + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">/ ' + totalAccts + ' 正常</span>', (totalAccts - activeAccts > 0 ? (totalAccts - activeAccts) + ' 个停用' : '全部启用 · 状态健康'), 'accent') +
+    card('可用账号池', activeAccts + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">/ ' + totalAccts + ' 正常</span>', poolSub, 'accent') +
     card('积分余额', hasCreds ? (fmt(totRemain) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">积分</span>') : '正常可用', subCredit, 'accent2') +
     card('网关调用量', fmt(t.requests) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">次</span>', '本出口累计消耗 ' + fmt(t.total_tokens) + ' Token · ' + Number(t.credit || 0).toFixed(2) + ' 积分', '') +
     card('请求成功率', succStr, errSub, perf.errors ? 'warn' : 'accent2');
@@ -2439,6 +2468,14 @@ async function loadSettings(showToast){
       keyState.textContent = count ? ('(' + count + ' 个生效)') : '(当前不校验)';
       keyState.style.color = count ? 'var(--accent2)' : 'var(--dim)';
     }
+    const reserveValue = Number(data.reserve_credits || 0);
+    const reserveInput = document.getElementById('setReserveCredits');
+    if(reserveInput) reserveInput.value = String(reserveValue);
+    const reserveState = document.getElementById('setReserveState');
+    if(reserveState){
+      reserveState.textContent = reserveValue > 0 ? ('(低于 ' + reserveValue + ' 暂停接单)') : '(未启用)';
+      reserveState.style.color = reserveValue > 0 ? 'var(--accent2)' : 'var(--dim)';
+    }
     // Rebuild the editable rows, keeping stored values so an untouched field
     // is not accidentally blanked.
     API_KEY_ROWS = (data.api_keys || []).map(k => ({
@@ -2488,6 +2525,22 @@ async function savePanelPassword(btn){
     toast('修改失败: ' + e.message, 'bad');
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function saveReserveCredits(btn){
+  const el = document.getElementById('setReserveCredits');
+  const value = Math.floor(Number((el || {}).value || 0));
+  if(!Number.isFinite(value) || value < 0){ toast('请填写 0 或正整数', 'warn'); return; }
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {reserve_credits: value});
+    toast(value > 0 ? ('已启用：余额低于 ' + value + ' 的账号暂停接单') : '已关闭保留积分', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
   }
 }
 

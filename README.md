@@ -112,6 +112,23 @@ docker run -d   --name wb-proxy   --restart unless-stopped   -p 8788:8788   -v $
 - **持久化目录**：`./accounts` (账号凭证及活动区域) 与 `./usage` (请求流水与指标快照)；
 - **配置参数**：通过环境变量 `API_KEY`、`PORT` 自定义。
 
+#### Linux 桌面客户端凭据扫描
+
+Linux 版 WorkBuddy 的登录凭据通常位于：
+
+```text
+~/.local/share/CodeBuddyExtension/Data/Public/auth
+```
+
+Docker 容器默认无法访问宿主机目录。Linux 用户可以复制示例配置：
+
+```bash
+cp docker-compose.override.yml.example docker-compose.override.yml
+docker compose up -d
+```
+
+示例配置会以只读方式挂载凭据目录，扫描过程不会修改或复制登录信息。
+
 ---
 
 ## 二、核心特性详解

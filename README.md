@@ -120,6 +120,8 @@ Linux 版 WorkBuddy 的登录凭据通常位于：
 ~/.local/share/CodeBuddyExtension/Data/Public/auth
 ```
 
+目录内被识别的是两个文件：`workbuddy-desktop-ai.info`（国际版）与 `workbuddy-desktop.info`（国内版），文件名不匹配时看板会显示未检测到凭据。
+
 Docker 容器默认无法访问宿主机目录。Linux 用户可以复制示例配置：
 
 ```bash
@@ -127,7 +129,11 @@ cp docker-compose.override.yml.example docker-compose.override.yml
 docker compose up -d
 ```
 
-示例配置会以只读方式挂载凭据目录，扫描过程不会修改或复制登录信息。
+若使用上面的 `docker run` 方式启动，追加参数 `-v "$HOME/.local/share/CodeBuddyExtension/Data/Public/auth:/root/.local/share/CodeBuddyExtension/Data/Public/auth:ro"` 即可。
+
+示例配置以只读方式挂载凭据目录，扫描过程只读取文件，不修改也不复制。在看板「设置」里确认导入后，凭据会被解析成账号并写入宿主机的 `./accounts`，这是导入的正常行为。容器因此等同于持有你的桌面登录态，公开部署时请务必设置 `API_KEY`。
+
+示例配置用 `${HOME}` 展开宿主机家目录，适用于会导出 `HOME` 的 shell（Linux / macOS）。Windows PowerShell 下 `HOME` 通常为空，会得到无效路径，请改用本机版启动脚本。
 
 ---
 
@@ -222,6 +228,10 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、版本更新记录 (Changelog)
+
+### 未发布 (Unreleased)
+
+- **Docker 部署下的 Linux 桌面凭据挂载**（PR #55，感谢 [@LuFering](https://github.com/LuFering)）：新增 `docker-compose.override.yml.example`，以只读方式把宿主机 `~/.local/share/CodeBuddyExtension/Data/Public/auth` 挂进容器，补上 Linux + Docker 场景下看板扫描不到桌面凭据的说明；`.gitignore` 同时忽略本地 `docker-compose.override.yml`。
 
 ### v1.5.5
 

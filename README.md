@@ -178,7 +178,6 @@ docker run -d   --name wb-proxy   --restart unless-stopped   -p 8788:8788   -v $
 
 ## 四、客户端配置与接入
 
-### OpenAI 兼容客户端 (Chatbox / NextChat / Cherry Studio / Kelivo 等)
 - **API 接口地址 (Base URL)**：`http://127.0.0.1:8788/v1`（局域网为 `http://<局域网IP>:8788/v1`）
 - **API Key**：
   - 本机单机模式（未配置 Key 且未开 LAN）：可留空或填任意字符；

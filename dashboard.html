@@ -1622,7 +1622,7 @@ function accountRow(a){
     +   '<div class="acct-actions-row">'
     +     '<button class="sec mini" onclick="toggleAccount(&quot;' + uidAttr + '&quot;,' + (!a.enabled) + ', this)">' + (a.enabled ? '停用' : '启用') + '</button>'
     +     '<button class="sec mini" onclick="testAccount(&quot;' + uidAttr + '&quot;, this)">测试</button>'
-    +     '<button class="sec mini" onclick="refreshOne(&quot;' + uidAttr + '&quot;, this)">刷新</button>'
+    +     '<button class="sec mini" onclick="refreshOne(&quot;' + uidAttr + '&quot;, this)">刷新凭证</button>'
     +   '</div>'
     +   '<div class="acct-actions-row">'
     +     '<div class="id-btn-group" title="出站身分：默认 WorkBuddy 桌面端 (WB) / 官方 VSCode 插件 (VSC) / 官方 CodeBuddy CLI (CLI)">'
@@ -1758,7 +1758,7 @@ async function refreshOne(uid, btn){
   }catch(e){
     toast('刷新失败: ' + e.message, 'bad');
   }finally{
-    if(btn){ btn.disabled = false; btn.textContent = '刷新'; }
+    if(btn){ btn.disabled = false; btn.textContent = '刷新凭证'; }
   }
 }
 async function testAccount(uid, btn){

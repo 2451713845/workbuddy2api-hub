@@ -485,7 +485,7 @@ a:hover{text-decoration:underline}
     <button class="sec" onclick="exportAccounts(this)">导出账号</button>
     <button class="sec" onclick="openImport()">导入账号</button>
     <button class="sec" onclick="fetchCredits(this)">刷新积分</button>
-    <button class="sec" onclick="autoAssignSlots()">一键自动分配出口</button>
+    <button class="sec" onclick="autoAssignSlots()" title="把尚未绑定出口的已启用账号依次分配到已启用的代理槽；已有绑定的账号不受影响">分配代理出口给未绑定账号</button>
     <button class="sec" onclick="setAll(true, this)">全部启用</button>
     <button class="sec" onclick="setAll(false, this)">全部停用</button>
     
@@ -2991,10 +2991,12 @@ function importDiscovered(){
 }
 
 async function autoAssignSlots(){
+  // Only fills in accounts that have no exit yet: an account that is already
+  // bound keeps its slot, so this is not a rebalancer.
   const unbound = (window.ACCOUNTS || []).filter(a => a.enabled && !a.proxySlot);
-  if(!unbound.length){ toast('所有已启用账号都已绑定槽位', 'ok'); return; }
+  if(!unbound.length){ toast('所有已启用账号都已绑定代理出口', 'ok'); return; }
   const slots = PROXY_SLOTS.filter(s => s.enabled !== false);
-  if(!slots.length){ toast('没有可用槽位，请先添加并保存', 'warn'); return; }
+  if(!slots.length){ toast('没有启用的代理槽，请先在「设置 → 代理槽」添加并保存', 'warn'); return; }
   let i = 0;
   for(const a of unbound){
     const slot = slots[i % slots.length];
@@ -3003,7 +3005,7 @@ async function autoAssignSlots(){
   }
   await loadAccounts();
   await loadProxySlots();
-  toast('已为 ' + unbound.length + ' 个已启用账号分配出口', 'ok');
+  toast('已为 ' + unbound.length + ' 个未绑定账号分配代理出口', 'ok');
 }
 
 function switchMainTab(tab){

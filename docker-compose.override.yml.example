@@ -1,0 +1,5 @@
+services:
+  wb-proxy:
+    volumes:
+      # Linux WorkBuddy desktop login credentials, read-only for local scanning.
+      - ${HOME}/.local/share/CodeBuddyExtension/Data/Public/auth:/root/.local/share/CodeBuddyExtension/Data/Public/auth:ro

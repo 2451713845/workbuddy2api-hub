@@ -2147,16 +2147,31 @@ def normalize_tool_choice(obj):
     if isinstance(tc, str):
         val = tc.strip().lower()
         if val == "none":
-            obj.pop("tool_choice", None)
-            obj.pop("tools", None)
-            obj.pop("functions", None)
+            # 这里曾经把 tools/functions 一起删掉，那正是 Agent 死循环的成因：
+            # 工具声明没了，模型拿不到函数签名、又没有结构化工具通道，却仍被要求
+            # 完成任务，于是把调用降级成 DSML / 伪 JSON 文本塞进 content
+            # （tool_calls 为空、finish_reason=stop）。客户端解析不到调用只能再
+            # 追问一轮，模型又重复一遍 "I'll do it"，上下文每轮 +2 条消息、token
+            # 线性膨胀，直到撑爆窗口或用户手动断开。
+            #
+            # tool_choice="none" 的语义是「本轮不许调用工具」，这层意思由
+            # tool_choice 字段本身表达就够了，不需要抹掉能力声明。
+            # 上游把 tool_choice 声明为 string（发对象会 11101），所以保持字符串
+            # 原样透传，同时保留 tools。
+            #
+            # 取舍：实测本上游并不真正遵守 tool_choice="none"（保留 tools 后它
+            # 仍返回 tool_calls）。但对比两条路 —— 删 tools 会让模型输出不可解析
+            # 的文本、Agent 原地空转；留 tools 则走正常 tool_calls 通道，客户端能
+            # 正常执行与回填 —— 后者明显更好。确实需要禁止调用时，客户端不传
+            # tools 即可。
+            obj["tool_choice"] = "none"
         return
     if isinstance(tc, dict):
         typ = (tc.get("type") or "").strip().lower()
         if typ == "none":
-            obj.pop("tool_choice", None)
-            obj.pop("tools", None)
-            obj.pop("functions", None)
+            # 同上：保留 tools 声明。上游只认字符串，对象形式必须降级成
+            # "none"，否则 11101。
+            obj["tool_choice"] = "none"
         elif typ in ("auto", "required"):
             obj["tool_choice"] = typ
         elif typ == "function":

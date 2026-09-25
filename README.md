@@ -112,31 +112,6 @@ docker run -d   --name wb-proxy   --restart unless-stopped   -p 8788:8788   -v $
 - **持久化目录**：`./accounts` (账号凭证及活动区域) 与 `./usage` (请求流水与指标快照)；
 - **配置参数**：通过环境变量 `API_KEY`、`PORT` 自定义。
 
-#### Linux 桌面客户端凭据扫描（暂不可用）
-
-> ⚠️ 看板的扫描入口已暂时隐藏：桌面客户端自 2026-09-24 起把 token 改成加密存储（`$wbEncrypted` 信封，见「三、账号添加与管理 → 方式二」），挂载之后也导入不出可用账号。下面的挂载配置保留备用，等扫描恢复后再用。
-
-Linux 版 WorkBuddy 的登录凭据通常位于：
-
-```text
-~/.local/share/CodeBuddyExtension/Data/Public/auth
-```
-
-目录内被识别的是两个文件：`workbuddy-desktop-ai.info`（国际版）与 `workbuddy-desktop.info`（国内版），文件名不匹配时看板会显示未检测到凭据。
-
-Docker 容器默认无法访问宿主机目录。Linux 用户可以复制示例配置：
-
-```bash
-cp docker-compose.override.yml.example docker-compose.override.yml
-docker compose up -d
-```
-
-若使用上面的 `docker run` 方式启动，追加参数 `-v "$HOME/.local/share/CodeBuddyExtension/Data/Public/auth:/root/.local/share/CodeBuddyExtension/Data/Public/auth:ro"` 即可。
-
-示例配置以只读方式挂载凭据目录，扫描过程只读取文件，不修改也不复制。在看板「设置」里确认导入后，凭据会被解析成账号并写入宿主机的 `./accounts`，这是导入的正常行为。容器因此等同于持有你的桌面登录态，公开部署时请务必设置 `API_KEY`。
-
-示例配置用 `${HOME}` 展开宿主机家目录，适用于会导出 `HOME` 的 shell（Linux / macOS）。Windows PowerShell 下 `HOME` 通常为空，会得到无效路径，请改用本机版启动脚本。
-
 ---
 
 ## 二、核心特性详解

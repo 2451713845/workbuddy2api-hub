@@ -24,6 +24,7 @@ try {
   api = new Function(dashboardScript() + `
     return {
       fmtCompact: fmtCompact,
+  cellSortValue: cellSortValue,
       ms: ms,
       get PRICING_ON(){ return PRICING_ON; },
       set PRICING_ON(v){ PRICING_ON = v; },
@@ -35,6 +36,19 @@ try {
   process.exit(1);
 }
 console.log = realLog;
+
+/* ---- 0. 排序解析器要认得 fmtCompact 输出的每一个单位 --------------- */
+
+// 带单位的格子必须按数值排序：fmtCompact 会输出 B，cellSortValue 就得认 B，
+// 否则十亿那一格会按 1.5 排到 999M 下面去。
+{
+  const cell = (text) => ({textContent: text, getAttribute: () => null,
+                           querySelector: () => null});
+  assert.strictEqual(api.cellSortValue(cell('1.5B'), 'num'), 1.5e9);
+  assert.strictEqual(api.cellSortValue(cell('999M'), 'num'), 999e6);
+  assert.ok(api.cellSortValue(cell('1.5B'), 'num') > api.cellSortValue(cell('999M'), 'num'),
+    'B 与 M 之间必须可比');
+}
 
 /* ---- 1. fmtCompact：单位换算 ---------------------------------------- */
 

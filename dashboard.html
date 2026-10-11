@@ -5101,6 +5101,7 @@ function cellSortValue(cell, kind){
     case 'K': return n * 1e3;
     case 'M': return n * 1e6;
     case 'G': return n * 1e9;
+    case 'B': return n * 1e9;   // fmtCompact 用 B 表示十亿，别让那一格按 1.5 排序
     default: return n;           // ms / % / 空 / 其它后缀（tok/s 之类）一律原值
   }
 }

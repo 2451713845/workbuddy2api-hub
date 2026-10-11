@@ -340,6 +340,9 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
   - 现在 `_connect()` 走 `_proxy_parts()` 解析代理 URL，把 `Proxy-Authorization` 显式塞进 CONNECT（取值口径与 `ProxyHandler.proxy_open` 一致：先 `unquote` 再 base64），两种写法都认：`http://user:pass@host:port` 与无 scheme 的 `user:pass@host:port`（后者此前连 host/port 都会被 `urlparse` 误判成 scheme，一并修正）；没填凭据时不发该头，免认证代理行为不变。
   - 新增 `tests/_test_web_agent.py` 的 `ProxyTunnelTests`：钉住两种 URL 形态的解析、转义字符与 urllib 同口径、无凭据不发头、隧道确实带上该头，以及直连时不走隧道。
 
+- **修复「网页腿失败也写 lastDailyChat，当天积分静默丢掉」**：`_daily_chat_upstream()` 在桌面腿成功后立刻写 `lastDailyChat`，而网页腿（唯一计入官方「每日活跃」的那条）失败也照写；于是当天后续巡检 `can_daily_chat()` 直接跳过该账号，那天的 30/50 积分既不到账也不再重试，面板还显示「成功」。现在只有网页腿成功（或 `web=False`、没开网页通道）才写盘，失败时留到下一个巡检周期重试。
+  - `tests/_test_daily_chat.py` 补三条：网页腿失败不写盘且 `can_daily_chat()` 仍为真、网页腿成功写盘、`web=False` 维持原语义。
+
 已发布版本的完整记录（v1.4.5 ~ v1.6.20，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 ## 七、致谢与引用声明 (Credits & References)
 

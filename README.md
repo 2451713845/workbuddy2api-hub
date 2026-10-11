@@ -131,7 +131,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 125 个套件：90 个 Python + 35 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 126 个套件：91 个 Python + 35 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -354,6 +354,9 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **修复：`stop` 传字符串的请求一律被上游 400（code 11101）**：OpenAI 把 `stop` 声明成 `string | array`，客户端传单个字符串是合法请求；本上游的 Go 端把该字段定死为 `[]string`，收到字符串直接 `Unmarshal chat params failed with error: json: cannot unmarshal string into Go struct field Request.stop of type []string`。网关此前原样透传，于是按 OpenAI 规范写的客户端在这个字段上根本发不出去（实测一个 Go 客户端连续 622 次全部失败，横跨 11 天）。现在 `build_upstream_body()` 在出网关前调用新的 `normalize_stop()`：单字符串归一化成单元素数组（语义等价——OpenAI 里单字符串就是单元素数组），数组形式过滤掉空串与非字符串元素，空字符串 / 空数组 / `null` / 非法类型一律删字段（它们的实际含义都是「没有停止序列」，而空值在上游同样会被判参数不合法）。
+  - `tests/_test_stop_normalization.py`（新套件，17 项）：钉住字符串包装、数组保序与过滤、六种空值 / 非法类型的删字段、无 `stop` 时不发明字段，以及 `build_upstream_body()` 端到端的四种形状；README 套件计数 125 → 126。
 
 - **修复「一次请求给同一个账号重复记账」**（issue #271）：重试轮在遇到传输类失败后会清空 `tried` 整池重轮，于是同一个账号会被再挑一遍、再记一笔 `fails`/`degrade_count`。池子越空重轮越频繁，一个刚抖了一下的账号因此可能**一次请求就被推过熔断阈值**（两次抖动触发 3 次硬失败的断路，而不是三次）。现在一次请求对一个账号最多记一笔：`open_upstream()` 用 `charged` 集合记住这一轮已经记过账的账号，重轮再挑到它时不再重复计数（`note_error()` 的冷却语义不变）。
   - `tests/_test_pool_backoff.py` 新增 `RetryRoundChargeTests`：钉住传输类与 502 两种失败下「一次请求只记一笔」，以及这道护栏**不跨请求**（第二个请求仍然照记，否则会掩盖真正在失败的账号）。

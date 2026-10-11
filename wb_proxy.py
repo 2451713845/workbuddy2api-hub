@@ -7941,6 +7941,33 @@ def normalize_tools(obj):
             norm.append(t)
     obj["tools"] = norm
 # ---------------------------------------------------------------------------
+# Stop Sequence Normalization (avoids code 11101 on a string stop)
+# ---------------------------------------------------------------------------
+def normalize_stop(obj):
+    # OpenAI 把 stop 声明成 string | array，客户端传单个字符串完全合法；本上游的
+    # Go 端却把该字段定死为 []string，收到字符串直接 400：
+    #   Unmarshal chat params failed with error: json: cannot unmarshal string
+    #   into Go struct field Request.stop of type []string   (code 11101)
+    # 实测（deepseek-v4.1-flash，同一条 prompt，同一个上游账号）：
+    #   "stop": "END"     -> 400 / code 11101
+    #   "stop": ["END"]   -> 200
+    # 归一化成数组后语义完全等价：OpenAI 里单字符串就是单元素数组，模型侧看到的
+    # 停止序列一模一样。空字符串 / 空数组 / null / 非法类型一律删字段——它们的实际
+    # 含义都是「没有停止序列」，而空值本身在上游同样会被判参数不合法。
+    if "stop" not in obj:
+        return
+    val = obj["stop"]
+    if isinstance(val, str):
+        val = [val] if val else []
+    elif isinstance(val, (list, tuple)):
+        val = [s for s in val if isinstance(s, str) and s]
+    else:
+        val = []
+    if val:
+        obj["stop"] = val
+    else:
+        obj.pop("stop", None)
+# ---------------------------------------------------------------------------
 # DeepSeek DSML Tool Calls Fallback Parser
 # ---------------------------------------------------------------------------
 TAG_START = r"<[^>]*DSML[^>]*"
@@ -8315,6 +8342,7 @@ def build_upstream_body(payload):
     translate_max_completion_tokens(body)
     normalize_tool_choice(body)
     normalize_tools(body)
+    normalize_stop(body)
     if "max_tokens" not in body:
         default_max = model_default_max_output_tokens(model)
         if default_max:

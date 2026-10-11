@@ -126,7 +126,7 @@ def clear_daily():
 
 def clear_checkpoint():
     try:
-        os.unlink(P._usage_cache_path())
+        os.unlink(P._usage_cache_kind_path("remaining"))
     except OSError:
         pass
 
@@ -151,7 +151,13 @@ def restart_fold():
 
 
 def reload_checkpoint_cache():
-    """让 _usage_cache_data() 重新读一次文件（新进程只读一次）。"""
+    """让 checkpoint 的读取记忆清空，等价于新进程的第一次读。
+
+    v4（一类一份）之后读盘按类记忆在 _usage_cache_kind_cache 里，清它的入口
+    是 _usage_cache_forget()；它自己取锁，所以必须在下面那段之前调用。v3 的
+    _usage_cache_loaded / _usage_cache_read_result 仍保留给旧布局的读取路径。
+    """
+    P._usage_cache_forget()
     with P._usage_cache_lock:
         P._usage_cache_loaded = False
         P._usage_cache_read_result = None
@@ -236,9 +242,9 @@ def legacy_buffers(rows):
 
 def rewrite_as_legacy(rows):
     """把 checkpoint 文件里的 remaining 缓冲换成旧版（日志顺序）形态。"""
-    path = pathlib.Path(P._usage_cache_path())
+    path = pathlib.Path(P._usage_cache_kind_path("remaining"))
     data = json.loads(path.read_text(encoding="utf-8"))
-    entry = data["remaining"][0]
+    entry = data["entries"][0]
     buffers = legacy_buffers(rows)
     entry["usage"] = {
         "%s\x1f%s" % (uid, model): {"at": list(buf["at"]),
@@ -321,7 +327,7 @@ class RemainingCheckpointOrderTests(unittest.TestCase):
         """在当前日志上折一遍并强制落盘；返回冷折载荷。"""
         cache_env(min_bytes=1, min_seconds=0)
         data = payload(ACCOUNTS, now=NOW)
-        self.assertTrue(os.path.exists(P._usage_cache_path()),
+        self.assertTrue(os.path.exists(P._usage_cache_kind_path("remaining")),
                         "折过一遍之后应该写出 checkpoint")
         return data
 
@@ -400,9 +406,9 @@ class RemainingCheckpointOrderTests(unittest.TestCase):
     def test_out_of_order_log_adopts_after_a_restart(self):
         first = self.fold_once()
         # 写入侧已经有序：新 checkpoint 不会再因为乱序被拒。
-        written = json.loads(pathlib.Path(P._usage_cache_path())
+        written = json.loads(pathlib.Path(P._usage_cache_kind_path("remaining"))
                              .read_text(encoding="utf-8"))
-        for pair in written["remaining"][0]["usage"].values():
+        for pair in written["entries"][0]["usage"].values():
             self.assertTrue(is_sorted(pair["at"]))
         with CountingFold() as counted:
             restart_fold()
@@ -437,9 +443,9 @@ class RemainingCheckpointOrderTests(unittest.TestCase):
         # 形状校验先一步拦下它（cum 非降），_pair_repair 的负增量检查是同一
         # 契约的第二道防线。
         first = self.fold_once()
-        path = pathlib.Path(P._usage_cache_path())
+        path = pathlib.Path(P._usage_cache_kind_path("remaining"))
         data = json.loads(path.read_text(encoding="utf-8"))
-        entry = data["remaining"][0]
+        entry = data["entries"][0]
         pair = entry["usage"][next(iter(entry["usage"]))]
         pair["at"] = list(reversed(pair["at"]))
         pair["cum"] = list(reversed(pair["cum"]))
@@ -457,9 +463,9 @@ class RemainingCheckpointOrderTests(unittest.TestCase):
     def test_legacy_checkpoint_with_an_empty_live_region_is_rejected(self):
         # head == len：存活区为空，整理不出任何条目 -> 整份拒绝、退回冷折。
         first = self.fold_once()
-        path = pathlib.Path(P._usage_cache_path())
+        path = pathlib.Path(P._usage_cache_kind_path("remaining"))
         data = json.loads(path.read_text(encoding="utf-8"))
-        entry = data["remaining"][0]
+        entry = data["entries"][0]
         pair = entry["usage"][next(iter(entry["usage"]))]
         pair["head"] = len(pair["at"])
         with io.open(path, "w", encoding="utf-8", newline="\n") as fh:

@@ -544,6 +544,18 @@ def _local_midnight(ts=None, days_back=0):
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_back, 0, 0, 0, 0, 0, -1))
 
 
+def _local_hour_start(ts):
+    """ts 所属的本地整点（分/秒归零）的 epoch。
+
+    与 _local_midnight 同一套构造：mktime 把本地墙上时间换算回 epoch，
+    分/秒归零就是「本地整点」。夏令时切换小时里的时间会被 mktime 规整到
+    相邻的真实时刻，所以调用方还要比对返回值是否等于原值——只有能原样
+    还原的 ts 才是真的落在整点上（见 _hour_window_key）。
+    """
+    lt = time.localtime(ts)
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour, 0, 0, 0, 0, -1))
+
+
 def _epoch_or_none(value):
     """A panel-supplied epoch second, or None when it cannot be trusted.
 
@@ -3432,7 +3444,176 @@ def _copy_usage_snapshot(snap):
     return out
 
 
-def _fold_usage_snapshot(row, snap, r, since, until, pricing_on=None, also=None):
+# ---------------------------------------------------------------------------
+# 行级结果记忆：把「同一行算出来的东西」跨视图复用
+#
+# 一次冷启动里同一份日志被三个视图各扫一遍（snapshot / analytics / series），
+# 每一行都要重新算一次本地日键（_local_day_key，strftime 真机 43.4µs/行），
+# snapshot 与 analytics 还要各算一次 cost_for_row（真机 72.4µs/行）。这两样都是
+# 行的纯函数——日键只看 at（进程内时区固定），定价只看行的定价字段加价表本身
+# ——所以第二个视图不必再算：记下结果，直接取。
+#
+# 记的是结果，不是状态：五个聚合仍各持各的折叠状态（D1/D2/D3 不受影响），这里
+# 没有任何一份聚合能被另一个视图借走，只有「这行折进哪天」和「这行值多少钱」
+# 两个标量。位置/指纹校验、realm 归属、日桶语义都照旧。
+#
+# 键不能是行对象 id()：三次扫描各自 json.loads 出各自的行对象，旧对象释放后 id
+# 会被复用，按 id 记忆会静默拿到别的行的值。日键按 at 记（纯函数，跨扫描安全）；
+# 定价按它真正读的那几个字段记（model / cost_policy / at / 三个 token 数），外加
+# 价表代次——代次就是扫描开头取到的那份 _pricing_inputs() 元组，价表换代时元组
+# 里的对象不再是同一个，旧条目自然不命中（判定与 _pricing_unchanged 同一条规则）。
+# 同一代次内的价表内容按定义不变，所以命中值必然等于现算值。
+#
+# 两张表都必须有界（路由器上不能拿内存换速度换到失控）：上限按条目数，满了以后
+# 只收「不比表里最旧那条更旧」的行。扫描总是从头往尾走，表里留住的因此是最近的
+# 一批行，第二个视图走到尾部照样命中，被拒的只是已经过去的头段。单条体积实测
+# 日键 60B、定价 402B（键里留着行的模型名/时间戳/三个 token 数），所以两张表的
+# 上限分开给，都可用环境变量调（WB_ROW_MEMO_MAX / WB_ROW_COST_MEMO_MAX，
+# 0 = 关掉这张表）。
+#
+# 不落盘：扫描期的临时记忆，重启后重算一遍即可（清单 §1.5）。
+# ---------------------------------------------------------------------------
+
+# 条目上限（条数，不是字节）。默认按「典型日志装得下大半、内存留在个位数 MB」
+# 给：日键表 6.4 万条（≤3.8MB）；定价表 16384 条（≤6.3MB）。日志更大、内存又
+# 宽裕的部署可以把 _ROW_COST_MEMO_MAX 调到行数以上，拿满跨视图复用（路由器上
+# 整份日志约 4 万行，满覆盖约 15MB）；内存紧的调到 0 就是关掉那张表。
+#
+# 两个值在导入时从环境变量读一次（WB_ROW_MEMO_MAX / WB_ROW_COST_MEMO_MAX，
+# 0 = 关掉那张表）：这是给部署定上限的开关，不是逐次可切的现场开关——而
+# os.environ.get 走「键不存在」那条路要 ~2µs，放在每行都走的插入路径上会把
+# 省下来的时间原样还回去。运行期要改直接改模块属性（测试就是这么做的）。
+_ROW_MEMO_MAX = 65536
+_ROW_COST_MEMO_MAX = 16384
+
+
+def _row_memo_env_cap(name, default):
+    """导入时读一次上限；读不到或解析不出来就按默认。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+_ROW_MEMO_MAX = _row_memo_env_cap("WB_ROW_MEMO_MAX", _ROW_MEMO_MAX)
+_ROW_COST_MEMO_MAX = _row_memo_env_cap("WB_ROW_COST_MEMO_MAX", _ROW_COST_MEMO_MAX)
+
+_row_day_memo = {}          # at -> "YYYY-MM-DD"
+_row_cost_memo = {}         # (model, cost_policy, at, pt, ct, comp) -> (价表代次, 定价结果)
+_row_cost_gen = None        # 定价表当前代次（_pricing_inputs() 的元组）
+_row_memo_tz = time.tzname  # 日键表绑在哪个时区上（见 _row_memo_tz_changed）
+
+
+def _row_memo_at(value):
+    """记忆表的「新旧」比较键：只有数字能比大小，别的（None / 坏行）一律按 0。
+
+    比大小只决定「这条记不记」，不决定结果——比不动就不比，照记。
+    """
+    return value if isinstance(value, (int, float)) else 0
+
+
+def _row_memo_tz_changed():
+    """进程时区被 tzset() 换过 → 日键表整体作废（定价表不受影响）。
+
+    日键是本地时区的函数，跨时区复用旧值会算错天。CPython 的 time.tzset()
+    每次都会重建 time.tzname 这个元组对象，所以「对象换了」就是「时区换过」；
+    没换时这里只是一次身份比较。生产里进程时区不会变，这一句就是白送的。
+    """
+    global _row_memo_tz
+    now = time.tzname
+    if _row_memo_tz is now:
+        return False
+    _row_memo_tz = now
+    _row_day_memo.clear()
+    return True
+
+
+def _cost_entry(pricing, cost):
+    """cost_for_row(details=False) 的返回值 -> 记忆条目（定长元组）。"""
+    return (pricing, cost["known"], cost["cny"], cost.get("band"),
+            cost.get("rates"), cost.get("source"), cost.get("source_at"),
+            cost.get("backfilled"), bool(cost.get("disabled")))
+
+
+def _cost_from_memo(entry):
+    """记忆条目 -> 与 cost_for_row(details=False) 逐键同序的 dict。
+
+    两条分支的形状与原函数一一对应：总开关关掉那一支不带 rates、多一个
+    disabled；有价/没价那一支带 rates。键序照抄原函数的插入顺序，别处
+    按字节对拍时看到的是一样的 dict。
+    """
+    cost = {"cny": entry[2], "known": entry[1], "band": entry[3]}
+    if entry[8]:
+        cost["source"] = "builtin"
+        cost["source_at"] = None
+        cost["backfilled"] = False
+        cost["disabled"] = True
+        return cost
+    cost["rates"] = entry[4]
+    cost["source"] = entry[5]
+    cost["source_at"] = entry[6]
+    cost["backfilled"] = entry[7]
+    return cost
+
+
+def _row_cost(row, pricing, pricing_on):
+    """一行的估算成本，跨视图复用（见「行级结果记忆」一节）。
+
+    pricing 是本次扫描开头取到的 _pricing_inputs() 元组：命中要求条目与它
+    同代。pricing 为 None（价表读不出来）时不进表，照旧每行现算——那条路径
+    本来就不该被记忆；空行（falsy row）同理，它走的是原函数的短路分支。
+
+    返回的形状与 wb_pricing.cost_for_row(..., details=False) 逐键相同；命中
+    时按条目重建一份，调用方拿到的是自己的副本，与现算路径一致。
+    """
+    if pricing is None or not row:
+        return wb_pricing.cost_for_row(row, details=False, enabled=pricing_on)
+    key = (row.get("model"), row.get("cost_policy"), row.get("at"),
+           row.get("prompt_tokens"), row.get("cached_tokens"),
+           row.get("completion_tokens"))
+    memo = _row_cost_memo
+    try:
+        entry = memo.get(key)
+    except TypeError:
+        # 不可哈希的字段（坏行）：原函数到 (doc.get("models") or {}).get(model)
+        # 那一步也会抛 TypeError，这里不抢先，交给它
+        return wb_pricing.cost_for_row(row, details=False, enabled=pricing_on)
+    if entry is not None and _pricing_unchanged(entry[0], pricing):
+        return _cost_from_memo(entry)
+    cost = wb_pricing.cost_for_row(row, details=False, enabled=pricing_on)
+    _row_cost_remember(key, pricing, cost)
+    return cost
+
+
+def _row_cost_remember(key, pricing, cost):
+    """把一行的定价结果记进有界表；价表换代时整表作废。
+
+    换代只可能来自价表文件被改写（策略表/时间线/价目表任一新对象），发生时
+    旧条目按定义全部失效，直接清掉，别让它们白占位置。判定用的是
+    _pricing_unchanged——与状态指纹同一条规则，两处不会漂移。
+    """
+    global _row_cost_gen
+    memo = _row_cost_memo
+    if _row_cost_gen is None or not _pricing_unchanged(_row_cost_gen, pricing):
+        memo.clear()
+        _row_cost_gen = pricing
+    cap = _ROW_COST_MEMO_MAX
+    if cap <= 0:
+        return
+    if len(memo) >= cap:
+        oldest = next(iter(memo))
+        if _row_memo_at(key[2]) < _row_memo_at(oldest[2]):
+            # 比表里最旧的还旧：记了也会立刻被顶掉，不如不记
+            return
+        memo.pop(oldest, None)
+    memo[key] = _cost_entry(pricing, cost)
+
+
+def _fold_usage_snapshot(row, snap, r, since, until, pricing_on=None, also=None,
+                         pricing=None):
     """Fold one parsed row into a usage snapshot.
 
     One definition for both callers: the all-time fold (fed only the rows past
@@ -3446,9 +3627,14 @@ def _fold_usage_snapshot(row, snap, r, since, until, pricing_on=None, also=None)
     重问。代价是设置改动从下一次扫描起生效；逐行展示路径不受影响，仍然每行
     查、改设置当场可见。
 
-    `also` 是同一行还要折进的第二份同形状快照（按日分桶的窗口半）。过滤、
-    算价与字段提取只做一次，两份各自累加：折叠本来就要求两侧各记一笔，而
-    cost_for_row 与 realm 判定是每行最贵的那部分，只该付一次。
+    `also` 是同一行还要折进的其余同形状快照（按日/按小时分桶的窗口半），
+    一个元组，空/None 表示没有。过滤、算价与字段提取只做一次，几份各自累加：
+    折叠本来就要求每份各记一笔，而 cost_for_row 与 realm 判定是每行最贵的
+    那部分，只该付一次。
+
+    `pricing` 是本次扫描开头取到的 _pricing_inputs() 元组（调用方从同一个
+    值里取指纹，两处看到的是同一份价表）；传给 _row_cost 当记忆的代次，
+    None 表示价表读不出来、不进表。
     """
     if r and not row_matches_realm(row, r):
         return
@@ -3460,9 +3646,11 @@ def _fold_usage_snapshot(row, snap, r, since, until, pricing_on=None, also=None)
     outcome = row_outcome(row)
     # Each row is priced against the version that was in force when it
     # happened, so a later price change cannot rewrite yesterday's totals.
-    cost = wb_pricing.cost_for_row(row, details=False, enabled=pricing_on)
+    # _row_cost 按行记忆（见「行级结果记忆」）：同一个视图里这一行只算一次，
+    # 第二个视图直接取上次的结果；pricing 是本次扫描的价表代次。
+    cost = _row_cost(row, pricing, pricing_on)
     model = row.get("model")
-    targets = (snap,) if also is None else (snap, also)
+    targets = (snap,) if not also else (snap,) + tuple(also)
     if outcome != "completed":
         for tgt in targets:
             tgt["errors"] += 1
@@ -3523,7 +3711,8 @@ def _usage_snap_state_ready(r, pricing_on):
     if state is None:
         state = _usage_snap_state[r] = {"snap": None, "offset": 0, "key": None,
                                         "pricing": None, "realm": None,
-                                        "tail": b"", "days": {}, "days_floor": None}
+                                        "tail": b"", "days": {}, "days_floor": None,
+                                        "hours_floor_at": None}
     pricing = _pricing_inputs(pricing_on)
     realm = _realm_inputs()
     log_key = _usage_log_key()
@@ -3531,20 +3720,22 @@ def _usage_snap_state_ready(r, pricing_on):
         # 全新状态（进程刚起来）：先问 checkpoint，问不到才从零折起。
         if not _usage_cache_adopt_snapshot(r, state, log_key, pricing, realm):
             state.update({"snap": _empty_stats(), "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
+                          "days": {}, "days_floor": None, "hours_floor_at": None})
     elif (not _pricing_unchanged(state["pricing"], pricing)
             or state["realm"] != realm
             or not _log_resume_ok(state, log_key)):
         state.update({"snap": _empty_stats(), "offset": 0, "tail": b"",
-                      "days": {}, "days_floor": None})
+                      "days": {}, "days_floor": None, "hours_floor_at": None})
     state.update({"pricing": pricing, "realm": realm, "key": log_key})
 
     def fold(row):
-        # 一行折两处：all-time 半 + 它所属那天的窗口半。过滤与算价在
-        # _fold_usage_snapshot 里只做一次。
+        # 一行折三处：all-time 半 + 它所属那天的窗口半 + 那个小时的小时桶。
+        # 过滤与算价在 _fold_usage_snapshot 里只做一次。
+        day = _usage_day_bucket(state, row, r, _day_snapshot_bucket)
+        hour = None if day is None else _usage_hour_bucket(state, row, day)
+        extras = () if day is None else ((day,) if hour is None else (day, hour))
         _fold_usage_snapshot(row, state["snap"], r, None, None, pricing_on,
-                             also=_usage_day_bucket(state, row, r,
-                                                    _day_snapshot_bucket))
+                             also=extras, pricing=pricing)
 
     offset, error = _scan_usage_from(state["offset"], fold)
     if error is None:
@@ -3578,7 +3769,7 @@ def _usage_alltime_snapshot(r, pricing_on=None):
             log(f"usage snapshot read failed: {error}")
             snap = state["snap"]
             state.update({"snap": None, "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
+                          "days": {}, "days_floor": None, "hours_floor_at": None})
     # 落盘决定在锁外做（见 checkpoint 一节）：写盘要逐把读三份状态，在状态
     # 锁里再取别的状态锁会构成锁序环。折叠失败的那次不写——它的 offset 已经
     # 归零，落盘函数也会跳过。
@@ -3599,11 +3790,16 @@ def _scan_usage_snapshot_window(r, since, until, pricing_on=None):
     is a bound the fold ignores, and the pre-filter must not read it as
     "keep nothing after the epoch" and drop rows the fold would have
     counted.
+
+    价表在这里取一次（与 all-time 折叠同一条口径：一次扫描一份价表快照），
+    传给折叠当行级记忆的代次；这次扫描里的行因此可以和别的视图共享定价结果。
     """
+    pricing = _pricing_inputs(pricing_on)
     snap = _empty_stats()
     _, error = _scan_usage_from(
         0,
-        lambda row: _fold_usage_snapshot(row, snap, r, since, until, pricing_on),
+        lambda row: _fold_usage_snapshot(row, snap, r, since, until, pricing_on,
+                                         pricing=pricing),
         skip=lambda line: _line_outside_window(line, since or None,
                                                  until or None))
     if error is not None:
@@ -3624,7 +3820,7 @@ def _usage_snapshot_window_from_days(r, day_key, pricing_on):
             # 与「没有缓存」时的行为一致。
             log(f"usage snapshot read failed: {error}")
             state.update({"snap": None, "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
+                          "days": {}, "days_floor": None, "hours_floor_at": None})
             return None
         if not _days_cover(state, day_key):
             return None
@@ -3637,22 +3833,88 @@ def _usage_snapshot_window_from_days(r, day_key, pricing_on):
     return snap
 
 
-def _usage_snapshot_window(r, since, until, pricing_on=None):
-    """窗口半快照：对齐窗口由日桶相加，其余保持整段扫描。
+def _usage_snapshot_window_from_hours(r, since, pricing_on):
+    """窗口半快照 = 整点窗口内的小时桶之和；小时层不可用时返回 None。
 
-    只有「until 开放 + 起点是本地午夜」的窗口拆得成整天的并集（today /
-    week / month 都是）。自定义区间与带 until 的区间一律走整段扫描：起点
-    不是午夜就拆不开，而 until 落在某天中间时，那一天的桶里还有窗口外的
-    行，加进去就是错的。
+    与日桶版同一条规矩：先把 all-time 折叠推进到文件尾（小时桶与它同一次
+    扫描推进），再从存量桶求和。成立条件缺一不可，任何一条不成立就返回
+    None（调用方退回按小时分组的冷路径）：
+
+      * 窗口起点是本地整点（见 _hour_window_key）；
+      * days_floor 覆盖窗口起点——小时桶挂在日桶上，剪枝跟着日桶走；
+      * 被选中的每个日桶都带小时表。某天的小时格点不成立时整张表被摘掉
+        （见 _usage_hour_bucket），这时整个窗口退回扫描，不能只跳过那一天；
+      * 每个小时桶的 at 落在「窗口起点 + k*3600」的格点上，且与所属日桶
+        对得上（日桶 at + 序号*3600）。这一条挡住夏令时把日边界挪动的
+        情形——与 _series_slice 的格点校验同源。
     """
-    day_key = _window_day_key(since) if until is None else None
-    if day_key is not None and _usage_day_buckets_enabled():
-        snap = _usage_snapshot_window_from_days(r, day_key, pricing_on)
-        if snap is not None:
-            return snap
-        # 日桶没盖住窗口起点（还没折过/被剪枝/折叠出错）：冷路径现折一份
-        # 按日分组的窗口半，口径与日桶状态一致，两条路径的字节因此相同。
-        return _scan_usage_snapshot_window_days(r, since, pricing_on)
+    key = _hour_window_key(since)
+    if key is None:
+        return None
+    day_key, k0 = key
+    with _usage_snap_state_lock:
+        state, offset, error = _usage_snap_state_ready(r, pricing_on)
+        if error is not None:
+            log(f"usage snapshot read failed: {error}")
+            state.update({"snap": None, "offset": 0, "tail": b"",
+                          "days": {}, "days_floor": None, "hours_floor_at": None})
+            return None
+        if not _days_cover(state, day_key):
+            return None
+        if not _hours_cover(state, since):
+            return None
+        lo = int(since)
+        snap = _empty_stats()
+        days = state["days"]
+        for key in sorted(days):
+            if key < day_key:
+                continue
+            bucket = days[key]
+            hours = bucket.get("hours")
+            if hours is None:
+                return None
+            day_at = int(bucket["at"])
+            for hour in sorted(hours, key=int):
+                if key == day_key and int(hour) < k0:
+                    # 起点那天只看起点之后的整点：更早的桶属于窗口外，跳过
+                    # 它们不影响正确性（桶按 at 严格切分，见 _usage_hour_bucket）。
+                    continue
+                sub = hours[hour]
+                at = int(sub["at"])
+                if at != day_at + int(hour) * 3600:
+                    return None
+                if (at - lo) % 3600:
+                    return None
+                _add_usage_snapshot(snap, sub)
+    _usage_cache_maybe_save("snapshot", offset)
+    return snap
+
+
+def _usage_snapshot_window(r, since, until, pricing_on=None):
+    """窗口半快照：对齐窗口由日桶/小时桶相加，其余保持整段扫描。
+
+    只有「until 开放 + 起点落在格点上」的窗口拆得成存量桶的并集：起点是
+    本地午夜时用日桶（today / week / month 都是），起点是本地整点时用小时
+    桶（自定义区间的常见形态，见 _hour_window_key）。自定义区间与带 until
+    的区间一律走整段扫描：起点不落在格点上就拆不开，而 until 落在某天/某
+    小时中间时，那个桶里还有窗口外的行，加进去就是错的。
+    """
+    if until is None:
+        day_key = _window_day_key(since)
+        if day_key is not None and _usage_day_buckets_enabled():
+            snap = _usage_snapshot_window_from_days(r, day_key, pricing_on)
+            if snap is not None:
+                return snap
+            # 日桶没盖住窗口起点（还没折过/被剪枝/折叠出错）：冷路径现折一份
+            # 按日分组的窗口半，口径与日桶状态一致，两条路径的字节因此相同。
+            return _scan_usage_snapshot_window_days(r, since, pricing_on)
+        if _usage_day_buckets_enabled() and _hour_window_key(since) is not None:
+            snap = _usage_snapshot_window_from_hours(r, since, pricing_on)
+            if snap is not None:
+                return snap
+            # 小时层没盖住窗口起点（还没折过/被剪枝/那天的小时格点不成立）：
+            # 冷路径现折一份按小时分组的窗口半，口径与小时桶状态一致。
+            return _scan_usage_snapshot_window_hours(r, since, pricing_on)
     return _scan_usage_snapshot_window(r, since, until, pricing_on)
 
 
@@ -3977,13 +4239,23 @@ def _usage_timeseries_scan(realm, lo, hi, step):
 
 
 def _usage_timeseries_uncached(realm, lo, hi, step):
-    """窗口序列：优先由日/小时桶切片，不成立时整段扫描。
+    """窗口序列：优先由日/小时桶/分钟环切片，不成立时整段扫描。
 
-    切片只在「窗口起点是本地午夜 + 桶宽 3600/86400」时才是同一件事，所以
-    先按这两条判断要不要惊动状态：自定义区间与分钟桶根本不折状态，也就
-    不会为它们白扫一遍。
+    切片只在「桶宽与窗口对齐」时才是同一件事，所以先按桶宽判断要不要惊动
+    状态：日/小时桶要求窗口起点是本地午夜，分钟环要求起点落在分钟格点上
+    （lo 是 60 的整数倍）。两条都不成立的自定义区间根本不折状态，也就不会
+    为它们白扫一遍。
     """
-    day_key = _window_day_key(lo) if step in (3600, 86400) else None
+    if step in (3600, 86400):
+        day_key = _window_day_key(lo)
+    elif step == 60:
+        # 分钟窗口：起点落在格点上才可能与存量分钟桶一一对应（见
+        # _series_slice_minutes）；不在格点上的窗口连状态都不惊动。
+        day_key = _series_window_day_key(lo)
+        if day_key is not None and not _series_minute_grid_ok(lo):
+            day_key = None
+    else:
+        day_key = None
     if day_key is not None and _usage_day_buckets_enabled():
         with _series_state_lock:
             state, offset, error = _usage_series_state_ready(realm)
@@ -3992,7 +4264,8 @@ def _usage_timeseries_uncached(realm, lo, hi, step):
                 # 折叠失败：状态归零（下一次从零折起），这次退回整段扫描。
                 log("usage timeseries fold failed: %s" % error)
                 state.update({"days": {}, "days_floor": None, "max_at": 0,
-                              "credits": [], "offset": 0, "tail": b""})
+                              "credits": [], "minutes": {}, "minutes_from": None,
+                              "offset": 0, "tail": b""})
             else:
                 out = _series_slice(state, realm, lo, hi, step, day_key)
         if error is None:
@@ -5530,7 +5803,8 @@ def _bump_analytics_models(tgt, m_id, vals, is_err, cost_cny):
     tm["cost_cny"] += cost_cny
 
 
-def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None):
+def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None,
+                          pricing=None):
     """Fold one parsed row into one half of the analytics payload.
 
     `maps` holds the four maps that half folds into and `half` names the stat
@@ -5542,9 +5816,13 @@ def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None):
     served by many upstream accounts, and one account can serve many keys, so
     the two tables are views of the same spend, not a decomposition of it.
 
-    `also` 是同一行还要折进的第二份 (maps, half)（按日分桶的窗口半）。过滤、
-    算价与字段提取只做一次，两份各自累加：折叠本来就要求两侧各记一笔，而
-    cost_for_row 与 realm 判定是每行最贵的那部分，只该付一次。
+    `also` 是同一行还要折进的那几份 (maps, half) 的序列（按日分桶与按小时
+    分桶的窗口半）。过滤、算价与字段提取只做一次，各份各自累加：折叠本来
+    就要求每侧各记一笔，而 cost_for_row 与 realm 判定是每行最贵的那部分，
+    只该付一次。
+
+    `pricing` 是本次扫描开头取到的 _pricing_inputs() 元组（见
+    _fold_usage_snapshot 的同名参数）。
     """
     if realm and not row_matches_realm(row, realm):
         return
@@ -5556,7 +5834,7 @@ def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None):
     if outcome == "client_aborted":
         return
     is_err = outcome != "completed"
-    cost = wb_pricing.cost_for_row(row, details=False, enabled=pricing_on)
+    cost = _row_cost(row, pricing, pricing_on)
     cost_cny = cost["cny"] if cost["known"] else 0.0
     vals = _analytics_row_values(row)
     acct_uid = row.get("account") or "(unattributed)"
@@ -5570,7 +5848,9 @@ def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None):
         k_id = KEY_BUCKET_BEFORE
     k_realm = row_realm(row) or ""
     at = row.get("at") or 0
-    targets = ((maps, half),) if also is None else ((maps, half), also)
+    targets = [(maps, half)]
+    if also is not None:
+        targets.extend(also)
     for tgt, (stat_key, models_key) in targets:
         _feed_analytics(tgt["summary"], vals, is_err, cost_cny)
 
@@ -5642,7 +5922,7 @@ def _analytics_all_time(realm, pricing_on=None):
             log("compute_usage_analytics failed: %s" % error)
             maps = state["maps"]
             state.update({"maps": _new_analytics_maps(), "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
+                          "days": {}, "days_floor": None, "max_at": 0})
     if error is None:
         _usage_cache_maybe_save("analytics", offset)
     return maps, offset
@@ -5651,9 +5931,13 @@ def _analytics_all_time(realm, pricing_on=None):
 def _analytics_state_ready(realm, pricing_on=None):
     """把 `realm` 的 all-time 折叠推进到文件尾；返回 (state, offset, error)。
 
-    调用方必须已持有 _analytics_state_lock。日桶与 all-time 折叠共用这一次
-    扫描（见 _fold_usage_analytics 的 also），窗口半与 all-time 半因此描述
-    同一段字节。
+    调用方必须已持有 _analytics_state_lock。日桶、小时子表与 all-time 折叠
+    共用这一次扫描（见 _fold_usage_analytics 的 also），窗口半与 all-time 半
+    因此描述同一段字节。
+
+    `hours_keep` 标记这份状态要维护小时子表（剪枝线比日桶短，见
+    _prune_day_buckets）；`max_at` 是折过的最大 at（含 realm 不匹配的行），
+    小时窗口靠它判断窗口上界有没有切掉桶里的行。
     """
     state = _analytics_state.get(realm)
     if state is None:
@@ -5661,7 +5945,8 @@ def _analytics_state_ready(realm, pricing_on=None):
                                            "offset": 0, "key": None,
                                            "pricing": None, "realm": None,
                                            "tail": b"", "days": {},
-                                           "days_floor": None}
+                                           "days_floor": None, "max_at": 0,
+                                           "hours_keep": True}
     pricing = _pricing_inputs(pricing_on)
     realm_inputs = _realm_inputs()
     log_key = _usage_log_key()
@@ -5669,20 +5954,31 @@ def _analytics_state_ready(realm, pricing_on=None):
         # 全新状态（进程刚起来）：先问 checkpoint，问不到才从零折起。
         if not _usage_cache_adopt_analytics(realm, state, log_key, pricing, realm_inputs):
             state.update({"maps": _new_analytics_maps(), "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
+                          "days": {}, "days_floor": None, "max_at": 0})
     elif (not _pricing_unchanged(state["pricing"], pricing)
             or state["realm"] != realm_inputs
             or not _log_resume_ok(state, log_key)):
         state.update({"maps": _new_analytics_maps(), "offset": 0, "tail": b"",
-                      "days": {}, "days_floor": None})
+                      "days": {}, "days_floor": None, "max_at": 0})
     state.update({"pricing": pricing, "realm": realm_inputs, "key": log_key})
 
     def fold(row):
-        # 一行折两处：all-time 半 + 它所属那天的窗口半（过滤与算价只做一次）。
+        # 一行折三处：all-time 半 + 它所属那天的窗口半 + 那天里它所属那小时
+        # 的窗口半（过滤与算价只做一次）。
+        at = row.get("at") or 0
+        if at > state["max_at"]:
+            state["max_at"] = at
         day = _usage_day_bucket(state, row, realm, _day_analytics_bucket)
+        hour = _analytics_hour_bucket(day, at)
+        if day is None:
+            also = None
+        elif hour is None:
+            also = ((day, _ANALYTICS_WINDOW),)
+        else:
+            also = ((day, _ANALYTICS_WINDOW), (hour, _ANALYTICS_WINDOW))
         _fold_usage_analytics(
-            row, realm, state["maps"], _ANALYTICS_ALL, pricing_on,
-            also=None if day is None else (day, _ANALYTICS_WINDOW))
+            row, realm, state["maps"], _ANALYTICS_ALL, pricing_on, also=also,
+            pricing=pricing)
 
     offset, error = _scan_usage_from(state["offset"], fold)
     if error is None:
@@ -5702,7 +5998,7 @@ def _analytics_window_from_days(realm, day_key, pricing_on):
         if error is not None:
             log("compute_usage_analytics failed: %s" % error)
             state.update({"maps": _new_analytics_maps(), "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
+                          "days": {}, "days_floor": None, "max_at": 0})
             return None
         if not _days_cover(state, day_key):
             return None
@@ -5715,11 +6011,84 @@ def _analytics_window_from_days(realm, day_key, pricing_on):
     return maps
 
 
-def _analytics_window(realm, since, until, stop_at, pricing_on):
-    """窗口半 analytics：对齐窗口由日桶相加，其余保持整段扫描。
+# ---------------------------------------------------------------------------
+# analytics 的小时层：自定义区间窗口的就近取值
+#
+# 日桶只拆得开「起点是本地午夜 + until 开放」的窗口；面板的自定义区间起点是
+# 任意时刻，那条路径一直整段扫描（路由器上冷 49.4s）。而 analytics 的 token
+# 口径含失败行（见 _feed_analytics），与 snapshot/series 不同，借不了别人的
+# 层——所以这里在 analytics 自己的日桶里再挂一层小时子表（analytics 算价，
+# 小时桶跟着带成本字段），起点落在「本地午夜 + k*3600」格点上的窗口就是窗口
+# 内小时桶之和，O(小时数)。
+#
+# 与日桶同一条纪律：对齐窗口的求和统一用「按小时分组」的口径，冷扫描
+# （_scan_usage_analytics_window_hours）、小时桶、加载 checkpoint 三条路径
+# 给出的字节完全一致；非整小时的起点（面板按分钟选的时间）拆不开，仍然整段
+# 扫描，正确性优先。WB_USAGE_DAY_BUCKETS=0 一并关掉小时层。
+#
+# 保留比日桶短得多（WB_USAGE_HOUR_KEEP_HOURS，默认 48h）：小时桶只为近期的
+# 自定义窗口服务，每个桶的形状与日桶一样（summary + 每账号/每模型/每 key），
+# 跟着 32 天的日桶全留会让 checkpoint 膨胀十几倍。剪枝线以外的天由查询侧按
+# 「这一天还有没有 hours」自己表达（没有就退回扫描），所以不另存 floor。
+# ---------------------------------------------------------------------------
 
-    与 _usage_snapshot_window 同一条规矩：只有「until 开放 + 起点是本地
-    午夜」的窗口拆得成整天的并集。
+
+def _analytics_window_from_hours(realm, since, until, pricing_on):
+    """窗口半 maps = 窗口内的小时桶之和；小时层不可用时返回 None。
+
+    成立条件（缺一不可，任何一条不成立就退回扫描——正确性优先）：
+      * 窗口起点落在本地午夜起算的小时格点上（调用方已判过，这里再按桶校验）；
+      * until 开放，或 until 不低于折过的最大 at（否则窗口上界会切掉桶里的行）；
+      * days_floor 覆盖窗口起点所在的天（更早的天没有桶）；
+      * 窗口起点所在的天及其后每一天都有 hours 子表（被剪枝线剪掉、或本地
+        午夜落在不存在的小时里而摘掉的那天，都会让窗口整体退回扫描）。
+    """
+    with _analytics_state_lock:
+        state, offset, error = _analytics_state_ready(realm, pricing_on)
+        if error is not None:
+            log("compute_usage_analytics failed: %s" % error)
+            state.update({"maps": _new_analytics_maps(), "offset": 0, "tail": b"",
+                          "days": {}, "days_floor": None, "max_at": 0})
+            return None
+        if until is not None and until < state["max_at"]:
+            return None
+        day_key = _local_day_key(since)
+        if not _days_cover(state, day_key):
+            return None
+        lo_i = int(since)
+        maps = _new_analytics_maps()
+        for key in sorted(state["days"]):
+            if key < day_key:
+                continue
+            bucket = state["days"][key]
+            hours = bucket.get("hours")
+            if hours is None:
+                return None
+            day_at = int(bucket["at"])
+            for hour in sorted(hours, key=int):
+                sub = hours[hour]
+                if int(sub["at"]) != day_at + int(hour) * 3600:
+                    return None
+                # 格点校验对起点所在那天的每个桶都做（含 at < since 的桶）：
+                # 时区偏移不是整小时的夏令时（极少数时区）会让格点整体错开
+                # 半小时，错开的桶可能横跨起点、把 at >= since 的行关在里面
+                # ——跳过它就会漏行，所以宁可整个窗口退回扫描。
+                if (int(sub["at"]) - lo_i) % 3600:
+                    return None
+                if int(sub["at"]) < lo_i:
+                    continue
+                _add_analytics_window_maps(maps, sub)
+    _usage_cache_maybe_save("analytics", offset)
+    return maps
+
+
+def _analytics_window(realm, since, until, stop_at, pricing_on):
+    """窗口半 analytics：对齐窗口由日桶/小时桶相加，其余保持整段扫描。
+
+    与 _usage_snapshot_window 同一条规矩，外加一层小时桶：只有「until 开放 +
+    起点是本地午夜」的窗口拆得成整天的并集；起点落在整小时的其它窗口（自定义
+    区间）拆得成整小时的并集，由 analytics 自己的小时层回答（见「小时层」
+    一节）；其余一律保持整段扫描。
     """
     day_key = _window_day_key(since) if until is None else None
     if day_key is not None and _usage_day_buckets_enabled():
@@ -5729,6 +6098,13 @@ def _analytics_window(realm, since, until, stop_at, pricing_on):
         # 日桶没盖住窗口起点：冷路径现折一份按日分组的窗口半，口径一致。
         return _scan_usage_analytics_window_days(realm, since, stop_at,
                                                  pricing_on)
+    if _window_hour_aligned(since) and _usage_day_buckets_enabled():
+        maps = _analytics_window_from_hours(realm, since, until, pricing_on)
+        if maps is not None:
+            return maps
+        # 小时层没盖住：冷路径现折一份按小时分组的窗口半，口径与小时层一致。
+        return _scan_usage_analytics_window_hours(realm, since, until, stop_at,
+                                                  pricing_on)
     return _scan_usage_analytics_window(realm, since, until, stop_at=stop_at,
                                         pricing_on=pricing_on)
 
@@ -5739,7 +6115,11 @@ def _scan_usage_analytics_window(realm, since, until, stop_at=None, pricing_on=N
     The all-time half is not rebuilt here - it comes from the incremental fold
     - and the read stops where that fold stopped, so both halves of the
     payload describe the same bytes even when a row lands mid-rebuild.
+
+    价表在这里取一次（与 all-time 折叠同一条口径），传给折叠当行级记忆的
+    代次：这次窗口扫描里的行可以和 all-time 半共享定价结果。
     """
+    pricing = _pricing_inputs(pricing_on)
     maps = _new_analytics_maps()
 
     def fold(row):
@@ -5750,7 +6130,8 @@ def _scan_usage_analytics_window(realm, since, until, stop_at=None, pricing_on=N
             return
         if until is not None and at > until:
             return
-        _fold_usage_analytics(row, realm, maps, _ANALYTICS_WINDOW, pricing_on)
+        _fold_usage_analytics(row, realm, maps, _ANALYTICS_WINDOW, pricing_on,
+                              pricing=pricing)
 
     _, error = _scan_usage_from(
         0, fold, stop_at=stop_at,
@@ -5892,12 +6273,27 @@ def _add_analytics_stat(dst, src):
 # 的天。剪枝会抬高 days_floor，任何够不到的天都因此退回整段扫描——宁可多
 # 扫一次，不能少算一天。
 #
+# analytics 的日桶还挂一层小时子表（保留线更短，只给自定义区间用，见
+# 「analytics 的小时层」一节）：那不是日桶的一部分，日桶求和原样忽略它。
+#
 # 浮点求和的口径：窗口 = 日桶逐日相加，与旧实现「整段扫描逐行累加」的区别
 # 只是浮点的结合顺序（credit / cost_cny / speed_sum 可能差最后一两个 ulp，
 # 整数字段逐位相同）。逐行顺序无法从日聚合还原，这是日桶推导的固有代价；
 # 本文件里所有对齐窗口的路径统一用「按日分组」的口径（冷扫描、日桶、加载
 # checkpoint 三条路径给出的字节完全一致），把「像没有缓存一样正确」保成
-# 路径之间的一致性。WB_USAGE_DAY_BUCKETS=0 可整体退回旧的逐行口径。
+# 路径之间的一致性；analytics 的小时窗口同理，只是分组的粒度换成小时。
+# WB_USAGE_DAY_BUCKETS=0 可整体退回旧的逐行口径。
+#
+# 小时层（T9）：日桶只服务「起点是本地午夜」的窗口，而面板的自定义区间
+# （range=custom）起点是任意时刻——最常见的形态就是整点（datetime-local
+# 输入框给的是分钟粒度，操作者选整点的概率远高于选 37 分）。于是每个日桶
+# 里再挂一张小时子表（_usage_hour_bucket），起点落在本地整点上的窗口由
+# 「整小时桶之和」回答：token/requests/credit 与成本字段（cost_cny /
+# cost_missing / by_model_acct）全部来自同一份桶，口径与整段扫描一致，不
+# 需要像「借时间序列的小时桶」那样丢掉成本列（series 不算价，D3）。
+# 小时层比日桶短命（_usage_hour_keep_days），覆盖不到就退回按小时分组的
+# 冷路径——两条路径的字节逐字节相同，语义与改动前一致（只是浮点结合顺序
+# 按小时而不是按行）。
 # ---------------------------------------------------------------------------
 
 # 日桶保留天数：月窗口最多回溯 30 天（当月 1 号），32 天留两天余量。更早的
@@ -5905,6 +6301,15 @@ def _add_analytics_stat(dst, src):
 # 要重写整份文件。调小它（WB_USAGE_DAY_KEEP_DAYS）会让更宽的窗口退回整段
 # 扫描（结果仍然正确，只是慢）：对 flash 写入敏感的部署可以调到 8，只保周。
 _USAGE_DAY_KEEP_DAYS = 32
+
+# 小时桶保留天数：小时层只服务面板的自定义整点窗口（操作者回头看最近一两
+# 天的某个整点），保留 2 天 = 最少 48 小时、最多 72 小时（剪枝按天走，见
+# _prune_hour_buckets）。再往前的小时桶没有任何现实窗口够得到，而每个小时
+# 桶都是完整的一份窗口半快照（含 by_model_acct 三层结构，实测约 2KB/桶）
+# ——路由器上 checkpoint 每多一份都要跟着重写，flash 写入慢且费寿命。覆盖
+# 不到的窗口退回冷路径，结果正确，只是慢。WB_USAGE_HOUR_KEEP_DAYS 可调；
+# 对 flash 特别敏感的部署可以调到 1（只保今天，24~48 小时）。
+_USAGE_HOUR_KEEP_DAYS = 2
 
 # 日桶求和要跳过的字段：started 是每份快照各自的创建时刻，不是累计量。
 # 与 _USAGE_CACHE_SNAPSHOT_NUMBERS 同源（同一份构造函数的数字字段），只是
@@ -5926,14 +6331,51 @@ def _usage_day_keep_days():
         return _USAGE_DAY_KEEP_DAYS
 
 
+def _usage_hour_keep_days():
+    """小时桶保留天数，默认 2；WB_USAGE_HOUR_KEEP_DAYS 可调。
+
+    同 _usage_day_keep_days：每次调用都读环境变量。取值再小也保留一天
+    （max(1, ...)）：小时层至少要能服务「今天的整点窗口」，否则等于没建。
+    """
+    try:
+        return max(1, int(os.environ.get("WB_USAGE_HOUR_KEEP_DAYS",
+                                         _USAGE_HOUR_KEEP_DAYS)))
+    except (TypeError, ValueError):
+        return _USAGE_HOUR_KEEP_DAYS
+
+
 def _usage_day_buckets_enabled():
     """日桶总开关，默认开；WB_USAGE_DAY_BUCKETS=0 退回逐行扫描口径。
 
     与 WB_USAGE_CACHE 同样的用法：现场紧急关掉、测试在一个进程里来回切。
-    关掉时既不折日桶也不用它们，窗口路径与改动前逐字节一致。
+    关掉时既不折日桶也不用它们，窗口路径与改动前逐字节一致。小时层挂在
+    日桶上（每个日桶里的 hours 子表），所以这个开关一并管住小时层：关掉
+    时既不折小时桶，整点窗口也退回逐行口径。
     """
     return os.environ.get("WB_USAGE_DAY_BUCKETS", "1").strip().lower() not in (
         "0", "false", "no", "off")
+
+
+# analytics 小时子表的保留小时数：小时层只为近期的自定义窗口服务，而每个小时
+# 桶的形状与日桶一样重（summary + 每账号/每模型/每 key），跟着 32 天的日桶
+# 全留会让 checkpoint 膨胀十几倍。48 小时覆盖「从昨天某个整点起」这类最常用
+# 的手动窗口，剪枝又在每天新建日桶时跑一次，实际保留 48~72 小时。调大只是让
+# checkpoint 变大（层覆盖更宽），调小只是让更早的自定义窗口退回整段扫描
+# （结果仍然正确，只是慢）。
+_USAGE_HOUR_KEEP_HOURS = 48
+
+
+def _usage_hour_keep_hours():
+    """小时子表保留小时数，默认 48；WB_USAGE_HOUR_KEEP_HOURS 可调。
+
+    每次调用都读环境变量，理由与 WB_USAGE_DAY_KEEP_DAYS 相同（现场调、测试
+    里来回切）。
+    """
+    try:
+        return max(1, int(os.environ.get("WB_USAGE_HOUR_KEEP_HOURS",
+                                         _USAGE_HOUR_KEEP_HOURS)))
+    except (TypeError, ValueError):
+        return _USAGE_HOUR_KEEP_HOURS
 
 
 def _local_day_key(ts):
@@ -5942,8 +6384,32 @@ def _local_day_key(ts):
     用字符串而不是午夜 epoch 当日桶的键：窗口与日桶的比较就是一次字符串
     比较（ISO 日期天然有序），查询不必再算一遍本地午夜，也不会被夏令时的
     日长变化影响——同一套本地日历日规则在折叠与查询两侧都成立。
+
+    结果按 ts 记忆（见「行级结果记忆」）：一次冷启动里三个视图各扫一遍日志，
+    每一行都要问一次日键，第二、第三遍直接取。时区被 tzset() 换过时表整体
+    作废；不可哈希的 ts（坏行）不进表，照旧真算、照旧抛同样的异常。
     """
-    return time.strftime("%Y-%m-%d", time.localtime(ts))
+    memo = _row_day_memo
+    if _row_memo_tz is not time.tzname:
+        _row_memo_tz_changed()
+    try:
+        hit = memo.get(ts)
+    except TypeError:
+        return time.strftime("%Y-%m-%d", time.localtime(ts))
+    if hit is not None:
+        return hit
+    key = time.strftime("%Y-%m-%d", time.localtime(ts))
+    cap = _ROW_MEMO_MAX
+    if cap > 0:
+        if len(memo) >= cap:
+            # 满了：只收「不比表里最旧那条更旧」的 ts。扫描从头往尾走，表里
+            # 留住的因此总是最近的一批行，第二遍走到尾部照样命中。
+            oldest = next(iter(memo))
+            if _row_memo_at(ts) < _row_memo_at(oldest):
+                return key
+            memo.pop(oldest, None)
+        memo[ts] = key
+    return key
 
 
 def _day_key_start(key):
@@ -5966,18 +6432,103 @@ def _window_day_key(since):
     return _local_day_key(since)
 
 
-def _day_snapshot_bucket(key, day_start):
-    """一天一份的窗口半快照桶；形状与 _empty_stats() 一致。
+def _hour_window_key(since):
+    """窗口起点能由小时桶推导时返回 (日键, 小时序号)，否则 None。
+
+    只有「起点正好是本地整点」的窗口才拆得成整小时桶的并集：小时桶按
+    「离那天本地午夜多少个 3600 秒」切格点（见 _usage_hour_bucket），所以
+    起点必须同时满足两条——本地墙上时间落在整点（_local_hour_start 能原样
+    还原），并且离本地午夜的距离是 3600 的整数倍。夏令时把日边界挪动、
+    或时区按半小时偏移的情形，只要 since 不落在格点上就返回 None（退回
+    扫描，正确性优先）。
+
+    整点起点也可能是本地午夜（两者同时成立）：调用方先问日桶，所以这条
+    只在「不是午夜」时兜住自定义区间的整点窗口。
+    """
+    if since is None:
+        return None
+    if _local_hour_start(since) != since:
+        return None
+    day_key = _local_day_key(since)
+    day_at = _day_key_start(day_key)
+    k = int((since - day_at) // 3600)
+    if day_at + k * 3600 != since:
+        return None
+    return day_key, k
+
+
+def _window_hour_aligned(since):
+    """窗口起点是否落在「本地午夜 + k*3600」的小时格点上。
+
+    小时桶的格点是「离那天的本地午夜多少秒」（见 _analytics_hour_bucket），
+    所以起点减它所属那天的本地午夜必须是 3600 的整数倍。自定义区间的起点是
+    任意分钟时拆不开——那条路径保持整段扫描（正确性优先）；起点正好是本地
+    午夜时恒成立（0 是 3600 的整数倍），与 _window_day_key 相容。
+    """
+    if since is None:
+        return False
+    return (_local_midnight(since) - since) % 3600 == 0
+
+
+def _new_window_snapshot_bucket(at):
+    """一份带格点 at 的窗口半快照桶（日桶与小时桶共用这个形状）。
 
     started 不参与求和（见 _add_usage_snapshot），形状保留只是让校验与
-    all-time 半共用同一套 _usage_cache_snapshot_ok。
+    all-time 半共用同一套 _usage_cache_snapshot_ok。at 是这个桶的本地格点
+    （日的午夜 / 小时的整点）epoch：小时桶按它切 3600 的格点，求和侧按它
+    做格点校验——与时间序列的桶同一套做法（_new_series_bucket）。
     """
-    return _empty_stats()
+    bucket = _empty_stats()
+    bucket["at"] = at
+    return bucket
+
+
+def _day_snapshot_bucket(key, day_start):
+    """一天一份的窗口半快照桶；形状与 _empty_stats() 一致。"""
+    return _new_window_snapshot_bucket(day_start)
 
 
 def _day_analytics_bucket(key, day_start):
-    """一天一份的窗口形状 analytics maps。"""
-    return _new_analytics_maps()
+    """一天一份的窗口形状 analytics maps（带 at 与小时子表，见「小时层」一节）。
+
+    at 是那天的本地午夜：小时子表按「离本地午夜多少秒」切，行的归属因此
+    不依赖折叠时刻（迟写/补写的行落回它时间戳所属的那天那小时）。
+    """
+    bucket = _new_analytics_maps()
+    bucket["at"] = day_start
+    bucket["hours"] = {}
+    return bucket
+
+
+def _new_analytics_hour_bucket(at):
+    """一小时一份的窗口形状 analytics maps（带 at；见「小时层」一节）。"""
+    bucket = _new_analytics_maps()
+    bucket["at"] = at
+    return bucket
+
+
+def _analytics_hour_bucket(day, at):
+    """这一行该折进的小时桶（day 桶的 hours 子表）；不该折时返回 None。
+
+    小时键是「离那天的本地午夜多少秒」的整小时数（字符串，与 JSON 往返后的
+    形状一致，同时间序列的小时子表）。本地午夜落在不存在的小时里（夏令时在
+    午夜切换的极少数时区）时这一行放不进格点：把整天的 hours 摘掉，让覆盖
+    这一天的小时窗口整体退回扫描（日桶本身照常，不受影响）。
+    """
+    if day is None:
+        return None
+    hours = day.get("hours")
+    if hours is None:
+        return None
+    day_at = int(day["at"])
+    if at < day_at:
+        day.pop("hours", None)
+        return None
+    hour = str(int((at - day_at) // 3600))
+    sub = hours.get(hour)
+    if sub is None:
+        sub = hours[hour] = _new_analytics_hour_bucket(day_at + int(hour) * 3600)
+    return sub
 
 
 def _day_series_bucket(key, day_start):
@@ -6020,6 +6571,11 @@ def _prune_day_buckets(state, days, newest_key):
     往前 _usage_day_keep_days() 天），没剪过时第一次折到新的一天也会把它记
     下来——比这条线更早的窗口一律退回整段扫描（时钟大幅回拨、日志里有远古
     补写行这类情况），宁可多扫一次，不能少算一天。
+
+    analytics 状态还挂着一条更短的小时子表保留线（state["hours_keep"]）：
+    小时层只为近期的自定义窗口服务，只摘旧天的 "hours" 子表，日桶本身照常
+    留满保留天数。被摘掉的天由查询侧按「这一天还有没有 hours」自己表达
+    （见 _analytics_window_from_hours），所以这里不用另存一个 floor。
     """
     horizon = _local_day_key(_day_key_start(newest_key)
                              - _usage_day_keep_days() * 86400)
@@ -6028,6 +6584,20 @@ def _prune_day_buckets(state, days, newest_key):
     floor = state.get("days_floor")
     if floor is None or floor < horizon:
         state["days_floor"] = horizon
+    # 带小时层的状态（snapshot，见 _usage_hour_bucket）顺带剪小时表：小时层
+    # 的保留期比日桶短，剪枝线要跟着一起抬。analytics / series 的状态没有
+    # hours_floor_at 这个键，不会被这条带到。
+    if "hours_floor_at" in state:
+        _prune_hour_buckets(state, days, newest_key)
+    # analytics 状态还挂着一条更短的小时子表保留线（state["hours_keep"]）：
+    # 小时层只为近期的自定义窗口服务，只摘旧天的 "hours" 子表，日桶本身照常
+    # 留满保留天数。
+    if state.get("hours_keep"):
+        hour_horizon = _local_day_key(_day_key_start(newest_key)
+                                      - _usage_hour_keep_hours() * 3600)
+        for key, bucket in days.items():
+            if key < hour_horizon:
+                bucket.pop("hours", None)
 
 
 def _days_cover(state, day_key):
@@ -6039,6 +6609,98 @@ def _days_cover(state, day_key):
     """
     floor = state.get("days_floor")
     return floor is not None and day_key >= floor
+
+
+def _usage_hour_bucket(state, row, day):
+    """这一行该折进哪个小时桶；不该折时返回 None。
+
+    小时桶挂在日桶里（`hours` 子表），键是「离当天本地午夜的 3600 秒个数」
+    的字符串——与时间序列的小时子桶同一套格点规则（见 _fold_usage_series）：
+    桶的 at = 日桶 at + 序号*3600，所以每个桶恰好覆盖一个整点区间，跨桶
+    求和不会重复也不会漏。
+
+    at 早于日桶 at 的行（极少数时区在本地午夜切换夏令时，午夜那一刻不存在）
+    放不进格点：整张小时表摘掉并留痕（`hours` 记为 None），求和侧看到没有表
+    就退回按小时分组的冷路径（日桶本身照常，日窗口不受影响）。留痕是为了
+    挡住「摘掉之后又来了这一天的行、把表重建出来」——重建的表缺了被摘掉的
+    那批行，一旦被求和侧选中就是少算。
+
+    hours_floor_at 是小时层的剪枝线：比它早的天不再折小时表。迟写/补写的
+    行可能落回很久以前那天（日桶还留着），但那张表早被剪掉，重新建起来
+    只会得到一张缺了其余小时的表——求和侧一旦用它就会少算，所以这里直接
+    不折（求和侧另有 _hours_cover 兜底）。
+    """
+    floor = state.get("hours_floor_at")
+    if floor is None or day["at"] < floor:
+        return None
+    at = row.get("at") or 0
+    day_at = day["at"]
+    hours = day.get("hours")
+    if hours is None and "hours" in day:
+        # 这天的小时表被摘过（午夜兜底）：不再重建，见 docstring。
+        return None
+    if at < day_at:
+        day["hours"] = None
+        return None
+    if hours is None:
+        hours = day["hours"] = {}
+    hour = str(int((at - day_at) // 3600))
+    sub = hours.get(hour)
+    if sub is None:
+        sub = hours[hour] = _new_window_snapshot_bucket(day_at + int(hour) * 3600)
+    return sub
+
+
+def _prune_hour_buckets(state, days, newest_key):
+    """丢掉保留窗口之外的日桶里的小时表，并把 hours_floor_at 抬到剪枝线。
+
+    小时层比日桶短命：它只服务最近几天的整点窗口（见 _USAGE_HOUR_KEEP_DAYS）。
+    剪枝按天走（与 _prune_day_buckets 同一套算术），所以实际保留在
+    keep_days 与 keep_days+1 天之间。hours_floor_at 的语义与 days_floor 相同
+    ——「这份状态的小时层从哪个时刻起是完整的」——更早的整点窗口一律退回
+    冷路径，宁可多扫一次，不能少算一个桶。
+    """
+    horizon_at = _day_key_start(newest_key) - _usage_hour_keep_days() * 86400
+    horizon = _local_day_key(horizon_at)
+    for key in list(days):
+        if key < horizon and "hours" in days[key]:
+            # 与午夜兜底同一个留痕：表置 None 而不是删键。剪枝线（下面那条）
+            # 本来也挡着重建，但留痕让「这张表不可用」成为桶自己的事实，
+            # 求和侧与折叠侧不必再依赖两条线的一致性。
+            days[key]["hours"] = None
+    floor = state.get("hours_floor_at")
+    if floor is None or floor < horizon_at:
+        state["hours_floor_at"] = horizon_at
+
+
+def _hours_cover(state, since):
+    """这份状态的小时层能否服务起点为 `since` 的窗口。
+
+    hours_floor_at 是剪枝线（见 _prune_hour_buckets）：比它早的窗口可能少了
+    被剪掉的小时表，只能退回扫描。它最早也要折到第一个新的一天才会记下
+    （没折过就是 None，此时谁都不服务——调用方总是先折到文件尾）。
+    """
+    floor = state.get("hours_floor_at")
+    return floor is not None and since >= floor
+
+
+def _hours_floor_on_adopt(days, stored):
+    """采用 checkpoint 时的小时层剪枝线：取「文件里的」与「按最新一天现算」
+    的较晚者。
+
+    较晚者一定安全：剪枝线只会往前抬，抬高了最多是少服务几天（那些窗口
+    退回冷路径），永远不会服务一张被剪过的表。两条都挡住同一条路——拿
+    不完整的表当完整（那是这个层唯一会算错数的方向）：文件里那条可能是
+    别的保留天数下写的，现算这条跟着当前 WB_USAGE_HOUR_KEEP_DAYS 走。
+    """
+    recomputed = None
+    if days:
+        recomputed = _day_key_start(max(days)) - _usage_hour_keep_days() * 86400
+    if stored is None:
+        return recomputed
+    if recomputed is None:
+        return stored
+    return max(stored, recomputed)
 
 
 def _add_usage_bucket(dst_map, key, src):
@@ -6124,7 +6786,12 @@ def _add_analytics_window_maps(dst, src):
 
 
 def _copy_analytics_window_maps(maps):
-    """一份窗口形状 maps 的深拷贝（落盘用，形状同 _new_analytics_maps()）。"""
+    """一份窗口形状 maps 的深拷贝（落盘用，形状同 _new_analytics_maps()）。
+
+    日桶/小时桶还会多带 at（两者都有）与 hours 子表（日桶）：照原样拷贝、
+    键序保持折叠时的插入顺序——checkpoint 不排序，加载回来要与冷启动逐字节
+    一致（见 _usage_cache_write）。
+    """
     out = {"summary": dict(maps["summary"]), "accts": {}, "models": {}, "keys": {}}
     for uid, entry in maps["accts"].items():
         copy = dict(entry)
@@ -6139,6 +6806,12 @@ def _copy_analytics_window_maps(maps):
         copy["window_models"] = _copy_analytics_models(km["window_models"])
         copy["realms"] = dict(km["realms"])
         out["keys"][kid] = copy
+    if "at" in maps:
+        out["at"] = maps["at"]
+    hours = maps.get("hours")
+    if hours is not None:
+        out["hours"] = {h: _copy_analytics_window_maps(sub)
+                        for h, sub in hours.items()}
     return out
 
 
@@ -6148,7 +6821,12 @@ def _scan_usage_snapshot_window_days(r, since, pricing_on=None):
     日桶状态不可用（还没折过、被剪枝、折叠出错）时走这里。结果必须与日桶
     状态给出的窗口半逐字节一致：窗口起点是本地午夜，两边装的是同一批行、
     同一个「按日分组」的求和口径，只是桶一个现折、一个存量。
+
+    这条路通常紧跟一次 all-time 折叠（_usage_snapshot_window_from_days 先
+    折到文件尾才发现日桶不够用），所以行级记忆在这里几乎全中：同一批行刚
+    在 all-time 半算过价与日键。价表照样在本函数开头取一次。
     """
+    pricing = _pricing_inputs(pricing_on)
     days = {}
 
     def fold(row):
@@ -6159,7 +6837,8 @@ def _scan_usage_snapshot_window_days(r, since, pricing_on=None):
         bucket = days.get(key)
         if bucket is None:
             bucket = days[key] = _empty_stats()
-        _fold_usage_snapshot(row, bucket, r, None, None, pricing_on)
+        _fold_usage_snapshot(row, bucket, r, None, None, pricing_on,
+                             pricing=pricing)
 
     _, error = _scan_usage_from(
         0, fold,
@@ -6172,8 +6851,55 @@ def _scan_usage_snapshot_window_days(r, since, pricing_on=None):
     return snap
 
 
+def _scan_usage_snapshot_window_hours(r, since, pricing_on=None):
+    """窗口半的冷路径：整段扫一遍，先按小时分桶再相加。
+
+    小时层状态不可用（还没折过、被剪枝、折叠出错、那天的格点不成立）时走
+    这里。结果必须与小时桶状态给出的窗口半逐字节一致：窗口起点是本地整点，
+    两边装的是同一批行、同一个「按（日，小时）分组」的求和口径，只是桶
+    一个现折、一个存量。
+
+    分组与 _usage_hour_bucket 同一套算术（日键 + 离午夜多少个 3600 秒），
+    但这里对 at 早于本地午夜的行照折不误（键可以是负的）：状态侧那种行会
+    把整张小时表摘掉、窗口退回这条路径，所以这条路径必须把它们算进去。
+    排序按 (日键, 序号) 数值序，与状态侧的遍历顺序一致。
+
+    价表在本函数开头取一次，行级记忆（见「行级结果记忆」）跟着这一批扫描
+    走：同一批行通常刚在 all-time 半算过价与日键，这里几乎全中。
+    """
+    pricing = _pricing_inputs(pricing_on)
+    hours = {}
+    day_ats = {}
+
+    def fold(row):
+        at = row.get("at") or 0
+        if since and at < since:
+            return
+        key = _local_day_key(at)
+        day_at = day_ats.get(key)
+        if day_at is None:
+            day_at = day_ats[key] = _day_key_start(key)
+        hour = int((at - day_at) // 3600)
+        bucket = hours.get((key, hour))
+        if bucket is None:
+            bucket = hours[(key, hour)] = _empty_stats()
+        _fold_usage_snapshot(row, bucket, r, None, None, pricing_on,
+                             pricing=pricing)
+
+    _, error = _scan_usage_from(
+        0, fold,
+        skip=lambda line: _line_outside_window(line, since or None, None))
+    if error is not None:
+        log(f"usage snapshot read failed: {error}")
+    snap = _empty_stats()
+    for key in sorted(hours):
+        _add_usage_snapshot(snap, hours[key])
+    return snap
+
+
 def _scan_usage_analytics_window_days(realm, since, stop_at=None, pricing_on=None):
     """窗口半 analytics 的冷路径：按日分桶再相加（见 snapshot 版）。"""
+    pricing = _pricing_inputs(pricing_on)
     days = {}
 
     def fold(row):
@@ -6184,7 +6910,8 @@ def _scan_usage_analytics_window_days(realm, since, stop_at=None, pricing_on=Non
         maps = days.get(key)
         if maps is None:
             maps = days[key] = _new_analytics_maps()
-        _fold_usage_analytics(row, realm, maps, _ANALYTICS_WINDOW, pricing_on)
+        _fold_usage_analytics(row, realm, maps, _ANALYTICS_WINDOW, pricing_on,
+                              pricing=pricing)
 
     _, error = _scan_usage_from(
         0, fold, stop_at=stop_at,
@@ -6197,20 +6924,81 @@ def _scan_usage_analytics_window_days(realm, since, stop_at=None, pricing_on=Non
     return out
 
 
+def _scan_usage_analytics_window_hours(realm, since, until, stop_at=None,
+                                       pricing_on=None):
+    """窗口半 analytics 的冷路径（起点整小时）：按小时分桶再相加。
+
+    小时层不可用（还没折过、被剪枝、折叠出错、until 切在桶中间）时走这里。
+    结果必须与小时桶状态给出的窗口半逐字节一致：两边装的是同一批行、同一个
+    「按小时分组」的求和口径，只是桶一个现折、一个存量。
+
+    分桶与折叠侧同一条规则（离那天的本地午夜多少秒）；本地午夜落在不存在
+    的小时里时这一天的小时键会变成负数，求和照样把它算进去（分组只是浮点
+    结合顺序的载体），所以这条冷路径不依赖格点是否成立。
+
+    价表在本函数开头取一次，行级记忆（见「行级结果记忆」）跟着这一批扫描走。
+    """
+    pricing = _pricing_inputs(pricing_on)
+    days = {}
+
+    def fold(row):
+        at = row.get("at") or 0
+        if since is not None and at < since:
+            return
+        if until is not None and at > until:
+            return
+        key = _local_day_key(at)
+        day = days.get(key)
+        if day is None:
+            day = days[key] = (_day_key_start(key), {})
+        day_at, hours = day
+        hour = str(int((at - day_at) // 3600))
+        maps = hours.get(hour)
+        if maps is None:
+            maps = hours[hour] = _new_analytics_maps()
+        _fold_usage_analytics(row, realm, maps, _ANALYTICS_WINDOW, pricing_on,
+                              pricing=pricing)
+
+    _, error = _scan_usage_from(
+        0, fold, stop_at=stop_at,
+        skip=lambda line: _line_outside_window(line, since, until))
+    if error is not None:
+        log("compute_usage_analytics failed: %s" % error)
+    out = _new_analytics_maps()
+    for key in sorted(days):
+        _day_at, hours = days[key]
+        for hour in sorted(hours, key=int):
+            _add_analytics_window_maps(out, hours[hour])
+    return out
+
+
 # ---------------------------------------------------------------------------
-# 时间序列的日/小时桶
+# 时间序列的日/小时/分钟桶
 #
 # usage_timeseries() 本来就把行按时间装桶，但每次缓存未命中都要整段扫描
 # （路由器上 range=week 约 2 秒）。窗口边界同样是本地午夜，而它的桶宽只有
-# 3600 与 86400 两种能与窗口对齐（span<=6h 的分钟桶只出现在自定义区间，
-# 那条路保持整段扫描）。折叠时顺手维护日桶与小时桶，窗口就是它们的切片：
-# 每个输出桶恰好等于一个存量桶（不做跨桶相加），所以连浮点求和都是逐位
-# 一致的——不像 snapshot/analytics 的窗口半需要把日桶相加。
+# 3600 与 86400 两种能与窗口对齐；span<=6h 的窗口（自定义区间，选择器
+# 见 _usage_timeseries_scope）给出 step=60，边界是任意分钟格点，日/小时桶
+# 都答不了——这一档由「最近 6 小时的分钟环」回答（见 _fold_usage_series_minute）。
+# 折叠时顺手维护这三层，窗口就是它们的切片：每个输出桶恰好等于一个存量桶
+# （不做跨桶相加），所以连浮点求和都是逐位一致的——不像 snapshot/analytics
+# 的窗口半需要把日桶相加。
 # ---------------------------------------------------------------------------
 _series_state = {}
 _series_state_lock = threading.Lock()
 # credit 历史只保留最近这么多条（整段扫描返回的也是窗口内的前 50 条）。
 _SERIES_CREDITS_KEEP = 50
+# 分钟环的保留窗口：6 小时，与选择器给出 step=60 的最大跨度（span<=6h）一一
+# 对应。分钟桶比小时桶密 60 倍，跟着日桶的 32 天保留会让 checkpoint 翻好几倍，
+# 而更早的窗口本来就该由小时层（step=3600）回答——所以环只留最近 6 小时。
+# 保留线用「桶的 at 严格小于 max_at - 窗口」判定，窗口服务条件写成
+# lo >= max_at - 窗口；两者一配对，服务得上的窗口需要的桶恰好一个不落
+# （窗口起点必须落在分钟格点上，见 _series_minute_grid_ok）。
+_SERIES_MINUTE_WINDOW = 6 * 3600
+# 折叠途中环的临时上限：超过就按保留线剪一次。剪枝是 O(环大小)、而环的
+# 正常大小 <= 361（6 小时 + 两个端点），720 是给「冷折时环里还堆着更早的
+# 桶」留的余量——这样整趟冷折的内存有界（满环约 200KB），不用等折完才剪。
+_SERIES_MINUTE_RING_CAP = 720
 
 
 def _new_series_bucket(at):
@@ -6267,8 +7055,50 @@ def _series_credit_push(credits, row, at):
         del credits[_SERIES_CREDITS_KEEP:]
 
 
+def _series_minute_key(at):
+    """行 -> 它所属的分钟桶键：epoch 分钟（向下取整）。
+
+    键用 epoch 分钟而不是「离本地午夜多少秒」：分钟窗口的起点是任意分钟格点
+    （自定义区间的 since），不锚在本地午夜上，所以桶的格点也取绝对分钟；
+    这样跨午夜、跨小时都是同一张表，切片不必按天分组。
+    """
+    return int(at // 60)
+
+
+def _fold_usage_series_minute(state, row, at):
+    """一行折进分钟环（与日/小时桶同一 realm 过滤、同一折叠口径）。
+
+    保留线以下的桶不建（建了也会被下一次剪枝丢掉）：窗口要服务得上的行都在
+    max_at - 6h 之上，更早的行折进来只是白建一个马上被剪的桶。
+    """
+    key = _series_minute_key(at)
+    if key * 60 < state["max_at"] - _SERIES_MINUTE_WINDOW:
+        return
+    minutes = state["minutes"]
+    bucket = minutes.get(key)
+    if bucket is None:
+        bucket = minutes[key] = _new_series_bucket(key * 60)
+        if len(minutes) > _SERIES_MINUTE_RING_CAP:
+            _prune_series_minutes(state)
+    _feed_series_bucket(bucket, row)
+
+
+def _prune_series_minutes(state):
+    """丢掉保留线（max_at - 6h）以下的分钟桶。
+
+    只按 max_at 剪，不跟日桶的 32 天剪枝线：分钟环的覆盖范围就是它自己的
+    保留窗口，与日桶保留多少天无关。判定与 _fold_usage_series_minute 的
+    跳过条件同一条（桶的 at 严格小于保留线），两边不会出现「建的桶马上被剪」
+    或「剪了还需要的桶」。
+    """
+    horizon = state["max_at"] - _SERIES_MINUTE_WINDOW
+    minutes = state["minutes"]
+    for key in [k for k in minutes if k * 60 < horizon]:
+        del minutes[key]
+
+
 def _fold_usage_series(row, r, state):
-    """一行折进时间序列状态：日桶 + 小时桶 + credit 缓冲。"""
+    """一行折进时间序列状态：日桶 + 小时桶 + 分钟环 + credit 缓冲。"""
     at = row.get("at") or 0
     if at > state["max_at"]:
         # 折过的最大 at：窗口上界（hi=now）只要不低于它，存量桶就都在窗口内。
@@ -6278,6 +7108,9 @@ def _fold_usage_series(row, r, state):
     if bucket is None:
         return
     _feed_series_bucket(bucket, row)
+    # 分钟环放在小时桶的午夜兜底之前：兜底会 return（那一天的 hours 摘掉），
+    # 而分钟环与日/小时格点无关，漏折一行就会让它的覆盖出现空洞。
+    _fold_usage_series_minute(state, row, at)
     if at < bucket["at"]:
         # 本地午夜落在不存在的小时里（极少数时区的夏令时正好在午夜切换）：
         # 这一天的行放不进小时格点，把 hours 摘掉让切片对这一天整体退回扫描
@@ -6303,11 +7136,17 @@ def _usage_series_state_ready(r):
 
     调用方必须已持有 _series_state_lock。时间序列折叠不算价，所以状态只带
     realm 指纹（行没有 realm 字段时 row_realm() 会读它）。
+
+    状态里的 `minutes_from` 是分钟环的完整线：从零折起（含 refold）时它是
+    None（环对整份日志完整）；采用了一份没有分钟环的旧 checkpoint 时，环只
+    对采用点之后折进来的行完整，那条线就是采用时的 max_at（见
+    _usage_cache_adopt_series）。
     """
     state = _series_state.get(r)
     if state is None:
         state = _series_state[r] = {
             "days": {}, "days_floor": None, "max_at": 0, "credits": [],
+            "minutes": {}, "minutes_from": None,
             "offset": 0, "key": None, "realm": None, "tail": b""}
     realm = _realm_inputs()
     log_key = _usage_log_key()
@@ -6315,16 +7154,21 @@ def _usage_series_state_ready(r):
         # 全新状态（进程刚起来）：先问 checkpoint，问不到才从零折起。
         if not _usage_cache_adopt_series(r, state, log_key, realm):
             state.update({"days": {}, "days_floor": None, "max_at": 0,
-                          "credits": [], "offset": 0, "tail": b""})
+                          "credits": [], "minutes": {}, "minutes_from": None,
+                          "offset": 0, "tail": b""})
     elif state["realm"] != realm or not _log_resume_ok(state, log_key):
         state.update({"days": {}, "days_floor": None, "max_at": 0,
-                      "credits": [], "offset": 0, "tail": b""})
+                      "credits": [], "minutes": {}, "minutes_from": None,
+                      "offset": 0, "tail": b""})
     state.update({"realm": realm, "key": log_key})
     offset, error = _scan_usage_from(
         state["offset"], lambda row: _fold_usage_series(row, r, state))
     if error is None:
         state["offset"] = offset
         state["tail"] = _log_tail_signature(offset)
+        # 折叠途中的剪枝是按上限触发的，收尾再剪一次，落盘的环就是保留窗口
+        # 以内的那一批（状态不折时这里也不花时间：环大小 <= 上限）。
+        _prune_series_minutes(state)
     return state, offset, error
 
 
@@ -6338,8 +7182,100 @@ def _series_output_bucket(bucket):
             "total_tokens": bucket["total_tokens"], "credit": bucket["credit"]}
 
 
+def _series_minute_grid_ok(lo):
+    """窗口起点能否落在分钟环的格点上：lo 必须是 60 的整数倍。
+
+    整段扫描的桶边界是 lo + k*60，存量分钟桶的边界是 epoch 分钟的整数倍；
+    两组边界一一对应（可以整桶取用）当且仅当 lo 自己落在格点上。面板的
+    datetime-local 输入给的就是整分钟（fromLocalInputValue 只到分钟），
+    手写的带小数的 since 一律退回整段扫描。
+    """
+    return int(lo) == lo and int(lo) % 60 == 0
+
+
+def _series_window_day_key(lo):
+    """窗口起点 lo 的本地日键；取值超出平台 epoch 范围时返回 None。
+
+    _local_day_key 走 time.localtime，手写的极大 since（例如 6e18）会让它抛
+    OSError——那只是「这个窗口服务不了」的一种，按退回整段扫描处理，不该把
+    端点打成 500。分钟切片拿这个键做 days_floor 覆盖判断，拿不到就退回扫描。
+    """
+    try:
+        return _local_day_key(lo)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _series_slice_minutes(state, realm, lo, hi, day_key):
+    """分钟环的切片；不满足对齐/覆盖条件时返回 None（退回整段扫描）。
+
+    成立条件（缺一不可，任何一条不成立就退回整段扫描——正确性优先）：
+      * 窗口起点是分钟格点（见 _series_minute_grid_ok）；
+      * hi 不低于折过的最大 at：否则窗口上界会切进桶里，而桶是聚合值，
+        切不出一半来（与日/小时切片同一条）；
+      * 窗口起点不早于 max_at - 6h：环的保留线，更早的窗口环里没有桶；
+      * 窗口起点晚于 minutes_from：环只从那条线之后才完整（采用过没有
+        分钟环的旧 checkpoint 时才有这条线，见 _usage_series_state_ready）；
+      * 每个桶的 at 落在键*60 上且不晚于 max_at（形状校验之外的防御，
+        与 _series_slice 对小时子桶的格点校验同一个用意）。
+    输出桶与整段扫描逐条相同（同一批行、同一个网格、同一个累加口径），
+    credits 与日/小时切片共用下面同一段选择。
+    """
+    minutes = state.get("minutes")
+    if not minutes:
+        # 空环（或状态里没有环）：这一份状态没有任何行落在保留窗口里。空环
+        # 答不出窗口里的行，也不能把窗口静默答成空序列——退回整段扫描，
+        # 由扫描给出真值（正确的空序列也由它给）。
+        return None
+    if hi < state["max_at"]:
+        return None
+    if not _series_minute_grid_ok(lo):
+        return None
+    lo_i = int(lo)
+    if lo_i < state["max_at"] - _SERIES_MINUTE_WINDOW:
+        return None
+    minutes_from = state.get("minutes_from")
+    if minutes_from is not None and lo_i <= minutes_from:
+        return None
+    if day_key is None:
+        # 直接调用（测试）时补上；取值离谱（见 _series_window_day_key）就退回。
+        day_key = _series_window_day_key(lo)
+        if day_key is None:
+            return None
+    if not _days_cover(state, day_key):
+        return None
+    series = []
+    for key in sorted(minutes):
+        sub = minutes[key]
+        at = int(sub["at"])
+        if at != key * 60 or at > state["max_at"]:
+            return None
+        if at < lo_i:
+            continue
+        out = _series_output_bucket(sub)
+        # 整段扫描的桶 at 是 lo + k*60，类型跟着 lo 走（int 或 float）；
+        # 存量桶的 at 是整数，这里按 lo 的类型对齐，两边的 JSON 字节才一致。
+        out["at"] = int(at) if isinstance(lo, int) else float(at)
+        series.append(out)
+    return _series_payload(state, realm, lo, hi, 60, series)
+
+
+def _series_payload(state, realm, lo, hi, step, series):
+    """切片载荷的公共部分：窗口头 + credit 历史。
+
+    credit 历史：缓冲按 at 倒序稳定排序后取窗口内的前 50 条——与整段扫描
+    的选择逐条相同（见 _series_credit_push 的论证）。
+    """
+    credits = sorted(state["credits"], key=lambda item: item.get("at") or 0,
+                     reverse=True)
+    credits = [c for c in credits if (c.get("at") or 0) >= lo][:_SERIES_CREDITS_KEEP]
+    return {"ok": True, "realm": realm or "all",
+            "bucket_seconds": step, "since": lo, "until": hi,
+            "series": series, "credits": credits}
+
+
 def _series_slice(state, realm, lo, hi, step, day_key):
-    """窗口序列 = 日桶/小时桶的切片；不满足对齐条件时返回 None。
+    """窗口序列 = 日桶/小时桶/分钟环的切片；不满足对齐条件时返回 None。
 
     成立条件（缺一不可，任何一条不成立就退回整段扫描——正确性优先）：
       * 窗口起点是本地午夜（day_key 由 _window_day_key 给出）；
@@ -6349,7 +7285,12 @@ def _series_slice(state, realm, lo, hi, step, day_key):
       * 每个桶的 at 落在 lo + k*step 的格点上。这一条同时挡住夏令时：日长
         不是 86400 秒的那天之后，每一天的本地午夜都不再落在 86400 的格点上，
         于是自动退回整段扫描。时区没有夏令时（cn/路由器）时恒真。
+
+    桶宽 60 走分钟环（条件见 _series_slice_minutes），它不要求窗口起点是
+    本地午夜，只要求落在分钟格点上。
     """
+    if step == 60:
+        return _series_slice_minutes(state, realm, lo, hi, day_key)
     if step not in (3600, 86400):
         return None
     if hi < state["max_at"]:
@@ -6380,14 +7321,7 @@ def _series_slice(state, realm, lo, hi, step, day_key):
             if (int(sub["at"]) - lo_i) % 3600:
                 return None
             series.append(_series_output_bucket(sub))
-    # credit 历史：缓冲按 at 倒序稳定排序后取窗口内的前 50 条——与整段扫描
-    # 的选择逐条相同（见 _series_credit_push 的论证）。
-    credits = sorted(state["credits"], key=lambda item: item.get("at") or 0,
-                     reverse=True)
-    credits = [c for c in credits if (c.get("at") or 0) >= lo][:_SERIES_CREDITS_KEEP]
-    return {"ok": True, "realm": realm or "all",
-            "bucket_seconds": step, "since": lo, "until": hi,
-            "series": series, "credits": credits}
+    return _series_payload(state, realm, lo, hi, step, series)
 
 
 def _top_models(bucket, top_n=KEY_MODEL_TOP_N):
@@ -6609,12 +7543,19 @@ def _compute_usage_analytics_uncached(realm=None, since=None, until=None):
 # ---------------------------------------------------------------------------
 # 聚合状态落盘（重启后免冷扫）
 #
-# 上面的三份增量聚合（_usage_alltime_snapshot / _usage_by_account_buckets /
-# _analytics_all_time）把状态放在模块级字典里，进程一重启就全丢：第一次刷新
-# 仍是全量扫一遍日志。日志每天涨一万多行，冷扫描成本跟着线性上升——路由器
-# 上 2.7 万行的一次冷启动要 6~8 秒，一个月后接近两分钟。这里把三份状态连同
-# 它们的位置信息写进数据目录下的一个 JSON 文件，重启后第一次刷新只读文件
-# 尾部的新增字节。
+# 上面的几份增量聚合（_usage_alltime_snapshot / _usage_by_account_buckets /
+# _analytics_all_time / 时间序列 / 剩余用量）把状态放在模块级字典里，进程一
+# 重启就全丢：第一次刷新仍是全量扫一遍日志。日志每天涨一万多行，冷扫描成本
+# 跟着线性上升——路由器上 2.7 万行的一次冷启动要 6~8 秒，一个月后接近两分钟。
+# 这里把每份状态连同它们的位置信息写进数据目录，重启后第一次刷新只读文件尾
+# 部的新增字节。
+#
+# v4 起**一类状态一份文件**（usage-aggregate-cache-<kind>.json）：五份状态
+# 各有各的位置/指纹校验与写入节流，加载端按需解析——只跑 /usage 的进程不再
+# 为其余四份（真机上 remaining 一份就比其余加起来还大）付解析成本；写侧也只
+# 重写「有推进的那一类」。升级前的单文件（v3）只读兼容：某一类还没有自己的
+# 文件时从旧文件里取它那一节（旧文件不重写、也不删除，等各类都落过一次盘就
+# 自然被忽略）。
 #
 # 文件放在数据目录里是刻意的：它和日志同生命周期，跟着 sysupgrade 一起走，
 # 也和日志一起被搬走、清掉。读写失败（只读文件系统、磁盘满、权限不足）一律
@@ -6627,7 +7568,9 @@ def _compute_usage_analytics_uncached(realm=None, since=None, until=None):
 # ---------------------------------------------------------------------------
 
 # 数据目录下的文件名。usage/*.json 已被 .gitignore 覆盖。
+# 带 <kind> 的是 v4 布局（一类一份）；不带的是升级前的单文件，只读不写。
 _USAGE_CACHE_NAME = "usage-aggregate-cache.json"
+_USAGE_CACHE_KIND_NAME = "usage-aggregate-cache-%s.json"
 # 状态结构或折叠口径一变就 +1，旧文件整体作废。这是唯一挡在「旧结构喂进新
 # 代码」前面的东西，改动状态形状时别忘了它。
 # v2：写盘不再排序（v1 用 sort_keys 写，加载回来所有 dict 变字母序，响应
@@ -6636,7 +7579,18 @@ _USAGE_CACHE_NAME = "usage-aggregate-cache.json"
 # v3：状态多了按日分桶（窗口半的增量）与时间序列的日/小时桶。载荷形状变了，
 # 旧文件同样整体作废：升级后第一次刷新做一次全量折叠（一次性代价，之后
 # checkpoint 照旧）——这正是把窗口半也变成增量的入场费。
-_USAGE_CACHE_SCHEMA = 3
+# v4：一类状态一份文件（每份自带 schema 与 kind 标签），并且快照/analytics 的
+# 日桶里多了小时子表（整点窗口的小时层）、series 多了分钟环。载荷形状的变化由
+# 各类自己的校验器挡住：升级前的单文件（v3）只读兼容，作为各类还没有自己文件
+# 时的回退来源——能通过新校验器的段（by_account / series / remaining）照常
+# 采纳，通不过的（缺小时表的 snapshot / analytics）在升级后第一次刷新时做一次
+# 全量折叠，之后 checkpoint 照旧。
+_USAGE_CACHE_SCHEMA = 4
+# 升级前唯一布局的版本号：v3 单文件。只出现在只读回退路径上。
+_USAGE_CACHE_LEGACY_SCHEMA = 3
+# 五类状态的固定集合（文件名、kind 标签与写盘循环都用它）。
+_USAGE_CACHE_KINDS = ("snapshot", "by_account", "analytics", "series",
+                      "remaining")
 
 
 def _usage_cache_enabled():
@@ -6650,12 +7604,17 @@ def _usage_cache_enabled():
 
 
 def _usage_cache_path():
-    """checkpoint 的路径。
+    """升级前单文件（v3）的路径；只读回退与探针脚本用。
 
     每次调用重算，而不是在导入时算成常量：--usage-dir、测试和探针脚本都会
     在导入之后改 USAGE_DIR，常量会写到旧目录去。
     """
     return os.path.join(USAGE_DIR, _USAGE_CACHE_NAME)
+
+
+def _usage_cache_kind_path(kind):
+    """某一类状态的 checkpoint 路径（v4 布局；同上，每次调用重算）。"""
+    return os.path.join(USAGE_DIR, _USAGE_CACHE_KIND_NAME % kind)
 
 
 def _usage_cache_min_bytes():
@@ -6689,10 +7648,13 @@ _usage_cache_lock = threading.Lock()
 # 写盘串行锁：只被 _usage_cache_maybe_save() 拿一次、且永远是最外层（拿它
 # 之后才拿状态锁/节流锁），所以它不参与任何锁序环。
 _usage_cache_write_lock = threading.Lock()
-# 进程启动后只读一次 checkpoint：读到就记下来（按 realm 逐份取用），读不到
-# 也记 None——坏文件、只读文件系统都不该让每次刷新都去解析一遍。
-_usage_cache_loaded = False
-_usage_cache_read_result = None
+# 进程启动后按「类」只读一次 checkpoint：读到就记下来，读不到也记 None——
+# 坏文件、只读文件系统都不该让每次刷新都去解析一遍。只解析调用方真正要的
+# 那一类，这正是拆文件的意义（只跑 /usage 的进程不解析 remaining）。
+# 升级前的单文件（v3）也只读一次，作为某一类还没有自己文件时的回退来源。
+_usage_cache_kind_cache = {}
+_USAGE_CACHE_LEGACY_UNREAD = object()
+_usage_cache_legacy_data = _USAGE_CACHE_LEGACY_UNREAD
 # 写盘节流状态，全部由 _usage_cache_lock 保护：
 #   progress[kind]     —— 本进程见过该类状态折叠到的最远 offset；
 #   checkpointed[kind] —— 该类状态上次「尝试」落盘时的 offset（失败也记，
@@ -6700,38 +7662,55 @@ _usage_cache_read_result = None
 #   last_attempt       —— 上次尝试写盘的时刻，时间阈值与失败退避都靠它。
 # 按「类」记账而不是记一个总数：某类状态第一次折叠（或中途重扫）时 offset
 # 从 0 跳到文件尾，这一类要尽快落盘，而刚采用过 checkpoint 的类不能被别的
-# 类的推进带着白写一遍。
+# 类的推进带着白写一遍。v4 起写盘也按类分开：只重写「有推进的那一类」。
 _usage_cache_progress = {}
 _usage_cache_checkpointed = {}
 _usage_cache_last_attempt = time.time()
 
 
-def _usage_cache_data():
-    """checkpoint 的解析结果，或 None。
+def _usage_cache_forget():
+    """忘掉本进程读过的 checkpoint（模拟一次重启；测试与探针用）。
+
+    读记忆按「类」记账，所以要清的是一个集合；调用点不许持有任何状态锁，
+    本函数自己取 _usage_cache_lock（与读取路径同一把）。
+    """
+    global _usage_cache_legacy_data
+    with _usage_cache_lock:
+        _usage_cache_kind_cache.clear()
+        _usage_cache_legacy_data = _USAGE_CACHE_LEGACY_UNREAD
+
+
+def _usage_cache_kind_entries(kind):
+    """某一类状态的条目列表（读一次、按类记忆）；没有可用来源时返回 None。
+
+    本类文件不存在或读不出时回退到升级前的单文件里对应的那一节：升级后的
+    第一次刷新因此不必把整个日志重折一遍。本类文件一旦存在（schema 与 kind
+    都对得上）就是唯一来源，旧文件不再参与该类——旧文件里那份可能更旧，也
+    可能已经和日志对不上，位置校验各自负责。
 
     调用点可能在状态锁内（采用阶段），所以本函数会取 _usage_cache_lock；
     反向的锁序不存在——写盘路径取状态锁之前一定先放开本锁，见
     _usage_cache_maybe_save。
     """
-    global _usage_cache_loaded, _usage_cache_read_result
     if not _usage_cache_enabled():
         return None
-    if _usage_cache_loaded:
-        return _usage_cache_read_result
     with _usage_cache_lock:
-        if not _usage_cache_loaded:
-            _usage_cache_read_result = _usage_cache_read()
-            _usage_cache_loaded = True
-        return _usage_cache_read_result
+        if kind not in _usage_cache_kind_cache:
+            entries = _usage_cache_read_kind(kind)
+            if entries is None:
+                entries = _usage_cache_read_legacy_kind(kind)
+            _usage_cache_kind_cache[kind] = entries
+        return _usage_cache_kind_cache[kind]
 
 
-def _usage_cache_read():
-    """读 checkpoint 文件并做顶层校验；任何一步不成立都返回 None。
+def _usage_cache_read_kind(kind):
+    """读某一类的 checkpoint 文件并做顶层校验；任何一步不成立都返回 None。
 
     None 和「文件不存在」同义：调用方按没有缓存处理，绝不因此报错。
+    调用方持有 _usage_cache_lock（解析在锁内做，与 v3 的单文件读取一致）。
     """
     try:
-        with open(_usage_cache_path(), "rb") as fh:
+        with open(_usage_cache_kind_path(kind), "rb") as fh:
             raw = fh.read()
     except OSError:
         return None
@@ -6746,6 +7725,54 @@ def _usage_cache_read():
     if not _usage_cache_int(data.get("schema")):
         return None
     if data["schema"] != _USAGE_CACHE_SCHEMA:
+        return None
+    # kind 标签是双保险：文件被复制/改名成另一类的名字时，宁可当没有缓存。
+    if data.get("kind") != kind:
+        return None
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return None
+    return entries
+
+
+def _usage_cache_read_legacy_kind(kind):
+    """升级前单文件（v3）里某一类的条目，或 None；文件只解析一次。
+
+    调用方持有 _usage_cache_lock。条目列表是解析结果的一部分，采用路径从
+    它里面 pop（取过即删），与 v3 时的用法一致。
+    """
+    global _usage_cache_legacy_data
+    if _usage_cache_legacy_data is _USAGE_CACHE_LEGACY_UNREAD:
+        _usage_cache_legacy_data = _usage_cache_read_legacy_file()
+    data = _usage_cache_legacy_data
+    if not isinstance(data, dict):
+        return None
+    entries = data.get(kind)
+    if not isinstance(entries, list):
+        return None
+    return entries
+
+
+def _usage_cache_read_legacy_file():
+    """升级前的单文件（v3）解析结果，或 None。
+
+    只做顶层校验（对象 + schema 恰好是 3）。不校验它的 kind 字段——v3 的
+    文件本来就没有这个字段，各类小节就是顶层键。任何一步不成立都返回 None。
+    """
+    try:
+        with open(_usage_cache_path(), "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not _usage_cache_int(data.get("schema")):
+        return None
+    if data["schema"] != _USAGE_CACHE_LEGACY_SCHEMA:
         return None
     return data
 
@@ -6849,8 +7876,8 @@ def _usage_cache_bucket_ok(bucket):
     return _usage_cache_counts_ok(bucket.get("accounts"))
 
 
-def _usage_cache_snapshot_ok(snap):
-    """snapshot 折叠的形状。
+def _usage_cache_snapshot_bucket_ok(snap):
+    """一个窗口半快照桶的形状（all-time 半、日桶、小时桶共用）。
 
     少一个键，折叠或 _copy_usage_snapshot() 就会半路抛错，那次刷新报出半份
     数字——校验必须挡在采用之前。
@@ -6886,6 +7913,33 @@ def _usage_cache_snapshot_ok(snap):
     return True
 
 
+def _usage_cache_snapshot_ok(snap):
+    """窗口半快照桶 + 它可能挂着的小时子表（见 _usage_hour_bucket）。
+
+    小时子表的校验与时间序列那份（_usage_cache_series_bucket_ok）同一套：
+    键是数字字符串（折叠侧从一开始就写 str(序号)，与 JSON 往返后的形状
+    一致），子桶形状同快照桶且不再嵌表（表只挂在日桶上）。at 是格点，
+    没有它求和侧就做不了格点校验，所以这里也要求它是数字。
+    """
+    if not _usage_cache_snapshot_bucket_ok(snap):
+        return False
+    hours = snap.get("hours")
+    if hours is None:
+        return True
+    if not isinstance(hours, dict):
+        return False
+    for hour, sub in hours.items():
+        if not (isinstance(hour, str) and hour.isdigit()):
+            return False
+        if not isinstance(sub, dict) or "hours" in sub:
+            return False
+        if not _usage_cache_number(sub.get("at")):
+            return False
+        if not _usage_cache_snapshot_bucket_ok(sub):
+            return False
+    return True
+
+
 def _usage_cache_stat_ok(stat):
     """一个 analytics 统计桶：折叠会就地累加它的每一个字段。"""
     if not isinstance(stat, dict):
@@ -6910,7 +7964,7 @@ def _usage_cache_models_ok(models):
 
 
 def _usage_cache_analytics_window_ok(maps):
-    """窗口形状的 analytics maps（日桶）：同一批表，装的是 window 那一半。
+    """窗口形状的 analytics maps（日桶/小时桶）：同一批表，装的是 window 那一半。
 
     与 _usage_cache_analytics_ok 是两份形状，不能互相顶替：日桶只折窗口半，
     少 all_time/all_models 两个键，用 all-time 的校验器会把整份 analytics
@@ -6954,6 +8008,44 @@ def _usage_cache_analytics_window_ok(maps):
         if not _usage_cache_number(entry.get("last_at")):
             return False
     return True
+
+
+def _usage_cache_analytics_hours_ok(hours):
+    """analytics 日桶的小时子表：{小时键: 窗口形状 maps + at}。
+
+    小时键是数字字符串（JSON 的对象键只能是字符串，折叠侧从一开始就用
+    str(小时序号)），子桶就是一份窗口形状 maps 再带它自己的 at——形状与
+    时间序列的小时子表同一个道理。
+    """
+    if not isinstance(hours, dict):
+        return False
+    for hour, sub in hours.items():
+        if not (isinstance(hour, str) and hour.isdigit()):
+            return False
+        if not isinstance(sub, dict) or "hours" in sub:
+            return False
+        if not _usage_cache_number(sub.get("at")):
+            return False
+        if not _usage_cache_analytics_window_ok(sub):
+            return False
+    return True
+
+
+def _usage_cache_analytics_day_ok(bucket):
+    """analytics 的日桶：窗口形状 maps + at（本地午夜）+ hours 子表。
+
+    小时层要靠 at 与小时子表回答自定义窗口，两者缺一这份状态就只能服务
+    按日对齐的窗口——旧版本写下的日桶（没有这两个键）因此在这里被拒，
+    升级后 analytics 整体重折一次（一次性代价），小时层立刻就有历史可借；
+    snapshot/series 等其余四份状态照旧采用，不受影响。
+    """
+    if not isinstance(bucket, dict):
+        return False
+    if not _usage_cache_number(bucket.get("at")):
+        return False
+    if not _usage_cache_analytics_hours_ok(bucket.get("hours")):
+        return False
+    return _usage_cache_analytics_window_ok(bucket)
 
 
 def _usage_cache_analytics_ok(maps):
@@ -7141,6 +8233,50 @@ def _usage_cache_series_bucket_ok(bucket):
     return True
 
 
+def _usage_cache_series_minutes_ok(rows):
+    """分钟环的落盘形状：[分钟, 8 个数字] 的严格升序列表。
+
+    None 是合法的（旧版 checkpoint 没有分钟环这个键）：采用端把它当「环只
+    从采用点之后才完整」处理（见 _usage_cache_adopt_series），所以这里放行
+    而不是拒整份。行首必须是真整数（JSON 里 12345.0 不算）、严格递增——
+    递增同时钉住「没有重复分钟」；其余 8 个必须是折叠累加出来的数字。
+    """
+    if rows is None:
+        return True
+    if not isinstance(rows, list):
+        return False
+    last = None
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 1 + len(_SERIES_MINUTE_FIELDS):
+            return False
+        minute = row[0]
+        if not _usage_cache_int(minute):
+            return False
+        if last is not None and minute <= last:
+            return False
+        last = minute
+        for value in row[1:]:
+            if not _usage_cache_number(value):
+                return False
+    return True
+
+
+def _usage_cache_minutes_state(rows):
+    """落盘行 -> 折叠时的字典桶（键是 epoch 分钟整数）。
+
+    还原出的桶与冷折出来的逐字段同类型（int 的字段来自 JSON 的整数写法，
+    credit 是浮点），所以「采用后再切片」与「冷折后切片」的输出逐字节一致。
+    """
+    out = {}
+    for row in rows or []:
+        key = int(row[0])
+        bucket = _new_series_bucket(key * 60)
+        for index, field in enumerate(_SERIES_MINUTE_FIELDS, start=1):
+            bucket[field] = row[index]
+        out[key] = bucket
+    return out
+
+
 def _usage_cache_credits_ok(credits):
     """credit 缓冲：{at, iso, model, account, credit, total_tokens} 的列表。"""
     if not isinstance(credits, list):
@@ -7158,16 +8294,15 @@ def _usage_cache_credits_ok(credits):
 
 
 def _usage_cache_take(kind, realm=None):
-    """从 checkpoint 数据里取出一份状态（取过即删），没有合适的返回 None。
+    """从 checkpoint 里取出一份状态（取过即删），没有合适的返回 None。
 
     snapshot/analytics 按 realm 匹配（JSON 的 null 表示不限 realm），
     by_account / remaining 只有一份。逐份取用：同一份不会被第二次采用，也就
     不存在「先取走、校验失败、下个 realm 又拿到一份脏状态」的路径。
+
+    只解析、只取用调用方要的那一类文件：其余四类连文件都不打开。
     """
-    data = _usage_cache_data()
-    if not data:
-        return None
-    entries = data.get(kind)
+    entries = _usage_cache_kind_entries(kind)
     if not isinstance(entries, list):
         return None
     # 取走这一步也要在锁里：两个 realm 的首次刷新可能同时到这里，一个
@@ -7269,9 +8404,13 @@ def _usage_cache_adopt_snapshot(r, state, log_key, pricing, realm):
     floor = entry.get("days_floor")
     if not _usage_cache_days_ok(days, floor, _usage_cache_snapshot_ok):
         return False
+    hours_floor = entry.get("hours_floor_at")
+    if hours_floor is not None and not _usage_cache_number(hours_floor):
+        return False
     offset, tail = position
     state.update({"snap": snap, "offset": offset, "tail": tail,
-                  "days": days, "days_floor": floor})
+                  "days": days, "days_floor": floor,
+                  "hours_floor_at": _hours_floor_on_adopt(days, hours_floor)})
     _usage_cache_note_adopted("snapshot", offset)
     return True
 
@@ -7352,11 +8491,14 @@ def _usage_cache_adopt_analytics(realm, state, log_key, pricing, realm_inputs):
         return False
     days = entry.get("days")
     floor = entry.get("days_floor")
-    if not _usage_cache_days_ok(days, floor, _usage_cache_analytics_window_ok):
+    if not _usage_cache_days_ok(days, floor, _usage_cache_analytics_day_ok):
+        return False
+    max_at = entry.get("max_at")
+    if not _usage_cache_number(max_at):
         return False
     offset, tail = position
     state.update({"maps": maps, "offset": offset, "tail": tail,
-                  "days": days, "days_floor": floor})
+                  "days": days, "days_floor": floor, "max_at": max_at})
     _usage_cache_note_adopted("analytics", offset)
     return True
 
@@ -7382,9 +8524,25 @@ def _usage_cache_adopt_series(r, state, log_key, realm_inputs):
     credits = entry.get("credits")
     if not _usage_cache_credits_ok(credits):
         return False
+    minutes = entry.get("minutes")
+    if not _usage_cache_series_minutes_ok(minutes):
+        return False
+    minutes_from = entry.get("minutes_from")
+    if minutes_from is not None and not _usage_cache_number(minutes_from):
+        return False
+    if minutes is None:
+        # 旧版 checkpoint（没有分钟环这个键）：这一份状态是能用的（日/小时桶
+        # 与 credits 都在），只是分钟环要从采用点之后才开始折。把完整线记成
+        # 采用时的 max_at——前缀里所有行的 at 都 <= 它，所以起点晚于它的窗口
+        # 只碰得到之后折进来的行，环对它们是完整的；早于它的窗口一律退回
+        # 整段扫描（见 _series_slice_minutes）。
+        minutes = []
+        minutes_from = max_at
     offset, tail = position
     state.update({"days": days, "days_floor": floor, "max_at": max_at,
-                  "credits": credits, "offset": offset, "tail": tail})
+                  "credits": credits, "offset": offset, "tail": tail,
+                  "minutes": _usage_cache_minutes_state(minutes),
+                  "minutes_from": minutes_from})
     _usage_cache_note_adopted("series", offset)
     return True
 
@@ -7399,6 +8557,45 @@ def _copy_series_day(bucket):
     copy = dict(bucket)
     copy["hours"] = {h: dict(sub) for h, sub in (bucket.get("hours") or {}).items()}
     return copy
+
+
+def _copy_snapshot_day(bucket):
+    """一个窗口半日桶的深拷贝（含 hours 子表，见 _usage_hour_bucket）。"""
+    copy = _copy_usage_snapshot(bucket)
+    hours = bucket.get("hours")
+    if hours is not None:
+        copy["hours"] = {h: _copy_usage_snapshot(sub)
+                         for h, sub in hours.items()}
+    return copy
+
+
+# 分钟环落盘行的字段顺序：[分钟, 这 8 个数字]（at 由分钟推出，省下每桶 10
+# 字节；credit 在最后，与 _new_series_bucket 的键序一致）。
+_SERIES_MINUTE_FIELDS = ("requests", "errors", "prompt_tokens",
+                         "completion_tokens", "reasoning_tokens",
+                         "cached_tokens", "total_tokens", "credit")
+
+
+def _usage_cache_minutes_copy(minutes):
+    """分钟环的落盘形态：按分钟升序的 [分钟, 8 个数字] 行。
+
+    形状与内存里的字典桶不同（键换成行首的整数、字段名省掉），这是刻意的
+    体积预算：环最多 361 个桶（6 小时），字典形状每个桶 ~150 字节、满环要
+    50KB 级，位置数组把每个桶压到 40~50 字节（本机真实数据实测 52）。形状
+    差异只存在于落盘/加载这一层：加载端（_usage_cache_minutes_state）还原
+    成与冷折完全一样的字典桶，切片与输出的字节不受影响。排序写出而不是按
+    插入顺序，是为了让文件内容与折叠顺序无关（冷折与「采用后再折」写出的
+    这份字节一致）。状态里没有环（不该发生，但落盘不靠断言）时写 null：
+    加载端按「环不完整」处理。
+    """
+    if minutes is None:
+        return None
+    rows = []
+    for key in sorted(minutes or {}):
+        bucket = minutes[key]
+        rows.append([int(key)] + [bucket.get(field)
+                                  for field in _SERIES_MINUTE_FIELDS])
+    return rows
 
 
 def _usage_cache_snapshot_entry(realm, state):
@@ -7426,10 +8623,15 @@ def _usage_cache_snapshot_entry(realm, state):
             # 深拷贝在锁内做，序列化在锁外做（见 _usage_cache_collect）。
             "snap": _copy_usage_snapshot(state["snap"]),
             # 按日分桶的窗口半：与 all-time 半同一次扫描折出来的，位置也
-            # 跟着同一条 offset/tail 校验，不另设一套。
+            # 跟着同一条 offset/tail 校验，不另设一套。日桶里还挂着小时
+            # 子表（T9 的小时层），深拷贝必须跟着一起做。
             "days": _usage_cache_days_copy(state.get("days"),
-                                           _copy_usage_snapshot),
-            "days_floor": state.get("days_floor")}
+                                           _copy_snapshot_day),
+            "days_floor": state.get("days_floor"),
+            # 小时层的剪枝线（见 _hours_cover）：缺了它重启后的小时层要么
+            # 不折（None 直接挡住 _usage_hour_bucket），要么服务了被剪过的
+            # 天——两者都不对，所以它和日桶一起落盘。
+            "hours_floor_at": state.get("hours_floor_at")}
 
 
 def _usage_cache_by_account_entry(state):
@@ -7501,14 +8703,18 @@ def _usage_cache_analytics_entry(realm, state):
             "maps": _copy_analytics_all_time(state["maps"]),
             "days": _usage_cache_days_copy(state.get("days"),
                                            _copy_analytics_window_maps),
-            "days_floor": state.get("days_floor")}
+            "days_floor": state.get("days_floor"),
+            # 折过的最大 at：小时层靠它判断 until 有没有切掉桶里的行。
+            "max_at": state.get("max_at") or 0}
 
 
 def _usage_cache_series_entry(realm, state):
     """时间序列状态的 JSON 形态；同上，只写折叠成功过的。
 
     这一份最大（日桶 + 24 小时子桶 × 保留天数），所以深拷贝只拷桶本身，
-    credit 缓冲是 dict 列表、直接浅拷外层。
+    credit 缓冲是 dict 列表、直接浅拷外层。分钟环再压一层：落盘用位置数组
+    而不是字典桶（见 _usage_cache_minutes_copy），满环 361 个桶也就 10KB
+    量级（本机实测每桶 52 字节），字典形状会平白多出几十 KB。
     """
     offset = state.get("offset") or 0
     tail = state.get("tail")
@@ -7523,64 +8729,69 @@ def _usage_cache_series_entry(realm, state):
             "days": _usage_cache_days_copy(state.get("days"), _copy_series_day),
             "days_floor": state.get("days_floor"),
             "max_at": state.get("max_at") or 0,
-            "credits": [dict(item) for item in (state.get("credits") or [])]}
+            "credits": [dict(item) for item in (state.get("credits") or [])],
+            "minutes": _usage_cache_minutes_copy(state.get("minutes")),
+            "minutes_from": state.get("minutes_from")}
 
 
-def _usage_cache_collect():
-    """逐把取五份状态，做锁外可序列化的深拷贝；返回 (payload, offsets) 或 None。
+def _usage_cache_collect_kind(kind):
+    """逐把取一类状态，做锁外可序列化的深拷贝；返回 (entries, offset) 或 None。
 
-    每份状态单独加锁、单独拷贝，几份之间不强求同一个瞬间：加载端对每份分别
-    校验 offset/tail/指纹，一份新一份旧也各自成立。锁是逐把拿、随即放开的，
-    不存在嵌套——写盘路径不能制造「snapshot -> analytics」这样的锁序边。
+    每次只取一类：写盘路径按类分别调用，只重写「有推进的那一类」。状态各自
+    加锁、各自拷贝，各类之间不强求同一个瞬间：加载端对每份分别校验 offset/
+    tail/指纹，一份新一份旧也各自成立。锁是逐把拿、随即放开的，不存在嵌套
+    ——写盘路径不能制造「snapshot -> analytics」这样的锁序边。
+
+    entries 为空（状态都归零/不可复现）时返回 None：没得写就不写，等下一次
+    折叠成功再落盘。offset 是该类各 realm 状态里的最远位置。
     """
-    snapshot_entries = []
-    by_account_entries = []
-    analytics_entries = []
-    series_entries = []
-    remaining_entries = []
-    offsets = {}
-    with _usage_snap_state_lock:
-        for realm, state in _usage_snap_state.items():
-            entry = _usage_cache_snapshot_entry(realm, state)
-            if entry is not None:
-                snapshot_entries.append(entry)
-                offsets["snapshot"] = max(offsets.get("snapshot", 0), state["offset"])
-    with _byacct_state_lock:
-        entry = _usage_cache_by_account_entry(_byacct_state)
-        if entry is not None:
-            by_account_entries.append(entry)
-            offsets["by_account"] = _byacct_state["offset"]
-    with _analytics_state_lock:
-        for realm, state in _analytics_state.items():
-            entry = _usage_cache_analytics_entry(realm, state)
-            if entry is not None:
-                analytics_entries.append(entry)
-                offsets["analytics"] = max(offsets.get("analytics", 0), state["offset"])
-    with _series_state_lock:
-        for realm, state in _series_state.items():
-            entry = _usage_cache_series_entry(realm, state)
-            if entry is not None:
-                series_entries.append(entry)
-                offsets["series"] = max(offsets.get("series", 0), state["offset"])
-    with _remaining_state_lock:
-        entry = _usage_cache_remaining_entry(_remaining_state)
-        if entry is not None:
-            remaining_entries.append(entry)
-            offsets["remaining"] = entry["offset"]
-    if not (snapshot_entries or by_account_entries or analytics_entries
-            or series_entries or remaining_entries):
-        return None
-    payload = {"schema": _USAGE_CACHE_SCHEMA, "written_at": time.time(),
-               "snapshot": snapshot_entries, "by_account": by_account_entries,
-               "analytics": analytics_entries, "series": series_entries,
-               # 新增的一类：老版本读这份文件时会忽略这个键（它只校验 schema
-               # 与自己的几个键），所以不用抬 schema、也就不会让别人的缓存失效。
-               "remaining": remaining_entries}
-    return payload, offsets
+    if kind == "snapshot":
+        entries = []
+        done = 0
+        with _usage_snap_state_lock:
+            for realm, state in _usage_snap_state.items():
+                entry = _usage_cache_snapshot_entry(realm, state)
+                if entry is not None:
+                    entries.append(entry)
+                    done = max(done, state["offset"])
+        return (entries, done) if entries else None
+    if kind == "by_account":
+        with _byacct_state_lock:
+            entry = _usage_cache_by_account_entry(_byacct_state)
+            if entry is None:
+                return None
+            return [entry], _byacct_state["offset"]
+    if kind == "analytics":
+        entries = []
+        done = 0
+        with _analytics_state_lock:
+            for realm, state in _analytics_state.items():
+                entry = _usage_cache_analytics_entry(realm, state)
+                if entry is not None:
+                    entries.append(entry)
+                    done = max(done, state["offset"])
+        return (entries, done) if entries else None
+    if kind == "series":
+        entries = []
+        done = 0
+        with _series_state_lock:
+            for realm, state in _series_state.items():
+                entry = _usage_cache_series_entry(realm, state)
+                if entry is not None:
+                    entries.append(entry)
+                    done = max(done, state["offset"])
+        return (entries, done) if entries else None
+    if kind == "remaining":
+        with _remaining_state_lock:
+            entry = _usage_cache_remaining_entry(_remaining_state)
+            if entry is None:
+                return None
+            return [entry], entry["offset"]
+    return None
 
 
-def _usage_cache_write(payload):
-    """原子写：同目录临时文件 + os.replace。
+def _usage_cache_write_kind(kind, entries):
+    """原子写一类状态的 checkpoint：同目录临时文件 + os.replace。
 
     直接在目标文件上写，崩在中间会留下半份 JSON；加载端虽然能识别（解析失败
     按没有缓存处理），但一份完整的旧文件更省事。不 fsync：这是一份加速件，
@@ -7590,8 +8801,24 @@ def _usage_cache_write(payload):
     排），加载回来必须与冷启动逐字节一致——响应的 JSON 字节里键序是可见的，
     而冷启动折叠出的顺序正是这份插入顺序。排序只留给 _object_digest() 那种
     「只要内容一样就算一样」的指纹。
+
+    盘上「本进程还没碰过」的 realm 条目原样保留：一类里按 realm 分条目，
+    写盘只重写活跃 realm 的那些；不保留的话，重启后先折的 realm 触发一次写盘
+    就会把别的 realm 的旧条目整份清掉，那些 realm 下次请求只能重折（真机
+    实测：重启后先请求 realm=all 再请求 realm=intl，intl 重折 15s）。保留的
+    条目仍要过加载端的逐条校验，位置/指纹对不上照样被拒——宁可多扫一次。
     """
-    path = _usage_cache_path()
+    if kind in ("snapshot", "analytics", "series"):
+        live_realms = {entry.get("realm") for entry in entries}
+        with _usage_cache_lock:
+            old = _usage_cache_read_kind(kind) or []
+        keep = [e for e in old
+                if isinstance(e, dict) and e.get("realm") not in live_realms]
+        if keep:
+            entries = list(entries) + keep
+    payload = {"schema": _USAGE_CACHE_SCHEMA, "kind": kind,
+               "written_at": time.time(), "entries": entries}
+    path = _usage_cache_kind_path(kind)
     tmp = path + ".tmp"
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     try:
@@ -7607,11 +8834,20 @@ def _usage_cache_write(payload):
 
 
 def _usage_cache_maybe_save(kind, offset):
-    """一次折叠成功后，按节流阈值决定要不要把三份状态落盘。
+    """一次折叠成功后，按节流阈值决定要不要把「有推进的类」落盘。
 
-    调用点必须在状态锁之外：这里要逐把取三份状态，在状态锁里再取别的状态锁
+    调用点必须在状态锁之外：这里要逐把取状态，在状态锁里再取别的状态锁
     会构成锁序环（snapshot -> analytics 与反向同时存在）。任何异常都吞掉——
     落盘失败只损失一次加速，不能影响这次刷新。
+
+    写盘按类分开（v4）：没推进的类连文件都不重写——旧布局里一份文件装五类，
+    任何一类推进都要整份重写；现在单视图进程只重写自己那一类的几十 KB。
+
+    写哪几类：字节阈值到点的类（progress - checkpointed >= min_bytes）里，写
+    调用方那一类（它刚折完，状态最新）和真正推进过的类；计时器到点而没有任何
+    类到字节阈值时，写所有推进过的类。字节阈值设成 0（测试/探针的强制写）时
+    「到点」对所有折过的类都成立，过滤器把没推进过的那些留在原地——旧布局里
+    它们的内容与盘上逐字节相同，重写只是写放大。
     """
     global _usage_cache_last_attempt
     if not _usage_cache_enabled():
@@ -7628,31 +8864,41 @@ def _usage_cache_maybe_save(kind, offset):
                     _usage_cache_progress[kind] = offset
                 min_bytes = _usage_cache_min_bytes()
                 min_seconds = _usage_cache_min_seconds()
-                due = any(_usage_cache_progress.get(k, 0)
-                          - _usage_cache_checkpointed.get(k, 0) >= min_bytes
-                          for k in _usage_cache_progress)
+                due_kinds = [k for k in _usage_cache_progress
+                             if _usage_cache_progress.get(k, 0)
+                             - _usage_cache_checkpointed.get(k, 0) >= min_bytes]
                 # 计时器分支只在**确有推进**时才允许触发：进度没动时写出的
                 # 是一份与上次逐字节相同的 checkpoint，纯写放大——面板开着
                 # 就每 900s 白写一份 120KB（复现见套件 [7]）。空闲重写对
                 # 「重启后免冷扫」没有任何贡献，只有日志增长才值得落盘。
-                advanced = any(_usage_cache_progress.get(k, 0)
-                               > _usage_cache_checkpointed.get(k, 0)
-                               for k in _usage_cache_progress)
-                if not due and (not advanced
-                                or (now - _usage_cache_last_attempt) < min_seconds):
+                advanced = [k for k in _usage_cache_progress
+                            if _usage_cache_progress.get(k, 0)
+                            > _usage_cache_checkpointed.get(k, 0)]
+                if not due_kinds and (not advanced
+                                      or (now - _usage_cache_last_attempt)
+                                      < min_seconds):
                     return
                 # 记「尝试」而不是「成功」：只读文件系统上失败会一直成立，
                 # 不退避的话每次刷新都去试写一遍。
                 _usage_cache_last_attempt = now
-            collected = _usage_cache_collect()
-            if collected is None:
-                return
-            payload, offsets = collected
-            _usage_cache_write(payload)
-            with _usage_cache_lock:
-                for k, value in offsets.items():
-                    if value > _usage_cache_checkpointed.get(k, 0):
-                        _usage_cache_checkpointed[k] = value
+                write_kinds = [k for k in due_kinds
+                               if k == kind or k in advanced] or advanced
+            # 某一类收集不出东西（状态归零/归属不可复现）就跳过它：其余类照常
+            # 落盘，互不牵连——这是拆文件的意义所在。
+            for advanced_kind in write_kinds:
+                try:
+                    collected = _usage_cache_collect_kind(advanced_kind)
+                    if collected is None:
+                        continue
+                    entries, done = collected
+                    _usage_cache_write_kind(advanced_kind, entries)
+                except Exception as exc:
+                    log("usage aggregate cache write failed (%s): %s"
+                        % (advanced_kind, exc))
+                    continue
+                with _usage_cache_lock:
+                    if done > _usage_cache_checkpointed.get(advanced_kind, 0):
+                        _usage_cache_checkpointed[advanced_kind] = done
     except Exception as exc:
         log("usage aggregate cache write failed: %s" % exc)
 

@@ -7881,6 +7881,284 @@ def parse_dsml_tool_calls(text):
         })
     clean = (text[:match.start()].strip() + " " + text[match.end():].strip()).strip()
     return tool_calls, clean
+# ---------------------------------------------------------------------------
+# Printed tool calls on the Chat Completions path
+# ---------------------------------------------------------------------------
+# The Responses path has parsed DSML text since the tool_choice="none" fix, but
+# /v1/chat/completions -- the route the desktop client actually uses -- still
+# forwarded upstream `content` verbatim. When the model printed its call instead
+# of emitting structured tool_calls, the client saw plain text, found no call,
+# and the turn just ended: the markup stayed in the transcript and nothing ran.
+# Reported by the user as "it keeps stopping by itself".
+#
+# Two spellings show up in the wild:
+#   1. the full-width DSML form the suite already pins:
+#      <||DSML|| calls><||DSML|| invoke name="run_code"> ... </||DSML|| invoke>
+#   2. a hybrid the model mixes on its own -- a plain opening tag with DSML
+#      closing tags, and the first parameter's close tag swallowed whole:
+#      <run_code><parameter name="code">...</parameter>
+#      <parameter name="description">...</|DSML| parameter>
+#      </run_code></invoke></|DSML| parameter></|DSML| invoke></|DSML| calls>
+#
+# parse_dsml_tool_calls() above only matches (1): it wants a DSML opening tag
+# for the calls block, which (2) never has. The parser below is driven by the
+# <parameter> elements instead, because those are spelled the same way in both
+# shapes and a parameter name is the one thing a call cannot do without.
+LEAK_PARAM_RE = re.compile(
+    r"<\s*(?:\|\s*DSML\s*\|\s*)?(?P<tag>parameter|param|arg|argument)\b"
+    r"(?P<attrs>[^>]*)>"
+    r"(?P<value>.*?)"
+    r"</\s*(?:\|\s*DSML\s*\|\s*)?(?:parameter|param|arg|argument)\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+LEAK_TAG_RE = re.compile(
+    r"<\s*/?\s*(?:\|\s*DSML\s*\|\s*)?"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<attrs>[^>]*)>"
+)
+LEAK_NAME_ATTR_RE = re.compile(r"""name\s*=\s*["']([^"']*)["']""")
+LEAK_WRAPPER_TAGS = {"calls", "tool_calls", "function_calls", "function_call"}
+LEAK_PARAM_TAGS = {"parameter", "param", "arg", "argument"}
+# First characters of every tag the stream filter has to hold text back for.
+LEAK_TAG_PREFIXES = (
+    "<run_code", "<run_shell", "<invoke", "<parameter", "<param", "<arg",
+    "<argument", "<calls", "<tool_calls", "<function_calls", "<function_call",
+    "<think", "<thinking",
+    "</run_code", "</run_shell", "</invoke", "</parameter", "</param",
+    "</arg", "</argument", "</calls", "</tool_calls", "</function_calls",
+    "</function_call", "</think", "</thinking",
+    "<|dsml|", "</|dsml|",
+)
+
+
+def _normalize_dsml_bars(text):
+    """Fold the full-width spelling of the DSML token back to ASCII bars."""
+    return re.sub(r"\uff5c+\s*DSML\s*\uff5c+", "|DSML|", text)
+
+
+def _strip_spans(text, spans):
+    """Remove every [start, end) span, then collapse the leftover blanks."""
+    if not spans:
+        return text
+    kept = []
+    last = 0
+    for start, end in sorted(spans):
+        if start < last:
+            continue
+        kept.append(text[last:start])
+        last = end
+    kept.append(text[last:])
+    return "".join(kept).strip()
+
+
+def parse_leaked_tool_calls(text):
+    """Recover a tool call the model printed instead of emitting.
+
+    Returns (calls, clean_text) with calls in the same shape as
+    parse_dsml_tool_calls(), or (None, text) when nothing was recognised.
+    """
+    if not text or "<" not in text:
+        return None, text
+    # Fold the full-width spelling first so both shapes go through one walk.
+    original = text
+    text = _normalize_dsml_bars(text)
+    found = []
+    for m in LEAK_PARAM_RE.finditer(text):
+        attr = LEAK_NAME_ATTR_RE.search(m.group("attrs") or "")
+        if not attr or not attr.group(1):
+            continue
+        found.append((m.start(), attr.group(1), m.group("value").strip(), m.span()))
+    if not found:
+        return None, original
+    tags = list(LEAK_TAG_RE.finditer(text))
+    calls = []
+    for start, pname, value, span in found:
+        owner = None
+        for tag in tags:
+            if tag.start() >= start:
+                break
+            if tag.group(0).lstrip().startswith("</"):
+                continue
+            tname = tag.group("name").lower()
+            if tname in LEAK_WRAPPER_TAGS or tname in LEAK_PARAM_TAGS:
+                continue
+            owner = tag
+        name = ""
+        if owner is not None:
+            attr = LEAK_NAME_ATTR_RE.search(owner.group("attrs") or "")
+            name = (attr.group(1) if attr else owner.group("name")).strip()
+        if not name:
+            continue
+        key = owner.start() if owner is not None else None
+        if calls and calls[-1]["open"] == key:
+            calls[-1]["params"][pname] = value
+            calls[-1]["spans"].append(span)
+        else:
+            calls.append({"name": name, "params": {pname: value},
+                          "open": key, "spans": [span]})
+    if not calls:
+        return None, original
+    # Everything from the call's opening tag to the last of its parameters is
+    # markup rather than prose, so the whole region goes away in one piece.
+    regions = []
+    for call in calls:
+        first = call["open"]
+        if first is None:
+            first = min(s for s, _e in call["spans"])
+        last = max(e for _s, e in call["spans"])
+        # Swallow the closing tags that trail the last parameter.
+        while True:
+            nxt = last
+            while nxt < len(text) and text[nxt] in " \t\r\n":
+                nxt += 1
+            m = LEAK_TAG_RE.match(text, nxt)
+            if not m or not m.group(0).lstrip().startswith("</"):
+                break
+            last = m.end()
+        regions.append((first, last))
+    clean = _strip_spans(text, regions)
+    # Wrappers and stray tags the region walk did not cover (<|DSML| calls>,
+    # <think>, ...) are markup too; drop any tag carrying the DSML token.
+    leftover = []
+    for m in LEAK_TAG_RE.finditer(clean):
+        if "DSML" in _normalize_dsml_bars(m.group(0)).upper():
+            leftover.append(m.span())
+        elif m.group("name").lower() in LEAK_WRAPPER_TAGS:
+            leftover.append(m.span())
+    clean = _strip_spans(clean, leftover)
+    return [{
+        "id": _new_id("call_"),
+        "name": call["name"],
+        "arguments": json.dumps(call["params"], ensure_ascii=False),
+    } for call in calls], clean
+
+
+def repair_leaked_tool_calls(message):
+    """Move a printed call out of `content` and into `tool_calls`.
+
+    Only fires when the message carries no structured call: a real tool_calls
+    entry always wins, so a model that emits both is left alone. Returns True
+    when the message changed.
+    """
+    if not isinstance(message, dict):
+        return False
+    existing = message.get("tool_calls")
+    if isinstance(existing, list) and existing:
+        return False
+    content = message.get("content")
+    if not isinstance(content, str) or "<" not in content:
+        return False
+    calls, clean = parse_leaked_tool_calls(content)
+    if not calls:
+        calls, clean = parse_dsml_tool_calls(content)
+    if not calls:
+        return False
+    message["content"] = clean
+    message["tool_calls"] = [{
+        "id": call["id"],
+        "type": "function",
+        "function": {"name": call["name"], "arguments": call["arguments"]},
+    } for call in calls]
+    return True
+
+
+def could_be_leaked_call(tail):
+    """True while `tail` (starting at "<") may still grow into printed markup."""
+    low = _normalize_dsml_bars(tail).lower()
+    m = LEAK_TAG_RE.match(low)
+    if m and any(m.group(0).startswith(p) for p in LEAK_TAG_PREFIXES):
+        return True
+    if len(low) > 96 or ">" in low:
+        return False
+    return any(p.startswith(low) or low.startswith(p) for p in LEAK_TAG_PREFIXES)
+
+
+class LeakedToolCallStreamFilter:
+    """Hold back assistant text that may be a printed tool call.
+
+    /v1/chat/completions forwards text the moment it arrives, so a call the
+    model printed instead of emitting would already be on the wire before the
+    stream ended and anything could parse it. Buffer the text instead: release
+    it as soon as it is clearly prose, convert whatever is left at the end.
+
+    feed(text) returns a list of ("text", str) and ("calls", [call, ...]).
+    """
+
+    MAX_HOLD = 262144
+
+    def __init__(self):
+        self.buf = ""
+
+    def _release_all(self):
+        out, self.buf = self.buf, ""
+        return [("text", out)] if out else []
+
+    def feed(self, text):
+        if not text:
+            return []
+        self.buf += text
+        for idx in range(len(self.buf)):
+            if self.buf[idx] != "<":
+                continue
+            if not could_be_leaked_call(self.buf[idx:]):
+                continue
+            if idx:
+                head, self.buf = self.buf[:idx], self.buf[idx:]
+                return [("text", head)]
+            break
+        else:
+            return self._release_all()
+        if len(self.buf) > self.MAX_HOLD:
+            return self._release_all()
+        return []
+
+    def flush(self):
+        if not self.buf:
+            return []
+        buf, self.buf = self.buf, ""
+        calls, clean = parse_leaked_tool_calls(buf)
+        if not calls:
+            calls, clean = parse_dsml_tool_calls(buf)
+        if not calls:
+            return [("text", buf)]
+        out = []
+        if clean:
+            out.append(("text", clean))
+        out.append(("calls", calls))
+        return out
+
+
+def chat_chunk(model, delta, finish=None, chunk_id="chatcmpl-wb"):
+    """One Chat Completions streaming chunk."""
+    return json.dumps({
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    }, ensure_ascii=False)
+
+
+def chat_text_chunk(model, text, chunk_id="chatcmpl-wb"):
+    return chat_chunk(model, {"content": text}, None, chunk_id)
+
+
+def chat_tool_call_chunks(model, calls, chunk_id="chatcmpl-wb"):
+    """Deltas that hand recovered calls over as structured tool calls."""
+    out = []
+    for i, call in enumerate(calls):
+        out.append(chat_chunk(model, {"tool_calls": [{
+            "index": i,
+            "id": call["id"],
+            "type": "function",
+            "function": {"name": call["name"], "arguments": call["arguments"]},
+        }]}, None, chunk_id))
+    return out
+
+
+def chat_finish_chunk(model, reason, chunk_id="chatcmpl-wb"):
+    return chat_chunk(model, {}, reason, chunk_id)
+
+
 def translate_max_completion_tokens(obj):
     alias = obj.pop("max_completion_tokens", None)
     if alias is None:
@@ -9195,6 +9473,11 @@ def aggregate_stream(raw_iter, model, resp_id):
     message = {"role": "assistant", "content": "".join(content)}
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)
+    # A call the model printed instead of emitting arrives as `content`. The
+    # Responses path has parsed that shape for a while; this one did not, so the
+    # client saw prose, found no call, and ended the turn with nothing to run.
+    if not tool_calls_map and repair_leaked_tool_calls(message):
+        finish = "tool_calls"
     # PATCH2-BY-OPS: 二次防御——剔除「无函数名且无参数」的空 tool_call。
     # 即使上游以 tool_calls 数组形式发空占位，也不会泄漏给客户端。
     if tool_calls_map:
@@ -9216,6 +9499,11 @@ def aggregate_stream(raw_iter, model, resp_id):
         message["tool_calls"] = ordered_tcs
         if finish in ("stop", None):
             finish = "tool_calls"
+    elif message.get("tool_calls"):
+        # A call recovered from `content` counts as a real one, and it also
+        # overrides a "length" the upstream reported for the same turn: the call
+        # came through whole, so the turn did not really run out of room.
+        finish = "tool_calls"
     elif finish == "tool_calls":
         # 占位被全部过滤掉，无实际工具调用，降级为正常结束，防止客户端无限挂起等待
         finish = "stop"
@@ -14519,33 +14807,73 @@ class Handler(BaseHTTPRequestHandler):
             last_usage = None
             first_ms = None
             streamed_text = []
+            leak_filter = LeakedToolCallStreamFilter()
+            synthesized_calls = False
+            pending_finish = None
+
+            def write_chunk(payload):
+                nonlocal emitted, first_ms
+                if first_ms is None:
+                    first_ms = int((time.time() - t_start) * 1000)
+                emitted = True
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+
+            def release(actions):
+                nonlocal synthesized_calls
+                for action in actions:
+                    if action[0] == "text":
+                        if action[1]:
+                            write_chunk(chat_text_chunk(model, action[1]))
+                    else:
+                        synthesized_calls = True
+                        for payload in chat_tool_call_chunks(model, action[1]):
+                            write_chunk(payload)
+
             try:
                 for line in upstream:
                     data = strip_data_prefix(line.decode("utf-8", "replace"))
                     if not data or data == "[DONE]" or data.startswith(":"):
                         continue
+                    maybe = None
                     try:
                         maybe = json.loads(data)
+                    except Exception:
+                        maybe = None
+                    if isinstance(maybe, dict):
                         u = maybe.get("usage")
                         if u:
                             if last_usage is None or (u.get("total_tokens") or 0) >= (last_usage.get("total_tokens") or 0):
                                 last_usage = u
                         for ch in (maybe.get("choices") or []):
                             delta = ch.get("delta") or {}
-                            if delta.get("content"):
-                                streamed_text.append(delta["content"])
                             if delta.get("reasoning_content"):
                                 streamed_text.append(delta["reasoning_content"])
-                    except Exception:
-                        pass
-                    cleaned = clean_chunk(data)
+                            piece = delta.get("content")
+                            if piece:
+                                streamed_text.append(piece)
+                                # Hold the text back: it may be a call the model
+                                # printed instead of emitting, and a client that
+                                # reads it as prose ends the turn with nothing to
+                                # run ("it keeps stopping by itself").
+                                delta.pop("content", None)
+                                release(leak_filter.feed(piece))
+                            if ch.get("finish_reason"):
+                                # Hold the terminator too: whether this turn ends
+                                # in tool_calls is only known once the text has
+                                # been flushed at end of stream.
+                                pending_finish = ch["finish_reason"]
+                                ch["finish_reason"] = None
+                    cleaned = clean_chunk(
+                        json.dumps(maybe, ensure_ascii=False)
+                        if isinstance(maybe, dict) else data)
                     if not cleaned:
                         continue
-                    if first_ms is None:
-                        first_ms = int((time.time() - t_start) * 1000)
-                    emitted = True
-                    self.wfile.write(f"data: {cleaned}\n\n".encode("utf-8"))
-                    self.wfile.flush()
+                    write_chunk(cleaned)
+                release(leak_filter.flush())
+                if synthesized_calls or pending_finish is not None:
+                    write_chunk(chat_finish_chunk(
+                        model, "tool_calls" if synthesized_calls else pending_finish))
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 # Client hung up; still account for what upstream produced.
                 wall = int((time.time() - t_start) * 1000)

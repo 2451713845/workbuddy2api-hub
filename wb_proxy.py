@@ -6493,6 +6493,8 @@ def runtime_settings_view():
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
         "remaining_priority_enabled":
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
+        "egress_backoff_enabled":
+            wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
         "accounts_collapsed": wb_settings.accounts_collapsed(ACCOUNTS_DIR),
         "accounts_separate_tab": wb_settings.accounts_separate_tab(ACCOUNTS_DIR),
         "key_before_hidden": wb_settings.key_before_hidden(ACCOUNTS_DIR),
@@ -13026,6 +13028,15 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_remaining_priority_enabled(ACCOUNTS_DIR, raw)
             reply["remaining_priority_enabled"] = raw
+        if "egress_backoff_enabled" in payload:
+            # 出口级瞬时失败退避（issue #271）：与 remaining_priority_enabled
+            # 同一形状——严格 JSON 布尔，字符串 "false" 会是真值。
+            raw = payload.get("egress_backoff_enabled")
+            if not isinstance(raw, bool):
+                return self._error(400, "egress_backoff_enabled must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_egress_backoff_enabled(ACCOUNTS_DIR, raw)
+            reply["egress_backoff_enabled"] = raw
             if not raw and POOL is not None:
                 # 关掉就立刻清掉池里上一次推的权重，不等下一个请求；打开则
                 # 由下一个请求照常推（此刻就算推也要先折一次剩余估算，没必要

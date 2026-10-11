@@ -361,6 +361,12 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 - **修复「网页腿失败也写 lastDailyChat，当天积分静默丢掉」**：`_daily_chat_upstream()` 在桌面腿成功后立刻写 `lastDailyChat`，而网页腿（唯一计入官方「每日活跃」的那条）失败也照写；于是当天后续巡检 `can_daily_chat()` 直接跳过该账号，那天的 30/50 积分既不到账也不再重试，面板还显示「成功」。现在只有网页腿成功（或 `web=False`、没开网页通道）才写盘，失败时留到下一个巡检周期重试。
   - `tests/_test_daily_chat.py` 补三条：网页腿失败不写盘且 `can_daily_chat()` 仍为真、网页腿成功写盘、`web=False` 维持原语义。
 
+- **新增「配置器 CLI」：客户端不在网关机器上也能一条命令接入**（#280）：看板的一键配置运行在网关进程里，只在网关本机、用 `127.0.0.1` 打开看板时可用（远程访问与容器 / OpenWrt 部署按设计拒绝），网关跑在服务器 / NAS / 路由器上时，客户端装在别的电脑就用不上。现在 `wb_agents.py` 同时是可执行的配置器——`list` / `status` / `apply` / `restore`，在**客户端所在的机器**本地写配置（与看板共用同一套写入、备份、还原逻辑），只通过 HTTP 从网关取模型表；网关侧新增 `GET /agents/cli` 下发该脚本（免面板鉴权，正文与仓库内 `wb_agents.py` 逐字节一致、不含机密）。`--dry-run` 与真实写入共用同一条 `plan()` 生成路径；Key 走 `--key` → `WB_PROXY_API_KEY` → 交互提示，提示仅在 stdin 与 stdout 都是终端时出现（避免没有控制台的进程里 `getpass` 永久阻塞）。
+  - 顺手修「apply → apply → restore 把自产文件当原件还原」：按内容哈希判定归属——仍逐字节等于我们最后写入的 → `restore` 删除；被用户手改过 → 备份并恢复用户版本。此前含 API Key 的 `.credentials.yaml` 会留在磁盘上，与文档承诺相悖。
+  - `release/portable_runtime.py` 的 `REQUIRED_FILES` 补 `Lib/getpass.py`（新增 import 后裁剪运行时缺该模块）；README 套件计数 119 → 120。
+
+- **补一道「冲突标记」门禁**：仓库里已经三次把解冲突的残留提交进 main（#131 专门清过一次 dashboard 的，README 又在 #243/#245 那批合并里带进 12~15 行），此前没有任何测试盯它——Python 文件会直接 `SyntaxError`，HTML/JS 则是静默坏掉，回滚检查还会把「合并时顺手整理掉这些行」算成弄丢 main 的改动（#245 那次报红就是这个）。`tests/_test_release_engineering.py` 新增 `RepoHygieneTests`：扫全树（跳过运行时数据与打包产物目录），任一行以 `<<<<<<<` / `>>>>>>>` / `|||||||` 开头即失败。
+
 已发布版本的完整记录（v1.4.5 ~ v1.6.20，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 ## 七、致谢与引用声明 (Credits & References)
 

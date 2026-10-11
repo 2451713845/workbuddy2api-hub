@@ -920,17 +920,18 @@ class RemainingUsageTests(unittest.TestCase):
         self.assertEqual(data["budgets"][0]["n"], 1)
 
     def test_the_limit_event_journal_follows_the_usage_dir(self):
-        """--usage-dir 必须把事件日志与按天归档一起搬走。
+        """--usage-dir 必须把事件日志、按天归档与 recent 索引一起搬走。
 
-        LIMIT_EVENTS_FILE / ESTIMATE_DAILY_FILE 都是 import 时按默认目录算出来
-        的常量；漏掉它们，真机上（目录来自命令行参数而不是环境变量）事件日志
-        会一直写 ENOENT，预算样本就只剩日志里带归属的那几条 429 行（2026-10-10
-        真机实测），跨天归档则会写错目录。
+        LIMIT_EVENTS_FILE / ESTIMATE_DAILY_FILE / RECENT_INDEX_FILE 都是 import
+        时按默认目录算出来的常量；漏掉它们，真机上（目录来自命令行参数而不是
+        环境变量）事件日志会一直写 ENOENT，预算样本就只剩日志里带归属的那几条
+        429 行（2026-10-10 真机实测），跨天归档则会写错目录，recent 的行偏移
+        索引同样会写错目录（换目录后每次冷启动都要重扫一遍日志）。
         """
         import wb_activity
         directory = tempfile.mkdtemp(prefix="wb-usage-dir-")
         old = (P.USAGE_DIR, P.USAGE_LOG, P.LIMIT_EVENTS_FILE,
-               P.ESTIMATE_DAILY_FILE)
+               P.ESTIMATE_DAILY_FILE, P.RECENT_INDEX_FILE)
         old_activity = wb_activity.data_dir()
         try:
             P._apply_cli_overrides(types.SimpleNamespace(
@@ -940,6 +941,8 @@ class RemainingUsageTests(unittest.TestCase):
                              os.path.join(directory, "limit-events.jsonl"))
             self.assertEqual(P.ESTIMATE_DAILY_FILE,
                              os.path.join(directory, "estimate-daily.json"))
+            self.assertEqual(P.RECENT_INDEX_FILE,
+                             os.path.join(directory, "usage-recent-index.json"))
             # 归档也真的写进新目录（而不是旧目录 / ENOENT）。
             P._estimate_daily_sync(
                 {"2026-10-14": {"budgets": {}, "segments": {}}},
@@ -948,7 +951,7 @@ class RemainingUsageTests(unittest.TestCase):
                 os.path.join(directory, "estimate-daily.json")))
         finally:
             P.USAGE_DIR, P.USAGE_LOG, P.LIMIT_EVENTS_FILE, \
-                P.ESTIMATE_DAILY_FILE = old
+                P.ESTIMATE_DAILY_FILE, P.RECENT_INDEX_FILE = old
             wb_activity.set_data_dir(old_activity)
             # 缓存里还留着临时目录的戳，还原后立刻失效掉。
             P._estimate_daily_cache["entry"] = (

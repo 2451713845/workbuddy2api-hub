@@ -131,7 +131,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 121 个套件：88 个 Python + 33 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 123 个套件：90 个 Python + 33 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -354,6 +354,12 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **`/usage/perf` 加增量样本（稳态最大项）+ `_tail_lines` 逐块读取**：perf 是面板轮询里唯一没有增量的聚合——每次 TTL 过期都重读日志末尾 `sample` 行、逐行 `json.loads`、把五个数值往全局与三层模型桶各 append 一遍，再对每个桶排序求分位；真机 558ms/次、TTL 15 秒，面板开着就每 15 秒付一次。现在按 `(sample, realm, 窗口)` 各记一份**环形样本**（最近 `sample` 行 + 每行对聚合的贡献），TTL 过期只把新追加的行并进来、把滑出样本的行撤出去，0 新字节时连渲染都省掉；位置校验（`offset` + `(size, dev, ino)` + offset 前 64B tail 签名）不过才从日志尾部重建。本机（11.7MB / 21445 行）`perf_stats`：冷 220~250ms 不变，**TTL 过期后的重算 190~280ms → ~1ms**；`sample=20000` 的冷扫 800ms → 660ms。口径未动：`sample` 仍是"最近 N 行"（不是时间窗）、`sample_capped` 仍表示 tail 截断、realm/窗口预过滤照旧、分位始终从原始样本算（D6）、`sampled`/`sample_from`/三层桶的内容与顺序与整段重扫逐字节一致；状态**不落盘**（重启付一次冷扫），每进程最多留 4 份（面板实际只用两三个键；`sample=5000` 单份约 3.4MB）。顺带把 `_tail_lines` 的逐行循环收成"整块过滤 + 一次 extend"（字节口径不变，20000 行读取 1.2 倍左右），并在新套件里用 `open`/`json.loads` 计数桩钉住"0 新字节不解析、N 行只解析 N 行、读入字节数就是尾部那一段"。新增 `tests/_test_perf_incremental.py`。
+
+- **用量两处小提速（输出逐字节不变）**：窗口序列的「credit 前 50 条」从「整窗计费行全量 append + 整份排序 + 切前 50」改成大小 50 的有界堆——进不了前 50 的行不再建载荷字典，20 万计费行的选取 170ms → 75ms（at 倒序、相同 at 保持日志顺序的语义与切片路径一致）；请求路径不再维护模块级 `_usage` 里没人读的 requests/ttft/gen/wall/by_model 累加（全仓唯一读者是快照的 `started`），每请求省一次全局锁与约 6µs 的加法，快照的 `started`/`since` 照旧。`import heapq` 已加进便携运行时清单（`release/portable_runtime.py`）。
+
+- **`/usage/recent` 的行偏移索引**：分页从「从日志尾部往回读」改成按索引直接定位。新落盘 `usage/usage-recent-index.json`（每 64KB 记一条行边界 + 到该处的累计记录数，4 万行日志 4.5KB），页数标签与页内容都从同一次扫描里取；位置校验复用聚合那套（`key` + 64B tail 签名），截断 / 替换 / 同尺寸重写一律作废重扫，索引答不了（半行、坏字节、池没就绪）就整段退回原实现，两条路的输出逐字节相同。本机（11.7MB / 21445 行）：第 1 页读 100KB（旧 256KB）、第 200 页读 128KB（旧 11.0MB）、空页读 128B（旧 11.7MB）；带索引重启后的第一页 ~15ms（旧冷 133ms）。索引只在有推进时落盘（256KB / 900s 节流），首次构建要过一遍日志（约等于一次解析扫描）。开关 `WB_RECENT_INDEX=0`（另见 `WB_RECENT_INDEX_MIN_BYTES` / `WB_RECENT_INDEX_MIN_SECONDS`）。新增套件 `tests/_test_recent_index.py`。
 
 - **修复「网页通道打卡」在认证代理下必然 407**：账号绑定带 user/pwd 的代理槽时，网页通道那一步固定失败并回 `OSError: Tunnel connection failed: 407 Proxy Authentication Required`，而桌面通道与面板「出口 IP 测试」都正常。原因是 `wb_webagent.AcpChannel._connect()` 用裸 `http.client` + `set_tunnel()` 直连代理，只传了 `host/port`：`urllib.request.ProxyHandler` 会替 urlopen 那条路径把 URL 里的凭据转成 `Proxy-Authorization: Basic ...`，而 `set_tunnel()` 不带这个头——于是同一个代理 URL 在两条通道上行为不一致。
   - 现在 `_connect()` 走 `_proxy_parts()` 解析代理 URL，把 `Proxy-Authorization` 显式塞进 CONNECT（取值口径与 `ProxyHandler.proxy_open` 一致：先 `unquote` 再 base64），两种写法都认：`http://user:pass@host:port` 与无 scheme 的 `user:pass@host:port`（后者此前连 host/port 都会被 `urlparse` 误判成 scheme，一并修正）；没填凭据时不发该头，免认证代理行为不变。

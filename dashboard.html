@@ -4621,22 +4621,7 @@ async function loadIntlTasks(){
       intlTotalEl.textContent = '+' + fmt(totalAmt) + ' 积分';
     }
 
-    const stateEl = document.getElementById("intlTodayActiveState");
-    if(stateEl){
-      if(!accts.length){
-        stateEl.textContent = '无国际账号';
-      } else {
-        const today = new Date().toISOString().slice(0, 10);
-        const doneCount = accts.filter(a => a.lastDailyChat && a.lastDailyChat.startsWith(today)).length;
-        if(doneCount === accts.length){
-          stateEl.innerHTML = '<span style="color:#26bb82">今日已打卡 (' + doneCount + '/' + accts.length + ')</span>';
-        } else if(doneCount > 0){
-          stateEl.innerHTML = '<span style="color:var(--accent)">部分已打卡 (' + doneCount + '/' + accts.length + ')</span>';
-        } else {
-          stateEl.innerHTML = '<span style="color:var(--warn)">今日未打卡 (0/' + accts.length + ')</span>';
-        }
-      }
-    }
+    if(typeof updateTaskPageCheckinCards === 'function') updateTaskPageCheckinCards();
   }catch(e){
     console.error('loadIntlTasks error:', e);
   }
@@ -4665,32 +4650,7 @@ async function loadGrowthTasks(){
       sel.innerHTML = opts;
     }
 
-    const chkStateEl = document.getElementById("cnTodayCheckinState");
-    if(chkStateEl){
-      try{
-        const allAcctsRes = await getJSON('/accounts?realm=all');
-        const allList = allAcctsRes.accounts || [];
-        let targetAccts = allList.filter(a => a.realm === 'cn' && a.enabled);
-        if(CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all'){
-          targetAccts = targetAccts.filter(a => a.uid === CURRENT_GROWTH_UID);
-        }
-        if(!targetAccts.length){
-          chkStateEl.textContent = '无国内账号';
-        } else {
-          const today = new Date().toISOString().slice(0, 10);
-          const doneCount = targetAccts.filter(a => a.lastCheckin && a.lastCheckin.startsWith(today)).length;
-          if(doneCount === targetAccts.length){
-            chkStateEl.innerHTML = '<span style="color:#26bb82">今日已签到 (' + doneCount + '/' + targetAccts.length + ')</span>';
-          } else if(doneCount > 0){
-            chkStateEl.innerHTML = '<span style="color:var(--accent)">部分已签到 (' + doneCount + '/' + targetAccts.length + ')</span>';
-          } else {
-            chkStateEl.innerHTML = '<span style="color:var(--warn)">今日未签到 (0/' + targetAccts.length + ')</span>';
-          }
-        }
-      }catch(e){
-        chkStateEl.textContent = '-';
-      }
-    }
+    if(typeof updateTaskPageCheckinCards === 'function') updateTaskPageCheckinCards();
 
     const elStk = document.getElementById("stkDays");
     if(elStk) elStk.textContent = streak + ' 天';
@@ -5802,6 +5762,57 @@ async function loadActivityToday(){
   }
 }
 
+// 任务与福利页面的今日打卡/签到卡片状态：与网关与账号页面的今日活跃/今日签到完全同一口径
+// 统一通过 activityStatusOf(a) 判定（以今天真实流水为准，回落到本日本地时间前缀）。
+function updateTaskPageCheckinCards(){
+  const allList = window.ACCOUNTS || [];
+  const stateEl = document.getElementById("intlTodayActiveState");
+  if(stateEl){
+    const intlAccts = allList.filter(a => a.realm === 'intl' && a.enabled);
+    if(!intlAccts.length){
+      stateEl.textContent = '无国际账号';
+    } else {
+      const isDone = a => {
+        const s = activityStatusOf(a);
+        return s.kind === 'ok' || s.kind === 'done';
+      };
+      const doneCount = intlAccts.filter(isDone).length;
+      if(doneCount === intlAccts.length){
+        stateEl.innerHTML = '<span style="color:#26bb82">今日已打卡 (' + doneCount + '/' + intlAccts.length + ')</span>';
+      } else if(doneCount > 0){
+        stateEl.innerHTML = '<span style="color:var(--accent)">部分已打卡 (' + doneCount + '/' + intlAccts.length + ')</span>';
+      } else {
+        stateEl.innerHTML = '<span style="color:var(--warn)">今日未打卡 (0/' + intlAccts.length + ')</span>';
+      }
+    }
+  }
+
+  const chkStateEl = document.getElementById("cnTodayCheckinState");
+  if(chkStateEl){
+    let targetAccts = allList.filter(a => a.realm === 'cn' && a.enabled);
+    if(typeof CURRENT_GROWTH_UID !== 'undefined' && CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all'){
+      targetAccts = targetAccts.filter(a => a.uid === CURRENT_GROWTH_UID);
+    }
+    if(!targetAccts.length){
+      chkStateEl.textContent = '无国内账号';
+    } else {
+      const isDone = a => {
+        const s = activityStatusOf(a);
+        return s.kind === 'ok' || s.kind === 'done';
+      };
+      const doneCount = targetAccts.filter(isDone).length;
+      if(doneCount === targetAccts.length){
+        chkStateEl.innerHTML = '<span style="color:#26bb82">今日已签到 (' + doneCount + '/' + targetAccts.length + ')</span>';
+      } else if(doneCount > 0){
+        chkStateEl.innerHTML = '<span style="color:var(--accent)">部分已签到 (' + doneCount + '/' + targetAccts.length + ')</span>';
+      } else {
+        chkStateEl.innerHTML = '<span style="color:var(--warn)">今日未签到 (0/' + targetAccts.length + ')</span>';
+      }
+    }
+  }
+}
+
+
 // 面板拼查询串，筛选在服务端做；写错的取值服务端会回 400，这里原样透出。
 function activityFilterQuery(){
   const parts = ['range=' + encodeURIComponent(ACT_FILTER.range || '7d'), 'limit=200'];
@@ -6302,6 +6313,7 @@ async function loadActivityBoard(showToast, more){
 function renderAccounts(){
   // Same data source as the account cards, so the two views can never disagree.
   renderDisabled();
+  if(typeof updateTaskPageCheckinCards === 'function') updateTaskPageCheckinCards();
   const box = document.getElementById('accounts');
   const currentView = (window.VIEW_REALM || "intl");
   let list = accountsInView();

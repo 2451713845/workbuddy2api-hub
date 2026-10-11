@@ -14115,9 +14115,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(404, "no such account")
             log("account %s %s"
                 % (uid[:8], "enabled" if payload.get("enabled") else "disabled"))
+        if "weight" in payload:
+            try:
+                weight = int(payload.get("weight"))
+            except (TypeError, ValueError):
+                return self._error(400, "weight must be an integer between 1 and 100")
+            if not 1 <= weight <= 100:
+                return self._error(400, "weight out of range (1-100)")
+            updated = POOL.set_weight(uid, weight)
+            if updated is None:
+                return self._error(404, "no such account")
+            log("account %s weight set to %d" % (uid[:8], weight))
+        if "note" in payload:
+            updated = POOL.set_note(uid, payload.get("note"))
+            if updated is None:
+                return self._error(404, "no such account")
+            log("account %s note set (%d chars)"
+                % (uid[:8], len(updated.get("note") or "")))
         if updated is None:
             return self._error(
-                400, "nothing to update: pass 'enabled', 'proxy' or 'proxySlot'"
+                400,
+                "nothing to update: pass 'enabled', 'proxy', 'proxySlot', 'weight' or 'note'"
             )
         return self._json(200, {"account": updated})
 

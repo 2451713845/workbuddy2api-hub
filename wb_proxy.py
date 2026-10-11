@@ -16,6 +16,7 @@ start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
 import argparse
 import bisect
 import hashlib
+import heapq
 import ipaddress
 from collections import deque
 import re
@@ -446,7 +447,10 @@ def _empty_stats():
             "ttft_ms_sum": 0, "ttft_samples": 0,
             "gen_ms_sum": 0, "gen_samples": 0,
             "wall_ms_sum": 0, "wall_samples": 0}
-_usage = _empty_stats()
+# 进程启动时刻。快照的 "started"/"since" 从这里取（_usage_snapshot_uncached
+# 是它唯一的读者）；requests/ttft/by_model 那些累计字段没有任何读者——每个
+# 聚合都重读 usage.jsonl——所以请求路径不再维护它们。
+_usage = {"started": time.time()}
 def normalize_usage_cache_aliases(usage):
     """Write the best cache-hit value into every alias.
 
@@ -711,25 +715,6 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     if fields.get("prompt_tokens", 0) > 0:
         row["cache_hit_pct"] = round(fields.get("cached_tokens", 0) * 100.0
                                      / fields["prompt_tokens"], 1)
-    with _lock:
-        _usage["requests"] += 1
-        for k in USAGE_FIELDS:
-            if k in fields:
-                _usage[k] += fields[k]
-        if ttft_ms is not None:
-            _usage["ttft_ms_sum"] += ttft_ms
-            _usage["ttft_samples"] += 1
-        if gen_ms is not None:
-            _usage["gen_ms_sum"] += gen_ms
-            _usage["gen_samples"] += 1
-        if elapsed_ms is not None:
-            _usage["wall_ms_sum"] += elapsed_ms
-            _usage["wall_samples"] += 1
-        per = _usage["by_model"].setdefault(model, {"requests": 0, **{k: 0 for k in USAGE_FIELDS}})
-        per["requests"] += 1
-        for k in USAGE_FIELDS:
-            if k in fields:
-                per[k] += fields[k]
     _persist_usage(row, "usage persist failed")
     try:
         t_tokens = fields.get("total_tokens", 0)
@@ -806,11 +791,6 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         acc = POOL.get(account) if POOL else None
         row["realm"] = acc.realm if acc else CURRENT_REALM
     row["key"] = key or ""
-    with _lock:
-        _usage["errors"] += 1
-        if elapsed_ms is not None:
-            _usage["wall_ms_sum"] += elapsed_ms
-            _usage["wall_samples"] += 1
     _persist_usage(row, "error persist failed")
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
     log(f"request error: model={model}{dur} status={status} msg={str(message)[:180]}", level="ERROR", tag="chat")
@@ -822,6 +802,33 @@ def _pct(values, q):
     ordered = sorted(values)
     idx = int(round((q / 100.0) * (len(ordered) - 1)))
     return ordered[max(0, min(len(ordered) - 1, idx))]
+
+
+def _perf_block(vals):
+    """One metric's summary block, straight from the raw samples.
+
+    D6 要求分位永远从原始样本算（不许聚合近似），所以这里收的是一串原始数值
+    ——list 或 deque 都行（增量样本用 deque 做并入/滑出）。排序一次喂三个分位；
+    avg 与 max 仍读原序列，于是浮点求和的顺序、以及 avg 的最后一位，与逐次
+    排序的旧写法逐位相同。
+    """
+    if not vals:
+        return None
+    ordered = sorted(vals)
+    count = len(ordered)
+
+    def rank(q):
+        idx = int(round((q / 100.0) * (count - 1)))
+        return ordered[max(0, min(count - 1, idx))]
+
+    return {
+        "avg": round(sum(vals) / count, 1),
+        "p50": rank(50),
+        "p90": rank(90),
+        "p99": rank(99),
+        "max": max(vals),
+        "samples": count,
+    }
 _perf_cache = {}
 _perf_lock = threading.Lock()
 
@@ -852,7 +859,9 @@ def perf_stats(sample=5000, realm=None, ttl=None, range=None, since=None, until=
     dashboard polls this endpoint every few seconds.
 
     Rebuilds under the lock so a burst of pollers cannot each start their own
-    scan of the log."""
+    scan of the log. The rebuild itself is incremental: _perf_stats_incremental
+    keeps a ring of the last `sample` rows per (sample, realm, window) key and
+    only folds the bytes appended since the last rebuild (see there)."""
     ttl = _STATS_TTL if ttl is None else ttl
     r, lo, hi, key = _perf_stats_scope(sample, realm, range, since, until)
     now = time.time()
@@ -860,7 +869,7 @@ def perf_stats(sample=5000, realm=None, ttl=None, range=None, since=None, until=
         hit = _perf_cache.get(key)
         if hit is not None and (now - hit[0]) < ttl:
             return hit[1]
-        data = _perf_stats_uncached(sample, r, since=lo, until=hi)
+        data = _perf_stats_incremental(key, key[0], r, lo, hi)
         _perf_cache[key] = (time.time(), data)
     return data
 
@@ -994,17 +1003,7 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
             hits.append(r["cache_hit_pct"])
             for b in (mb, rb, ab):
                 b["hits"].append(r["cache_hit_pct"])
-    def block(vals):
-        if not vals:
-            return None
-        return {
-            "avg": round(sum(vals) / len(vals), 1),
-            "p50": _pct(vals, 50),
-            "p90": _pct(vals, 90),
-            "p99": _pct(vals, 99),
-            "max": max(vals),
-            "samples": len(vals),
-        }
+    block = _perf_block
     return {
         "sampled": total,
         # Where the sampled slice starts and whether it was cut short, so a
@@ -1073,6 +1072,543 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
             } for mid, realms in ma_buckets.items()
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# perf 的增量样本（T2）
+#
+# perf_stats 每次重建都要重读日志末尾 sample 行、逐行 json.loads、把每一行的
+# 五个数值往全局与三层模型桶各 append 一次，最后每个桶排序求分位。真机
+# 558ms/次，TTL 15 秒——面板开着就是每 15 秒付一次。
+#
+# 这里按 (sample, realm, 窗口) 各记一份**环形样本状态**：
+#   ring     最近 sample 条非空行各自的折叠结果（含尾部半行，deque，手工淘汰）
+#   agg      这些行对聚合的贡献：全局计数 + 五个数值双端队列 + 三层模型桶
+#   offset   已经折到日志的哪个字节；key/tail 是那条前缀的身份证明
+# 于是 TTL 过期后的重建只把 offset 之后的新行并进来、把滑出样本的行撤出去，
+# 不再重读也不再重新解析；位置校验不过（截断 / 换文件 / 同尺寸重写）才从
+# 日志尾部的样本重建一次。
+#
+# 口径一个都没动：sample 仍是"最近 sample 行"（不是时间窗）、sample_capped
+# 仍表示 tail 被截断、realm/窗口预过滤与分位口径照旧（分位始终从原始样本算，
+# D6）；三层桶的存在与顺序、成功率的算法、sample_from 的取值规则全部照抄
+# _perf_stats_uncached。这份状态**不落盘**（清单 §1.5：重启付一次冷扫即可，
+# 落盘会让 checkpoint 涨几百 KB）。
+_perf_state = {}
+# 面板实际用到的键就两三个（`?realm=` 一个、带窗口的一个），多出来的按最近
+# 使用淘汰，免得用户来回切 range 时状态无限堆积。单份状态的内存与 sample 成
+# 正比（本机实测：sample=5000 的环+聚合 ≈ 3.4MB，20000 ≈ 13MB），所以上限压
+# 到 4 份——面板的键数装得下，最坏内存 ~14MB；淘汰只是下次重建一次，不影响
+# 任何输出。
+_PERF_STATE_MAX = 4
+# ring 条目的形状，见 _perf_line_entry：短元组 = 不贡献聚合的行。
+_PERF_REC_LEN = 10
+
+
+def _perf_new_bucket():
+    return {"total": 0, "ok": 0, "err": 0, "aborted": 0,
+            "ttfts": deque(), "gens": deque(), "walls": deque(),
+            "tok_rates": deque(), "hits": deque()}
+
+
+def _perf_new_agg():
+    return {"total": 0, "ok": 0, "err": 0, "aborted": 0,
+            "ttfts": deque(), "gens": deque(), "walls": deque(),
+            "tok_rates": deque(), "hits": deque(),
+            "m": {}, "mr": {}, "ma": {}}
+
+
+def _perf_put(vals, value, add, front):
+    """一个数值贡献：并入 append，撤销时从对应的那一头弹出。
+
+    环里的行严格按日志顺序进出：滑出样本的是最旧的一行（front），上一轮末尾
+    的半行被重折时摘掉的是最新的一行（back）。同一张表的每一头都只对应同一
+    行——这正是撤销能 O(1) 做完的原因。
+    """
+    if add > 0:
+        vals.append(value)
+    elif front:
+        vals.popleft()
+    else:
+        vals.pop()
+
+
+def _perf_apply(state, entry, add, front):
+    """并入（add=1）或撤销（add=-1）一行对聚合的贡献。
+
+    撤销只做并入做过的那些事：计数减回去、数值表从并进的那一头弹出、桶的
+    total 归零就把桶删掉——重建时一个桶存在与否只看样本里还有没有它的行，
+    所以"删空桶"正是重建的输出形状；删掉的桶后来再有行进来会重新建在末尾，
+    位置与重建时的"第一次出现"一致（旧行都滑出去了，新行就是它现在最早的
+    一行）。判定条件与 _perf_stats_uncached 的逐行循环逐句对应：
+    elapsed 走真值判断、ttft/cache_hit 走 is not None、tokens_per_sec 走真值。
+    """
+    if entry is None or len(entry) < _PERF_REC_LEN:
+        return
+    _at, m_id, r_realm, acct, outcome, elapsed, ttft, gen, tps, hit = entry
+    agg = state["agg"]
+    if add > 0:
+        mb = agg["m"].get(m_id)
+        if mb is None:
+            mb = agg["m"][m_id] = _perf_new_bucket()
+        realms = agg["mr"].get(m_id)
+        if realms is None:
+            realms = agg["mr"][m_id] = {}
+        rb = realms.get(r_realm)
+        if rb is None:
+            rb = realms[r_realm] = _perf_new_bucket()
+        accts = agg["ma"].get(m_id)
+        if accts is None:
+            accts = agg["ma"][m_id] = {}
+        by_realm = accts.get(r_realm)
+        if by_realm is None:
+            by_realm = accts[r_realm] = {}
+        ab = by_realm.get(acct)
+        if ab is None:
+            ab = by_realm[acct] = _perf_new_bucket()
+    else:
+        mb = agg["m"][m_id]
+        rb = agg["mr"][m_id][r_realm]
+        ab = agg["ma"][m_id][r_realm][acct]
+    agg["total"] += add
+    for b in (mb, rb, ab):
+        b["total"] += add
+    # A client that walks away is not a gateway failure: it gets its own
+    # bucket instead of dragging the success rate down (same split as the
+    # full-scan path).
+    if outcome == "client_aborted":
+        agg["aborted"] += add
+        for b in (mb, rb, ab):
+            b["aborted"] += add
+            if elapsed:
+                _perf_put(b["walls"], elapsed, add, front)
+        if elapsed:
+            _perf_put(agg["walls"], elapsed, add, front)
+    elif outcome != "completed":
+        agg["err"] += add
+        for b in (mb, rb, ab):
+            b["err"] += add
+            if elapsed:
+                _perf_put(b["walls"], elapsed, add, front)
+        if elapsed:
+            _perf_put(agg["walls"], elapsed, add, front)
+    else:
+        agg["ok"] += add
+        for b in (mb, rb, ab):
+            b["ok"] += add
+        if ttft is not None:
+            _perf_put(agg["ttfts"], ttft, add, front)
+            for b in (mb, rb, ab):
+                _perf_put(b["ttfts"], ttft, add, front)
+        if gen is not None:
+            _perf_put(agg["gens"], gen, add, front)
+            for b in (mb, rb, ab):
+                _perf_put(b["gens"], gen, add, front)
+        if elapsed is not None:
+            _perf_put(agg["walls"], elapsed, add, front)
+            for b in (mb, rb, ab):
+                _perf_put(b["walls"], elapsed, add, front)
+        if tps:
+            _perf_put(agg["tok_rates"], tps, add, front)
+            for b in (mb, rb, ab):
+                _perf_put(b["tok_rates"], tps, add, front)
+        if hit is not None:
+            _perf_put(agg["hits"], hit, add, front)
+            for b in (mb, rb, ab):
+                _perf_put(b["hits"], hit, add, front)
+    if add < 0:
+        if not mb["total"]:
+            del agg["m"][m_id]
+        if not rb["total"]:
+            del agg["mr"][m_id][r_realm]
+            if not agg["mr"][m_id]:
+                del agg["mr"][m_id]
+        if not ab["total"]:
+            del agg["ma"][m_id][r_realm][acct]
+            if not agg["ma"][m_id][r_realm]:
+                del agg["ma"][m_id][r_realm]
+            if not agg["ma"][m_id]:
+                del agg["ma"][m_id]
+
+
+def _perf_at_token(line):
+    """预过滤认可的写法里 at 的浮点值（读不到就 None）。
+
+    _line_outside_window 判定为"窗外"的行，其形状已经被它逐条核过：以
+    `{"at": ` 开头、值以逗号收尾、值是浮点字面量、后面没有第二个 "at" 键。
+    所以这里读到的值与 json.loads 会给的值相同（json 对带小数点/指数的记号
+    也走 float()）。只给窗口预过滤跳过的行记 sample_from 用——那些行不解析，
+    但旧实现里"样本最老的那一行"会被解析，它的 at 就是 sample_from。
+    """
+    if not line.startswith(_AT_PREFIX):
+        return None
+    end = line.find(",", len(_AT_PREFIX))
+    if end < 0:
+        return None
+    token = line[len(_AT_PREFIX):end]
+    if "." not in token and "e" not in token and "E" not in token:
+        return None
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _perf_line_entry(state, line):
+    """把一行日志折成 ring 条目（与 _perf_stats_uncached 的逐行循环逐句对应）。
+
+    返回：
+      None      这一行没有可用的行数据（坏 JSON，或被窗口预过滤掉且读不出 at）
+      (at,)     解析成功但被 realm / 窗口过滤掉——或被窗口预过滤跳过（at 取自
+                它自己声明的值）：不贡献聚合，但仍决定 sample_from。旧实现里
+                样本最老的那一行无论窗口如何都会被解析，所以被预过滤掉的行也
+                要留下 at。
+      (at, model, realm, account, outcome, elapsed, ttft, gen, tps, hit)
+                通过全部过滤，计入聚合（10 元组，_PERF_REC_LEN）
+    """
+    since = state["since"]
+    until = state["until"]
+    realm = state["realm"]
+    # 与旧实现同一道廉价预过滤：它只丢"下面的窗口判断本来也会丢"的行。
+    # 旧实现的开关是 sample_from is not None（= 样本里已经有一行的 at 非空），
+    # 这里用环里 at 非空的行数 n_at 表达同一件事。
+    #
+    # 多一道 line.endswith("}")：预过滤跳过的行也要记下它声明的 at（供
+    # sample_from 用），但一条写了一半的行（尾部没换行、JSON 也没写完）不该
+    # 因此报出一个旧实现给不出的 sample_from——完整行才走跳过分支，其余照旧
+    # 落到 json.loads 上（坏 JSON 仍然是 None）。完整对象行总是以 } 收尾，
+    # 所以这道判断不改变任何合法行省下的解析。
+    if (since or until) and state["n_at"] and line.endswith("}") and \
+            _line_outside_window(line, since or None, until or None):
+        return (_perf_at_token(line),)
+    try:
+        r = json.loads(line)
+    except Exception:
+        return None
+    at = r.get("at")
+    if realm and not row_matches_realm(r, realm):
+        return (at,)
+    at_value = at or 0
+    if since and at_value < since:
+        return (at,)
+    if until and at_value > until:
+        return (at,)
+    return (at, r.get("model") or "unknown", row_realm(r),
+            r.get("account") or "(unattributed)", row_outcome(r),
+            r.get("elapsed_ms"), r.get("ttft_ms"), r.get("gen_ms"),
+            r.get("tokens_per_sec"), r.get("cache_hit_pct"))
+
+
+def _perf_drop_oldest(state):
+    """滑出环里最旧的一行（含它对聚合的贡献）。"""
+    old = state["ring"].popleft()
+    if old is not None and old[0] is not None:
+        state["n_at"] -= 1
+    _perf_apply(state, old, -1, True)
+
+
+def _perf_push(state, line):
+    """把一行并进环：先腾位置，再折行、并入。
+
+    腾位置放在折行之前——旧实现的窗口预过滤开关是"当前样本里已经有行的 at
+    非空"，滑出样本的行不再算数。若先折行再淘汰，新行就可能被预过滤掉一行
+    "在旧样本里不算、在新样本里却是第一行"的数据，sample_from 会跟着变。
+    """
+    sample = state["sample"]
+    if sample <= 0:
+        return
+    ring = state["ring"]
+    while len(ring) >= sample:
+        _perf_drop_oldest(state)
+    entry = _perf_line_entry(state, line)
+    if entry is not None and entry[0] is not None:
+        state["n_at"] += 1
+    _perf_apply(state, entry, 1, False)
+    ring.append(entry)
+
+
+def _perf_pop_last(state):
+    """摘掉环尾的条目（上一轮的半行，重折前先撤掉它的贡献）。"""
+    ring = state["ring"]
+    if not ring:
+        return
+    old = ring.pop()
+    if old is not None and old[0] is not None:
+        state["n_at"] -= 1
+    _perf_apply(state, old, -1, False)
+
+
+def _perf_fold(state):
+    """把日志 offset 之后的新行并进状态；尾部半行作为样本的最后一行并进去。
+
+    字节纪律与 _count_usage_scan 一致：整行推进、半行不推进 offset（内容随时
+    可能被写完整，下次从同一位置按完整内容重折）。但半行在**样本**里算一行
+    ——_tail_lines 就是这么数的（它把末尾没有换行的残余当一行）——所以它进环，
+    只是每次重折前先摘掉上一轮那一份。
+
+    返回"样本变没变"：没变时渲染可以整段跳过（0 新字节的 TTL 重算就是这条路）。
+    """
+    ring = state["ring"]
+    if state["pending"]:
+        _perf_pop_last(state)
+        state["pending"] = False
+    offset = state["offset"]
+    pending_raw = None
+    try:
+        with open(USAGE_LOG, "rb") as fh:
+            fh.seek(offset)
+            while True:
+                raw = fh.readline()
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    pending_raw = raw
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    _perf_push(state, line)
+                offset += len(raw)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log("perf incremental read failed: %s" % exc)
+    changed = offset != state["offset"] or pending_raw != state["pending_raw"]
+    state["offset"] = offset
+    state["pending_raw"] = pending_raw
+    if pending_raw is not None and pending_raw.strip() and state["sample"] > 0:
+        line = pending_raw.decode("utf-8", "replace").strip()
+        if line:
+            _perf_push(state, line)
+            state["pending"] = True
+    return changed
+
+
+def _perf_payload(state):
+    """把环形样本的聚合渲染成载荷（键序与字段与旧实现逐字一致）。
+
+    输出里三层桶的顺序 = 各桶在样本里**第一次出现**的顺序（整段重扫时天然
+    如此）。增量维护这个顺序要在每次淘汰时重排，比这里一趟扫描还贵；所以
+    渲染时扫一遍环把顺序还原出来——只读环、不解析，而且桶都见齐就停。
+    """
+    agg = state["agg"]
+    order = {}          # model -> realm -> account（插入序 = 第一次出现序）
+    sample_from = None
+    want = len(agg["m"])
+    for realms in agg["mr"].values():
+        want += len(realms)
+    for realms in agg["ma"].values():
+        for accts in realms.values():
+            want += len(accts)
+    seen = 0
+    for entry in state["ring"]:
+        if entry is None:
+            continue
+        if sample_from is None and entry[0] is not None:
+            sample_from = entry[0]
+        if len(entry) < _PERF_REC_LEN:
+            continue
+        realms = order.get(entry[1])
+        if realms is None:
+            realms = order[entry[1]] = {}
+            seen += 1
+        accts = realms.get(entry[2])
+        if accts is None:
+            accts = realms[entry[2]] = {}
+            seen += 1
+        if entry[3] not in accts:
+            accts[entry[3]] = None
+            seen += 1
+        if seen >= want:
+            break
+    by_model = {}
+    by_model_realm = {}
+    by_model_acct = {}
+    for mid, realms in order.items():
+        mb = agg["m"][mid]
+        by_model[mid] = {
+            "requests": mb["total"],
+            "errors": mb["err"],
+            "client_aborted": mb["aborted"],
+            "success_rate_pct": round(mb["ok"] * 100.0 / (mb["ok"] + mb["err"]), 1)
+                                 if (mb["ok"] + mb["err"]) else None,
+            "ttft_ms": _perf_block(mb["ttfts"]),
+            "generation_ms": _perf_block(mb["gens"]),
+            "wall_ms": _perf_block(mb["walls"]),
+            "tokens_per_sec": _perf_block(mb["tok_rates"]),
+            "cache_hit_pct": _perf_block(mb["hits"]),
+        }
+        realm_out = {}
+        acct_out = {}
+        for realm, accts in realms.items():
+            rb = agg["mr"][mid][realm]
+            realm_out[realm] = {
+                "requests": rb["total"],
+                "errors": rb["err"],
+                "client_aborted": rb["aborted"],
+                "success_rate_pct": round(rb["ok"] * 100.0 / (rb["ok"] + rb["err"]), 1)
+                                     if (rb["ok"] + rb["err"]) else None,
+                "ttft_ms": _perf_block(rb["ttfts"]),
+                "generation_ms": _perf_block(rb["gens"]),
+                "wall_ms": _perf_block(rb["walls"]),
+                "tokens_per_sec": _perf_block(rb["tok_rates"]),
+                "cache_hit_pct": _perf_block(rb["hits"]),
+            }
+            accts_out = {}
+            for acct in accts:
+                ab = agg["ma"][mid][realm][acct]
+                accts_out[acct] = {
+                    "requests": ab["total"],
+                    "errors": ab["err"],
+                    "client_aborted": ab["aborted"],
+                    "success_rate_pct": round(ab["ok"] * 100.0 / (ab["ok"] + ab["err"]), 1)
+                                         if (ab["ok"] + ab["err"]) else None,
+                    "ttft_ms": _perf_block(ab["ttfts"]),
+                    "generation_ms": _perf_block(ab["gens"]),
+                    "wall_ms": _perf_block(ab["walls"]),
+                    "tokens_per_sec": _perf_block(ab["tok_rates"]),
+                    "cache_hit_pct": _perf_block(ab["hits"]),
+                }
+            acct_out[realm] = accts_out
+        by_model_realm[mid] = realm_out
+        by_model_acct[mid] = acct_out
+    return {
+        "sampled": agg["total"],
+        # Where the sampled slice starts and whether it was cut short, so a
+        # week/month view can admit that its latency columns do not reach back
+        # to the window's own start.
+        "sample_from": sample_from,
+        "sample_capped": len(state["ring"]) >= state["sample"],
+        "success": agg["ok"],
+        "errors": agg["err"],
+        "client_aborted": agg["aborted"],
+        # Success rate is measured against requests the gateway actually
+        # finished; client cancellations are reported separately rather than
+        # being counted as failures.
+        "success_rate_pct": round(agg["ok"] * 100.0 / (agg["ok"] + agg["err"]), 1)
+                             if (agg["ok"] + agg["err"]) else None,
+        "ttft_ms": _perf_block(agg["ttfts"]),
+        "generation_ms": _perf_block(agg["gens"]),
+        "wall_ms": _perf_block(agg["walls"]),
+        "tokens_per_sec": _perf_block(agg["tok_rates"]),
+        "cache_hit_pct": _perf_block(agg["hits"]),
+        "by_model": by_model,
+        "by_model_realm": by_model_realm,
+        "by_model_acct": by_model_acct,
+    }
+
+
+def _log_complete_frontier(path=None):
+    """最后一个换行之后的字节偏移：整行折叠从这里开始。
+
+    日志的尾巴可能是写了一半的一行（没有换行符），它算样本的一行但不算已折
+    的字节——offset 停在这里，等它写完整再从同一位置重折。向前找换行只在
+    冷路径（或位置校验作废）上做，通常第一次读就命中。
+    """
+    path = path or USAGE_LOG
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return 0
+    chunk = 256 * 1024
+    pos = size
+    try:
+        with open(path, "rb") as fh:
+            while pos > 0:
+                step = min(chunk, pos)
+                pos -= step
+                fh.seek(pos)
+                idx = fh.read(step).rfind(b"\n")
+                if idx >= 0:
+                    return pos + idx + 1
+    except OSError:
+        return 0
+    return 0
+
+
+def _perf_rebuild(key, sample, realm, since, until):
+    """冷启动 / 位置校验不过：从日志尾部的 sample 行重建环形状态。"""
+    state = {"sample": sample, "realm": realm, "since": since, "until": until,
+             "key": None, "offset": 0, "tail": b"", "ring": deque(),
+             "n_at": 0, "pending": False, "pending_raw": None,
+             "agg": _perf_new_agg(), "at": 0.0,
+             "dirty": True, "payload": None}
+    raw_lines = _tail_lines(USAGE_LOG, sample)
+    frontier = _log_complete_frontier()
+    try:
+        size = os.path.getsize(USAGE_LOG)
+    except OSError:
+        size = 0
+    pending_raw = None
+    if size > frontier:
+        try:
+            with open(USAGE_LOG, "rb") as fh:
+                fh.seek(frontier)
+                pending_raw = fh.read()
+        except OSError:
+            pending_raw = None
+    # 尾部半行由 _tail_lines 算进样本的最后一行（末尾残余非空白时），这里把它
+    # 从"完整行"里摘出来单独折——下面 offset 停在它前面，重折路径与它一致。
+    if raw_lines and pending_raw is not None and raw_lines[-1] == pending_raw:
+        raw_lines = raw_lines[:-1]
+    for raw in raw_lines:
+        line = raw.decode("utf-8", "replace").strip()
+        if line:
+            _perf_push(state, line)
+    state["offset"] = frontier
+    if pending_raw is not None and pending_raw.strip() and sample > 0:
+        line = pending_raw.decode("utf-8", "replace").strip()
+        if line:
+            _perf_push(state, line)
+            state["pending"] = True
+    state["key"] = _usage_log_key()
+    state["tail"] = _log_tail_signature(frontier)
+    state["at"] = time.time()
+    _perf_state[key] = state
+    return state
+
+
+def _perf_trim_states():
+    """状态数超上限时按最近使用淘汰（载荷缓存另有 TTL，不受影响）。"""
+    while len(_perf_state) > _PERF_STATE_MAX:
+        oldest = min(_perf_state, key=lambda k: _perf_state[k]["at"])
+        del _perf_state[oldest]
+
+
+def _perf_stats_incremental(key, sample, realm, since, until):
+    """perf_stats 的增量重建：输出与 _perf_stats_uncached 逐字节一致。
+
+    必须在 _perf_lock 里调用（perf_stats 就是这么调的，与"重建在锁里做"的
+    旧意图一致）：状态与载荷缓存由同一把锁保护。
+    """
+    try:
+        state = _perf_state.get(key)
+        log_key = _usage_log_key()
+        if state is None or not _log_resume_ok(state, log_key):
+            # 没有状态，或日志被截断/换掉/同尺寸重写（P:2525-2540 那套位置
+            # 校验）：从尾部样本重建。
+            state = _perf_rebuild(key, sample, realm, since, until)
+        else:
+            if _perf_fold(state):
+                state["dirty"] = True
+            state["key"] = _usage_log_key()
+            state["tail"] = _log_tail_signature(state["offset"])
+        if state["dirty"] or state["payload"] is None:
+            # 样本没变就不重渲染：0 新字节的 TTL 重算到此为止（几十微秒），
+            # 不再对每个桶重排序求分位。
+            state["payload"] = _perf_payload(state)
+            state["dirty"] = False
+        payload = state["payload"]
+        state["at"] = time.time()
+        _perf_trim_states()
+        return payload
+    except Exception as exc:
+        # 任何意外都退回旧的整段重建：状态作废（不留半折的账），这一次仍然
+        # 给出正确载荷；旧实现遇到同样的输入会抛一样的异常，这里不会更差。
+        _perf_state.pop(key, None)
+        log("perf incremental failed, falling back to full scan: %s" % exc)
+        return _perf_stats_uncached(sample, realm, since=since, until=until)
+
+
 _snap_cache = {}
 _snap_lock = threading.Lock()
 # The dashboard polls every 5s. A TTL shorter than the poll interval makes
@@ -1391,6 +1927,9 @@ LIMIT_EVENTS_FILE = os.path.join(USAGE_DIR, "limit-events.jsonl")
 # 会一直写 ENOENT（2026-10-10 实测 limit-events.jsonl 踩过同一个坑）。
 ESTIMATE_DAILY_FILE = os.path.join(USAGE_DIR, "estimate-daily.json")
 _ESTIMATE_SCHEMA = 1
+# recent 的行偏移索引（页 = 日志尾部的第 N 页）。同样必须跟随 --usage-dir：
+# 常量在 import 时按默认目录算过，漏掉它换目录后索引会写到旧目录去。
+RECENT_INDEX_FILE = os.path.join(USAGE_DIR, "usage-recent-index.json")
 # 估算窗口的权重：今天 6 / 昨天 3 / 前天 1，就近高；只在有样本的天之间归一
 # （某天没样本就跳过）。
 _ESTIMATE_WEIGHTS = (6, 3, 1)
@@ -3154,7 +3693,19 @@ def _tail_lines(path, max_lines, chunk=256 * 1024):
     """Return up to the last `max_lines` non-empty lines, oldest first.
 
     The usage log passes 20MB within a day. Scanning it end to end on every
-    dashboard poll was the dominant cost behind slow /usage/* responses.
+    dashboard poll was the dominant cost behind slow /usage/* responses, so
+    the reader walks the file backwards in `chunk`-sized blocks and splits
+    each block exactly once: `buf` carries only the fragment that straddles
+    the boundary into the next (older) block, never the blocks already read.
+
+    Lines that hold nothing but whitespace are not rows and do not count
+    towards max_lines; a trailing chunk with no newline still counts as a
+    line when it holds anything else (record_usage always writes the
+    newline, so that case is a write caught mid-flight).
+
+    逐行的活只剩"这一行要不要"：整块的非空行在 C 层用列表推导滤出来、一次
+    extend 收进 lines（上限再截断），比逐行 strip()+append 少一层 Python
+    循环。字节口径与逐行写法逐字相同（套件里留了参考实现对拍）。
     """
     lines = []
     try:
@@ -3169,11 +3720,13 @@ def _tail_lines(path, max_lines, chunk=256 * 1024):
                 buf = fh.read(step) + buf
                 parts = buf.split(b"\n")
                 buf = parts[0]
-                for raw in reversed(parts[1:]):
-                    if not raw.strip():
-                        continue
-                    lines.append(raw)
-                    if len(lines) >= max_lines:
+                got = [raw for raw in parts[1:] if raw and not raw.isspace()]
+                if got:
+                    lines.extend(reversed(got))
+                    if len(lines) > max_lines:
+                        # 与逐行写法一样：收满 max_lines 就停，剩下的（更老的）
+                        # 行属于更早的块，本来也不会被收进来。
+                        del lines[max_lines:]
                         break
             if len(lines) < max_lines and buf.strip():
                 lines.append(buf)
@@ -3348,7 +3901,15 @@ def _usage_timeseries_scan(realm, lo, hi, step):
     口径一字未改。
     """
     buckets = {}
+    # 窗口内 credit 前 50 条：大小 50 的最小堆，堆顶是当前的第 50 名。旧实现
+    # 把整窗的计费行全 append 进列表、扫完再 sort 整份切前 50——排序的是上万
+    # 条，留下的只有 50 条。堆把每行压到一次「比不比堆顶大」的比较，进不了
+    # 前 50 的行连载荷字典都不建。
+    # 堆元素是 (at, -序号, 载荷)：序号取负，让相同 at 时日志靠前的行更大，与
+    # 稳定排序（at 倒序、同 at 保持日志顺序）以及 _series_credit_push 的缓冲
+    # 逐条一致（键唯一，堆的替换规则与稳定排序的取舍等价）。
     credits = []
+    credit_seq = 0
     try:
         with open(USAGE_LOG, encoding="utf-8") as fh:
             for line in fh:
@@ -3392,23 +3953,26 @@ def _usage_timeseries_scan(realm, lo, hi, step):
                 if outcome != "client_aborted":
                     bucket["credit"] += credit
                 if credit > 0:
-                    credits.append({
-                        "at": at, "iso": row.get("iso") or "",
-                        "model": row.get("model") or "",
-                        "account": row.get("account") or "",
-                        "credit": credit,
-                        "total_tokens": row.get("total_tokens") or 0,
-                    })
+                    seq = -credit_seq
+                    credit_seq += 1
+                    if len(credits) < _SERIES_CREDITS_KEEP:
+                        heapq.heappush(credits,
+                                       (at, seq, _series_credit_entry(at, row)))
+                    elif (at, seq) > (credits[0][0], credits[0][1]):
+                        heapq.heapreplace(credits,
+                                          (at, seq, _series_credit_entry(at, row)))
     except FileNotFoundError:
         pass
     except Exception as exc:
         log("usage timeseries read failed: %s" % exc)
-    credits.sort(key=lambda item: item.get("at") or 0, reverse=True)
+    # 堆里就是窗口内的前 50 条；按同一把键排出（键唯一，等于旧实现的稳定
+    # 排序结果：at 倒序、同 at 保持日志顺序）。
+    credits.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return {
         "ok": True, "realm": realm or "all", "bucket_seconds": step,
         "since": lo, "until": hi,
         "series": [buckets[key] for key in sorted(buckets)],
-        "credits": credits[:50],
+        "credits": [item[2] for item in credits],
     }
 
 
@@ -3583,24 +4147,636 @@ def _count_usage_rows_uncached(realm=None):
         return counts.get(realm, 0)
 
 
-def recent_usage(limit=100, realm=None, page=1):
-    """Paginated rows from the tail of the log (page 1 is latest).
+# ---------------------------------------------------------------------------
+# recent 的行偏移索引（页 = 日志尾部的第 N 页）
+# ---------------------------------------------------------------------------
+#
+# recent_usage 的每一页都要从日志尾部往回数到第 N×limit 条记录才定位得到：
+# 第 1 页至少要读回一个 256KB 块，realm 过滤命中率低时要读回整个文件，页深
+# 越大代价越大。这里给日志建一份行偏移索引——每 64KB 记一条「行边界字节偏移
+# + 到该处的累计记录数」，页 N 直接 seek 到起点附近再顺序读回页大小量级的
+# 数据，读取量与页深无关。
+#
+# 索引落在数据目录的独立文件里（不并进 checkpoint：checkpoint 是五份聚合
+# 状态的落盘，这份索引的对象只有日志本身，校验与写盘策略都跟着日志走）：
+#
+#   * 位置校验复用聚合那套现成机制（_usage_log_key + _log_offset_holds +
+#     _log_tail_signature，P:2504-2573）：日志被截断、被替换、同尺寸重写都会
+#     让索引作废，从零重扫一遍——宁多扫一次，也不给出一页错的记录；
+#   * 两个口径都在同一次扫描里现算，不复制第二份实现：页数标签走
+#     _count_usage_line（D5：总数含坏 JSON 的非空行），行定位走 recent 自己的
+#     row_matches_realm 归属；
+#   * 「没带 realm 字段的行」的归属要查活账号池（row_realm），跨进程不一定
+#     复现得了：有这类行时，realm 相关的数字只在「活池 == 磁盘归属」且 uid→
+#     realm 与折进来时一致时才用索引（_realm_fold_reproducible），否则退回
+#     老路——老路永远用活池，永远是当前该有的数字。
+_RECENT_INDEX_SCHEMA = 1
+# 索引粒度：每 64KB 记一条行边界。4 万行的日志（约 23MB）只有 350 条上下，
+# 页读取的起点最多偏一段，读取量是「一段 + 页本身」。
+_RECENT_INDEX_SEGMENT = 65536
+# realm 表容量。真实日志只有 intl/cn（外加没带字段的老行归属），超过这个数
+# 说明 realm 字段被人乱写了，索引直接不用（老路照常给出正确结果）。
+_RECENT_INDEX_REALM_CAP = 6
+# realm 值长度上限：手改过的行可以带出很长的值，那只会把索引撑大。
+_RECENT_INDEX_REALM_MAX = 128
 
-    Reading backward in chunks keeps this in the millisecond range while
-    accurately fetching any requested page without missing rows across realms.
+
+def _recent_index_enabled():
+    """索引总开关，默认开；WB_RECENT_INDEX=0 关（现场应急 / 测试切换）。
+
+    与 WB_USAGE_CACHE 同款：每次调用读环境变量，不在导入时定死。
+    """
+    return os.environ.get("WB_RECENT_INDEX", "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _recent_index_min_bytes():
+    """写盘节流：推进不足这么多字节就不写。默认 256KB。
+
+    这个阈值就是「重启后最多回放多少」：索引加载回来后要把没索引的尾部重新
+    折一遍（每行一次 json.loads），真机 1MB ≈ 0.14s、256KB ≈ 35ms。索引本身
+    只有几 KB，写盘很便宜（日志每天涨 6MB 上下 → 一天几十次写、几百 KB），
+    所以阈值取得比 checkpoint 的 1MB 小一档，把重启后的第一页压在几十毫秒。
     """
     try:
-        limit = max(1, int(limit))
-    except Exception:
-        limit = 100
+        return max(0, int(os.environ.get("WB_RECENT_INDEX_MIN_BYTES", 256 * 1024)))
+    except (TypeError, ValueError):
+        return 256 * 1024
+
+
+def _recent_index_min_seconds():
+    """写盘节流：距上次尝试不足这么多秒就不写。默认 900s。"""
     try:
-        page = max(1, int(page))
+        return max(0.0, float(os.environ.get("WB_RECENT_INDEX_MIN_SECONDS", 900)))
+    except (TypeError, ValueError):
+        return 900.0
+
+
+def _recent_index_stamp():
+    """索引文件的 (路径, mtime_ns, size)；文件不在时后两项为 None。
+
+    路径也在戳里（同 estimate-daily）：换目录后不会被旧目录的戳骗过去。
+    """
+    try:
+        st = os.stat(RECENT_INDEX_FILE)
+        return (RECENT_INDEX_FILE, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (RECENT_INDEX_FILE, None, None)
+
+
+def _recent_index_realm_map_json(disk):
+    """磁盘那份 uid→realm 的 JSON 形态（与索引文件里的比）。"""
+    if disk is None:
+        return None
+    return [[uid, realm] for uid, realm in disk]
+
+
+def _recent_index_realm_name(value):
+    """realm 表里的键：只收能出现在查询里的短字符串，其余让索引作废。
+
+    row_realm 对带字段的行原样返回字段值，手改过的行可以带出数字或超长的
+    值：它们既进不了 JSON 键、也不会等于任何字符串查询，但会把表撑大，索性
+    让整份索引不可用（老路照常给出正确结果）。
+    """
+    if isinstance(value, str) and len(value) <= _RECENT_INDEX_REALM_MAX:
+        return value
+    return None
+
+
+def _recent_index_realm_ok(state):
+    """realm 相关的数字能不能信这份索引。
+
+    只有「没带 realm 字段、带 account 的行」会查到活池（row_realm），别的行
+    归属只由行内字段决定，任何进程、任何时刻算出来都一样。有这类行时要求：
+    折进来时的 uid→realm（磁盘那份）与现在一致，且活池与磁盘一致
+    （_realm_fold_reproducible）——两者合起来把归属钉死，索引算出的每个
+    realm 计数与现在这台机器上会算出来的那份逐字相同。
+    """
+    if not state["legacy"]:
+        return True
+    realm_map = state["realm_map"]
+    if realm_map is None:
+        return False
+    disk = _account_realm_map()
+    if _recent_index_realm_map_json(disk) != realm_map:
+        return False
+    return _realm_fold_reproducible(disk)
+
+
+def _recent_index_blank():
+    """一份空索引的核心字段（写盘形态与内存形态共用）。"""
+    return {"key": None, "size": 0, "tail": b"", "realm_map": None,
+            "legacy": False, "realms": [], "counts": {}, "row_counts": {},
+            "lines": 0, "rows": 0, "segs": []}
+
+
+_recent_index_lock = threading.Lock()
+# 索引状态（由 _recent_index_lock 保护）。字段：
+#   stamp          —— 上次读到/写下的索引文件戳（外部改动靠它发现）；
+#   usable         —— 位置校验通过、可以服务查询；
+#   giveup         —— 扫描撞上索引处理不了的行，本进程不再重试（日志换掉才重来）；
+#   key/size/tail  —— 与聚合同款的位置信息：索引覆盖到 size（行边界）；
+#   realm_map      —— 折进来时的磁盘 uid→realm（realm 数字的指纹）；
+#   legacy         —— 日志里有归属要查活池的行；
+#   realms/counts/row_counts —— realm 表与两个口径的计数（count 口径只有总数，
+#                      recent 口径按段存，供定位）；
+#   segs           —— [offset, rows, <row_counts 各列>]，累计值；
+#   wrote_size/at  —— 写盘节流（记「尝试」而非成功，失败也退避）。
+_recent_index_state = {
+    "stamp": None, "usable": False, "giveup": False, "giveup_key": None,
+    "key": None, "size": 0, "tail": b"", "realm_map": None, "legacy": False,
+    "realms": [], "counts": {}, "row_counts": {}, "lines": 0, "rows": 0,
+    "segs": [], "wrote_size": 0, "wrote_at": 0.0,
+}
+
+
+def _recent_index_restart(state, realm_map):
+    """清回零重新折（保留文件戳与写盘节流）：位置或归属口径变了才走这里。"""
+    state.update(_recent_index_blank())
+    state.update({"usable": False, "giveup": False, "giveup_key": None,
+                  "realm_map": realm_map})
+
+
+def _recent_index_add_realm(state, name):
+    """把一个新 realm 值加进表，段数组同步补一列零。
+
+    表就是段数组的列序：某一段里没出现过的值，计数本来就是 0，补零不改变
+    任何累计值。
+    """
+    if name in state["realms"]:
+        return True
+    if len(state["realms"]) >= _RECENT_INDEX_REALM_CAP:
+        return False
+    state["realms"].append(name)
+    for seg in state["segs"]:
+        seg.append(0)
+    state["counts"].setdefault(name, 0)
+    state["row_counts"].setdefault(name, 0)
+    return True
+
+
+def _recent_index_dirty(state):
+    """扫描撞上索引处理不了的行：这份状态不能用了，本进程不再重试。
+
+    与「干净停下」的区别：_count_usage_line 可能已经把半个计数写进状态，
+    续读会得到错的累计值，所以整份丢掉、记住日志位置——日志被换掉（key 变）
+    才再试一次，否则每次调用都重扫一遍比老路还贵。
+    """
+    state.update(_recent_index_blank())
+    state.update({"usable": False, "giveup": True,
+                  "giveup_key": _usage_log_key()})
+    return False
+
+
+def _recent_index_fold_line(state, line):
+    """一行折进两个口径；返回 False 表示这行让索引不能用了（见上）。"""
+    counts = state["counts"]
+    before = len(counts)
+    shim = {"n": state["lines"], "n_realm": counts}
+    try:
+        _count_usage_line(shim, line)
     except Exception:
-        page = 1
-    realm = realm_scope(realm)
-    total = count_usage_rows(realm)
-    total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 1
-    page = min(page, total_pages)
+        return _recent_index_dirty(state)
+    state["lines"] = shim["n"]
+    if len(counts) != before:
+        for name in list(counts):
+            if name in state["realms"]:
+                continue
+            good = _recent_index_realm_name(name)
+            if good is None or not _recent_index_add_realm(state, good):
+                return _recent_index_dirty(state)
+    try:
+        row = json.loads(line)
+    except Exception:
+        return True                     # 坏 JSON：算行数、不算记录（D5 同款）
+    if not isinstance(row, dict):
+        # 老实现会把 null / 数组这类行原样放进 matching（随后计价时炸掉）：
+        # 这种日志不用索引，让老路照旧处理。
+        return _recent_index_dirty(state)
+    if not row.get("realm") and row.get("account"):
+        state["legacy"] = True          # 这一行的归属要查活池
+    try:
+        name = row_realm(row)
+    except Exception:
+        return _recent_index_dirty(state)
+    name = _recent_index_realm_name(name)
+    if name is None or not _recent_index_add_realm(state, name):
+        return _recent_index_dirty(state)
+    state["rows"] += 1
+    state["row_counts"][name] = state["row_counts"].get(name, 0) + 1
+    return True
+
+
+def _recent_index_extend(state):
+    """把索引推进到日志尾部；返回是否可用。
+
+    与 _count_usage_scan 同一套字节纪律：整行推进、半行留给下一趟、解码失败
+    即停。停下的位置就是 size（最后一条完整行的末尾），下一趟从那里接着读，
+    所以半行与坏字节只让索引暂时不可用，不会让每次调用都重扫整份日志。
+    """
+    if state["giveup"]:
+        return False
+    offset = state["size"]
+    try:
+        with open(USAGE_LOG, "rb") as fh:
+            fh.seek(offset)
+            while True:
+                raw = fh.readline()
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    state["size"] = offset      # 半行（写入中/掉电碎片）
+                    return False
+                end = offset + len(raw)
+                try:
+                    line = raw.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    state["size"] = offset      # 解码失败：索引停在这行之前
+                    return False
+                if line and not _recent_index_fold_line(state, line):
+                    if not state["giveup"]:
+                        state["size"] = offset
+                    return False
+                offset = end
+                last = state["segs"][-1][0] if state["segs"] else 0
+                if offset - last >= _RECENT_INDEX_SEGMENT:
+                    state["segs"].append(
+                        [offset, state["rows"]]
+                        + [state["row_counts"].get(r, 0)
+                           for r in state["realms"]])
+    except OSError:
+        state["size"] = offset
+        return False
+    except Exception:
+        state["size"] = offset
+        return False
+    state["size"] = offset
+    state["key"] = _usage_log_key()
+    state["tail"] = _log_tail_signature(offset)
+    if state["tail"] is None:
+        return False                        # 签名读不回来：位置校验立不住
+    state["usable"] = True
+    return True
+
+
+def _recent_index_payload(state):
+    """索引的 JSON 形态：段用增量写（offset 差 + 各列计数差）。
+
+    增量写出来的数字都小（offset 差就是段宽，计数差是段内的记录数），4 万行
+    的日志整份不到 10KB；累计值在加载时一次加回去。不排序键：段数组是位置
+    敏感的，形状固定，无需靠键序表达什么。
+    """
+    segs = []
+    prev_off = 0
+    prev = [0] * (2 + len(state["realms"]))
+    for seg in state["segs"]:
+        row = [seg[0] - prev_off]
+        for i in range(1, len(seg)):
+            row.append(seg[i] - prev[i])
+        segs.append(row)
+        prev_off = seg[0]
+        prev = seg
+    return {
+        "schema": _RECENT_INDEX_SCHEMA,
+        "seg": _RECENT_INDEX_SEGMENT,
+        "key": list(state["key"] or (0, 0, 0)),
+        "tail": state["tail"].hex(),
+        "realm_map": state["realm_map"],
+        "legacy": bool(state["legacy"]),
+        "realms": list(state["realms"]),
+        "totals": {"lines": state["lines"], "rows": state["rows"],
+                   "counts": dict(state["counts"]),
+                   "row_counts": dict(state["row_counts"])},
+        "segs": segs,
+    }
+
+
+def _recent_index_write(state):
+    """原子写索引（同目录 .tmp + os.replace，同 checkpoint / estimate-daily）。"""
+    os.makedirs(USAGE_DIR, exist_ok=True)
+    tmp = RECENT_INDEX_FILE + ".tmp"
+    text = json.dumps(_recent_index_payload(state), ensure_ascii=False,
+                      separators=(",", ":"))
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, RECENT_INDEX_FILE)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _recent_index_parse(data):
+    """磁盘上的索引 → 内存状态；任何一处不合形状都返回 None（当作没有索引）。"""
+    if not isinstance(data, dict) or data.get("schema") != _RECENT_INDEX_SCHEMA:
+        return None
+    if data.get("seg") != _RECENT_INDEX_SEGMENT:
+        return None
+    realms = data.get("realms")
+    if not isinstance(realms, list) or len(realms) > _RECENT_INDEX_REALM_CAP:
+        return None
+    for name in realms:
+        if _recent_index_realm_name(name) is None:
+            return None
+    if len(set(realms)) != len(realms):
+        return None
+    totals = data.get("totals")
+    if not isinstance(totals, dict):
+        return None
+    lines = totals.get("lines")
+    rows = totals.get("rows")
+    counts = totals.get("counts")
+    row_counts = totals.get("row_counts")
+    if (not _usage_cache_int(lines) or lines < 0
+            or not _usage_cache_int(rows) or rows < 0):
+        return None
+    if not _usage_cache_counts_ok(counts) or not _usage_cache_counts_ok(row_counts):
+        return None
+    key = data.get("key")
+    if (not isinstance(key, list) or len(key) != 3
+            or not all(_usage_cache_int(v) and v >= 0 for v in key)):
+        return None
+    tail = data.get("tail")
+    if not isinstance(tail, str):
+        return None
+    try:
+        tail_bytes = bytes.fromhex(tail)
+    except ValueError:
+        return None
+    realm_map = data.get("realm_map")
+    if realm_map is not None:
+        if not isinstance(realm_map, list):
+            return None
+        for item in realm_map:
+            if (not isinstance(item, list) or len(item) != 2
+                    or not isinstance(item[0], str)
+                    or not isinstance(item[1], str)):
+                return None
+    if not isinstance(data.get("legacy"), bool):
+        # 老行归属要不要查池：这个标记决定 realm 数字信不信这份索引，写成
+        # 别的一律当坏文件（宁可重扫）。
+        return None
+    segs_raw = data.get("segs")
+    if not isinstance(segs_raw, list):
+        return None
+    width = 2 + len(realms)
+    segs = []
+    off = 0
+    prev = [0] * width
+    for raw in segs_raw:
+        if (not isinstance(raw, list) or len(raw) != width
+                or not all(_usage_cache_int(v) and v >= 0 for v in raw)):
+            return None
+        off += raw[0]
+        cur = [off]
+        for i in range(1, width):
+            cur.append(prev[i] + raw[i])
+        segs.append(cur)
+        prev = cur
+    state = _recent_index_blank()
+    state.update({
+        "key": tuple(key), "size": key[0], "tail": tail_bytes,
+        "realm_map": realm_map, "legacy": data.get("legacy") is True,
+        "realms": list(realms), "counts": dict(counts),
+        "row_counts": dict(row_counts), "lines": lines, "rows": rows,
+        "segs": segs,
+    })
+    return state
+
+
+def _recent_index_adopt(state, stamp):
+    """文件戳变了：把磁盘那份读进来。
+
+    只接受「比内存这份更新」（同一份日志上更长的索引，或内存这份已经不成立）
+    的文件——内存里那份是同一份日志的续读，回退到更短的磁盘版本等于白扫。
+    读不出来或校验不过就当没有索引：下一趟从零重建（坏文件不报错）。
+    """
+    data = None
+    if stamp[1] is not None:
+        try:
+            with open(RECENT_INDEX_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError, UnicodeDecodeError):
+            data = None
+    loaded = _recent_index_parse(data) if data is not None else None
+    if loaded is not None:
+        log_key = _usage_log_key()
+        if (_log_offset_holds(loaded["key"], log_key, loaded["size"])
+                and _log_tail_signature(loaded["size"]) == loaded["tail"]):
+            if not state["usable"] or loaded["size"] > state["size"]:
+                state.update(loaded)
+                state.update({"usable": True, "giveup": False,
+                              "giveup_key": None, "stamp": stamp,
+                              "wrote_size": loaded["size"],
+                              "wrote_at": time.time()})
+                return
+    state["stamp"] = stamp
+    if not state["usable"]:
+        _recent_index_restart(
+            state, _recent_index_realm_map_json(_account_realm_map()))
+
+
+def _recent_index_maybe_write(state):
+    """按节流阈值把索引落盘（默认 256KB / 900s）。
+
+    第一次建起来立即写——那正是「重启后免重扫」的那一份；之后只在推进满
+    256KB 或距上次尝试满 900s 时写（空闲不重写）。记「尝试」而非成功：只读
+    文件系统上失败会一直成立，不退避的话每次刷新都去试写一遍。归属复现不了
+    的索引不写：写下去别的进程也不敢用。
+    """
+    now = time.time()
+    size = state["size"]
+    if size <= state["wrote_size"]:
+        return
+    if (size - state["wrote_size"] < _recent_index_min_bytes()
+            and (now - state["wrote_at"]) < _recent_index_min_seconds()):
+        return
+    if not _recent_index_realm_ok(state):
+        return
+    state["wrote_at"] = now
+    state["wrote_size"] = size
+    try:
+        _recent_index_write(state)
+    except Exception as exc:
+        log("recent index write failed: %s" % exc)
+        return
+    state["stamp"] = _recent_index_stamp()
+
+
+def _recent_index_snapshot(state):
+    """给调用方的只读拷贝（锁外读页时状态可能被别的线程推进）。"""
+    return {
+        "size": state["size"],
+        "realms": list(state["realms"]),
+        "counts": dict(state["counts"]),
+        "row_counts": dict(state["row_counts"]),
+        "lines": state["lines"],
+        "rows": state["rows"],
+        "segs": [list(seg) for seg in state["segs"]],
+    }
+
+
+def _recent_index_resume_ok(state, log_key):
+    """位置校验：索引覆盖的字节还是这份日志的前缀。
+
+    与聚合折叠同款判据（_log_offset_holds + _log_tail_signature）：size/inode
+    挡住截断与换文件，size 前的 64B 签名挡住同尺寸重写。
+    """
+    return (_log_offset_holds(state["key"], log_key, state["size"])
+            and _log_tail_signature(state["size"]) == state["tail"])
+
+
+def _recent_index_ready(realm_filtered=False):
+    """扩到文件尾的索引快照；None 表示这次查询走老路（count + 反向读）。
+
+    顺序固定：先看文件戳（外部改动）→ 位置校验（截断/替换/同尺寸重写）→
+    归属口径（realm_map 变了整份重折）→ 续读到尾 → realm 查询再验一次归属。
+    """
+    if not _recent_index_enabled():
+        return None
+    with _recent_index_lock:
+        state = _recent_index_state
+        stamp = _recent_index_stamp()
+        if state["stamp"] != stamp:
+            _recent_index_adopt(state, stamp)
+        log_key = _usage_log_key()
+        if state["giveup"]:
+            if state["giveup_key"] == log_key:
+                return None
+            state["giveup"] = False             # 日志被换掉了：再给一次机会
+        if state["size"] > 0:
+            if not _recent_index_resume_ok(state, log_key):
+                # 位置对不上（截断/换文件/同尺寸重写）：整份重折
+                _recent_index_restart(
+                    state, _recent_index_realm_map_json(_account_realm_map()))
+            elif state["legacy"]:
+                realm_map = _recent_index_realm_map_json(_account_realm_map())
+                if state["realm_map"] != realm_map:
+                    # 归属口径变了（uid→realm 改过）：整份重折
+                    # ——与聚合折叠同款政策。
+                    _recent_index_restart(state, realm_map)
+        if not state["usable"] and not state["segs"] and not state["lines"]:
+            # 从零开始：把这次的归属口径记下来（后面续读都按它校验）
+            state["realm_map"] = _recent_index_realm_map_json(
+                _account_realm_map())
+        # 每次都续读到文件尾：日志只会追加，续读的代价就是新字节（没有新
+        # 字节时只是一次 seek 到底的空读）。
+        if not _recent_index_extend(state):
+            return None
+        if realm_filtered and not _recent_index_realm_ok(state):
+            return None
+        _recent_index_maybe_write(state)
+        return _recent_index_snapshot(state)
+
+
+def _recent_index_total(snap, realm):
+    """页数标签：口径与 count_usage_rows 完全一致（总数含坏 JSON 的非空行）。"""
+    if not realm:
+        return snap["lines"]
+    return snap["counts"].get(realm, 0)
+
+
+def _recent_index_page(snap, realm, page, limit):
+    """第 page 页的记录（新的在前）；None 表示索引答不了，调用方走老路。
+
+    老实现的页 = 从尾部往回数第 (page-1)*limit+1 .. page*limit 条记录，切片
+    两端都夹在「真的存在这么多条」上（页数标签含坏行、记录数不含，最后几页
+    因此可能短、甚至为空）。这里把同一件事换算成从头数的序号：第 k 条匹配
+    记录在两套里是同一行，于是页的字节区间就是 [第 K_lo 条起点, 第 K_hi 条
+    终点]，从 K_lo 所在段的起点顺序读过去即可。
+    """
+    if realm:
+        if realm not in snap["realms"]:
+            return []                        # 一条也不匹配：老路也是空页
+        col = 2 + snap["realms"].index(realm)
+        total_rows = snap["row_counts"].get(realm, 0)
+    else:
+        col = 1
+        total_rows = snap["rows"]
+    target = page * limit
+    k_hi = total_rows - (page - 1) * limit
+    if k_hi < 1:
+        return []                            # 页落在记录总数之外：老路是空切片
+    k_lo = max(1, total_rows - target + 1)
+    segs = snap["segs"]
+    # 二分：第一个「到该段起点为止的记录数 >= K_lo」的段；它前一段就是起点
+    lo, hi = 0, len(segs)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if segs[mid][col] < k_lo:
+            lo = mid + 1
+        else:
+            hi = mid
+    start = segs[lo - 1][0] if lo > 0 else 0
+    have = segs[lo - 1][col] if lo > 0 else 0
+    # 段起点之前的记录数是 have，段里第一条就是第 have+1 条：跳过
+    # k_lo-have-1 条，下一条正好是第 k_lo 条（K_lo > have 由二分保证）。
+    rows = _recent_index_read(start, realm, k_lo - have - 1, k_hi - k_lo + 1)
+    if rows is None:
+        return None
+    rows.reverse()
+    return rows
+
+
+def _recent_index_read(start, realm, skip, take):
+    """从 start 顺序读到第 take 条匹配记录；对不上就返回 None（走老路）。
+
+    读取量 = 一段（64KB）+ 页本身的字节，与页深无关——这正是老实现最贵的
+    地方（第 1 页也要读满一个 256KB 块，realm 过滤的页要读回整个文件）。
+    读到的行与老实现逐字一致：同一套 strip/解码（"replace"）与 json.loads，
+    realm 过滤走同一个 row_matches_realm。
+    """
+    rows = []
+    seen = 0
+    try:
+        with open(USAGE_LOG, "rb") as fh:
+            fh.seek(start)
+            buf = b""
+            while len(rows) < take:
+                # 64KB 一读：正好一段的量级，页读完就停手（读取量 = 一段 +
+                # 页本身的字节，与页深无关）。
+                chunk = fh.read(64 * 1024)
+                if not chunk:
+                    break
+                buf += chunk
+                parts = buf.split(b"\n")
+                buf = parts.pop()
+                for raw in parts:
+                    st = raw.strip()
+                    if not st:
+                        continue
+                    try:
+                        item = json.loads(st.decode("utf-8", "replace"))
+                    except Exception:
+                        continue
+                    if not isinstance(item, dict):
+                        return None     # 索引覆盖的字节里不该有这种行
+                    if realm and not row_matches_realm(item, realm):
+                        continue
+                    if seen < skip:
+                        seen += 1
+                        continue
+                    rows.append(item)
+                    if len(rows) >= take:
+                        break
+    except Exception as exc:
+        log("recent index read failed: %s" % exc)
+        return None
+    if len(rows) < take:
+        return None
+    return rows
+
+
+def _recent_backward_page(realm, page, limit):
+    """老路：从尾部按 256KB 块往回读，凑够 page*limit 条再切片。
+
+    页深越大读得越多（realm 过滤命中率低时要读回整个文件），所以索引可用时
+    不走这里；索引答不了（半行、坏字节、池没就绪……）时它是唯一的正确答案，
+    逐字保留原实现的行为。
+    """
     target_count = page * limit
     matching = []
     chunk = 256 * 1024
@@ -3642,7 +4818,42 @@ def recent_usage(limit=100, realm=None, page=1):
         log("recent_usage read failed: %s" % exc)
     start_idx = (page - 1) * limit
     end_idx = start_idx + limit
-    page_rows = matching[start_idx:end_idx]
+    return matching[start_idx:end_idx]
+
+
+def recent_usage(limit=100, realm=None, page=1):
+    """Paginated rows from the tail of the log (page 1 is latest).
+
+    Reading backward in chunks keeps this in the millisecond range while
+    accurately fetching any requested page without missing rows across realms.
+
+    索引可用时页从索引直接定位（见上面那一节）：页数标签与页内容都来自同一次
+    扫描，读取量是页大小量级；索引答不了就整段退回 _recent_backward_page()，
+    两条路的输出逐字相同。
+    """
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 100
+    try:
+        page = max(1, int(page))
+    except Exception:
+        page = 1
+    realm = realm_scope(realm)
+    index = _recent_index_ready(realm_filtered=bool(realm))
+    page_rows = None
+    if index is not None:
+        total = _recent_index_total(index, realm)
+        total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 1
+        page = min(page, total_pages)
+        page_rows = _recent_index_page(index, realm, page, limit)
+        if page_rows is None:
+            index = None
+    if index is None:
+        total = count_usage_rows(realm)
+        total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 1
+        page = min(page, total_pages)
+        page_rows = _recent_backward_page(realm, page, limit)
     # Equivalent-token cost per row at OpenRouter list prices, computed here
     # so every consumer of /usage/recent gets the same number. Each row is
     # priced against the version that was in force when it happened, and says
@@ -5028,6 +6239,19 @@ def _feed_series_bucket(bucket, row):
         bucket["credit"] += (row.get("credit") or 0)
 
 
+def _series_credit_entry(at, row):
+    """一条计费行的载荷：整段扫描与增量缓冲共用的字段表。
+
+    两边的条目会出现在同一个响应的 credits 数组里，键序也是响应字节的
+    一部分，所以只能有一份定义。
+    """
+    return {"at": at, "iso": row.get("iso") or "",
+            "model": row.get("model") or "",
+            "account": row.get("account") or "",
+            "credit": row.get("credit") or 0,
+            "total_tokens": row.get("total_tokens") or 0}
+
+
 def _series_credit_push(credits, row, at):
     """把一条带 credit 的行放进「最近 50 条」缓冲。
 
@@ -5037,11 +6261,7 @@ def _series_credit_push(credits, row, at):
     行不可能是窗口的前 50 条。at 相同时两边都是稳定排序，顺序（日志顺序）
     一致。
     """
-    credits.append({"at": at, "iso": row.get("iso") or "",
-                    "model": row.get("model") or "",
-                    "account": row.get("account") or "",
-                    "credit": row.get("credit") or 0,
-                    "total_tokens": row.get("total_tokens") or 0})
+    credits.append(_series_credit_entry(at, row))
     if len(credits) > _SERIES_CREDITS_KEEP * 2:
         credits.sort(key=lambda item: item.get("at") or 0, reverse=True)
         del credits[_SERIES_CREDITS_KEEP:]
@@ -14958,7 +16178,8 @@ def _parse_cli_args():
     return args
 
 def _apply_cli_overrides(args):
-    global USAGE_DIR, USAGE_LOG, LIMIT_EVENTS_FILE, ESTIMATE_DAILY_FILE
+    global USAGE_DIR, USAGE_LOG, LIMIT_EVENTS_FILE, ESTIMATE_DAILY_FILE, \
+        RECENT_INDEX_FILE
     # LAN mode binds every interface. The key is generated below, once
     # ACCOUNTS_DIR is resolved, so it can be persisted and reused.
     if args.lan and args.host == "127.0.0.1":
@@ -14975,6 +16196,9 @@ def _apply_cli_overrides(args):
         LIMIT_EVENTS_FILE = os.path.join(USAGE_DIR, "limit-events.jsonl")
         # 按天归档的估算数据同理（少了它，跨天归档会一直写默认目录/ENOENT）。
         ESTIMATE_DAILY_FILE = os.path.join(USAGE_DIR, "estimate-daily.json")
+        # recent 的行偏移索引同理（漏掉它，换目录后索引写到旧目录，
+        # 新目录每次冷启动都要重扫一遍日志）。
+        RECENT_INDEX_FILE = os.path.join(USAGE_DIR, "usage-recent-index.json")
     # 账号活动历史与用量日志同目录，并且要在任何后台线程起来之前定下来：调度器
     # 的第一轮巡检不能落在 --usage-dir 生效之前，否则记录会写进默认目录。
     wb_activity.set_data_dir(USAGE_DIR)

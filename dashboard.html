@@ -1231,6 +1231,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '最大输出': 'Max output',
     '最快到期优先': 'Expiring soonest first',
     '总剩余积分：全部账号（含停用）之和；「可用」只算启用且未触发限额护栏的账号': 'Total remaining credits: the sum over every account, disabled included; "available" counts only accounts that are enabled and not parked by a limit guard.',
+    '总计（全部历史）': 'Total (all time)',
     '最近将过期': 'Expiring soonest',
     '最近请求': 'Recent requests',
     '有': '',
@@ -2183,6 +2184,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "账号「最早到期的积分包」（还有剩余、且到期会真正作废的那些）距今不超过该天数时，分派优先使用临期积分的账号——分到的流量更多、越接近到期份额越大，但不会全压在一个账号上（到期日相同或相近的账号彼此等权）；这些账号暂时都不可用（冷却、达日限额等）时，其他账号照常顶上。填 0 表示关闭；天数取自各账号最近一次刷新的积分数据。": "帳號「最早到期的積分包」（還有剩餘、且到期會真正作廢的那些）距今不超過該天數時，分派優先使用臨期積分的帳號——分到的流量更多、越接近到期份額越大，但不會全壓在一個帳號上（到期日相同或相近的帳號彼此等權）；這些帳號暫時都不可用（冷卻、達日限額等）時，其他帳號照常頂上。填 0 表示關閉；天數取自各帳號最近一次重新整理的積分資料。",
     "剩余用量优先调度": "剩餘用量優先排程",
     "总剩余积分：全部账号（含停用）之和；「可用」只算启用且未触发限额护栏的账号": "總剩餘積分：全部帳號（含停用）之和；「可用」只算啟用且未觸發限額護欄的帳號",
+    "总计（全部历史）": "總計（全部歷史）",
     "按「剩余用量估算」优先调度：某 (账号 × 模型) 的估计剩余越接近耗尽，分到的请求越多——先把快用完的额度用掉，等它到点重置。剩余不到 30% 开始加权、5% 以内权重最高；没有预算样本、或剩余为 0 / 冷却中的组合不参与。默认关闭。": "按「剩餘用量估算」優先排程：某 (帳號 × 模型) 的估計剩餘越接近耗盡，分到的請求越多——先把快用完的額度用掉，等它到點重置。剩餘不到 30% 開始加權、5% 以內權重最高；沒有預算樣本、或剩餘為 0 / 冷卻中的組合不參與。預設關閉。",
     "注意：估算由撞线样本反推的预算与本地用量得出，本身有误差；开启后接近耗尽的账号会明显多接流量，也可能更早撞到上游限额（撞线后该模型停用到上游给出的恢复时刻）。": "注意：估算由撞線樣本反推的預算與本地用量得出，本身有誤差；開啟後接近耗盡的帳號會明顯多接流量，也可能更早撞到上游限額（撞線後該模型停用到上游給出的恢復時刻）。",
     "启用优先调度": "啟用優先排程",
@@ -3213,7 +3215,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <div class="card">
         <div class="k">上下文缓存命中率</div>
         <div class="v" id="kpiCacheRate">0.0%</div>
-        <div class="s">提示词前缀命中复用比</div>
+        <div class="s" id="kpiCacheDetail">提示词前缀命中复用比</div>
       </div>
       <div class="card">
         <div class="k" id="kpiReqTitle">今日请求数</div>
@@ -4927,6 +4929,23 @@ async function doDailyChatWeb(btn){
 }
 
 const fmt = n => (n ?? 0).toLocaleString('en-US');
+/* Token 数的紧凑显示：<1 万精确显示（千分位），≥1 万 K，≥100 万 M，≥10 亿 B；
+   小数位随量级收缩（123K / 12.3K / 1.23K），尾零去掉。单位用大写 K/M/B，
+   与表头排序解析器（cellSortValue 的 'K'/'M'/'G' 换算）同一口径，带单位的
+   单元格照样按数值排序。 */
+const fmtCompact = n => {
+  const v = Number(n) || 0;
+  const abs = Math.abs(v);
+  const pick = (div, suffix) => {
+    const x = v / div;
+    const d = Math.abs(x) >= 100 ? 0 : Math.abs(x) >= 10 ? 1 : 2;
+    return x.toFixed(d).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '') + suffix;
+  };
+  if(abs >= 1e9) return pick(1e9, 'B');
+  if(abs >= 1e6) return pick(1e6, 'M');
+  if(abs >= 1e4) return pick(1e3, 'K');
+  return fmt(v);
+};
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ms = v => v == null ? '—' : (v >= 1000 ? (v/1000).toFixed(2) + ' s' : Math.round(v) + ' ms');
 const pct = v => v == null ? '—' : v.toFixed(1) + '%';
@@ -7440,8 +7459,8 @@ async function refreshInner(gen){
         + '<td class="mono" style="font-size:11px;color:var(--dim)" data-label="账号" title="' + esc(r.account||'') + '">' + esc(acctName(r.account)) + '</td>'
         + '<td data-label="模式"><span class="badge ' + (r.stream?'s':'') + '">' + (r.stream?'流式':'非流式') + '</span></td>'
         + '<td data-label="结果">' + outcomeBadge(r) + '</td>'
-        + '<td data-label="耗时">' + (r.elapsed_ms!=null ? fmt(r.elapsed_ms)+' ms' : '—') + '</td>'
-        + '<td data-label="首字">' + (r.ttft_ms!=null ? fmt(r.ttft_ms)+' ms' : '—') + '</td>'
+        + '<td data-label="耗时">' + ms(r.elapsed_ms) + '</td>'
+        + '<td data-label="首字">' + ms(r.ttft_ms) + '</td>'
         + '<td data-label="速度">' + (r.tokens_per_sec ? r.tokens_per_sec.toFixed(1) : '—') + '</td>'
         + '<td data-label="输入">' + fmt(r.prompt_tokens) + '</td>'
         + '<td data-label="输出">' + fmt(r.completion_tokens) + '</td>'
@@ -11185,20 +11204,22 @@ function renderAnalytics(data){
   const elTodayDetail = document.getElementById('kpiTodayTokensDetail');
   const elTodayTitle = document.getElementById('kpiRangeTokenTitle');
   if(elTodayTitle) elTodayTitle.textContent = rangeLabel() + '消耗 Token';
-  if(elTodayTok) elTodayTok.textContent = fmt(currentSum.total_tokens || 0);
+  if(elTodayTok) elTodayTok.textContent = fmtCompact(currentSum.total_tokens || 0);
   if(elTodayDetail) elTodayDetail.innerHTML =
-    '<span style="color:var(--accent)">输入 ' + fmt(currentSum.prompt_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmt(currentSum.completion_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(currentSum.reasoning_tokens || 0) + '</span>';
+    '<span style="color:var(--accent)">输入 ' + fmtCompact(currentSum.prompt_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmtCompact(currentSum.completion_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmtCompact(currentSum.reasoning_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--ok)">缓存 ' + fmtCompact(currentSum.cached_tokens || 0) + '</span>';
 
   // KPI 2: always the all-time figure, as the stable reference next to KPI 1.
   const elTotalTok = document.getElementById('kpiTotalTokens');
   const elTotalDetail = document.getElementById('kpiTotalTokensDetail');
-  if(elTotalTok) elTotalTok.textContent = fmt(sumAll.total_tokens || 0);
+  if(elTotalTok) elTotalTok.textContent = fmtCompact(sumAll.total_tokens || 0);
   if(elTotalDetail) elTotalDetail.innerHTML =
-    '<span style="color:var(--accent)">输入 ' + fmt(sumAll.prompt_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmt(sumAll.completion_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(sumAll.reasoning_tokens || 0) + '</span>' +
+    '<span style="color:var(--accent)">输入 ' + fmtCompact(sumAll.prompt_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmtCompact(sumAll.completion_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmtCompact(sumAll.reasoning_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--ok)">缓存 ' + fmtCompact(sumAll.cached_tokens || 0) + '</span>' +
     // 只有「所选范围已经覆盖了日志里的全部请求」这一种情况需要说明：两张卡数字
     // 相同不是计数器坏了，而是没有更早的数据。
     ((analyticsRange !== 'all' && (sumAll.total_tokens || 0) === (sumWindow.total_tokens || 0) && (sumAll.total_tokens || 0) > 0)
@@ -11209,17 +11230,17 @@ function renderAnalytics(data){
   const elAvgSpeed = document.getElementById('kpiAvgSpeed');
   const elAvgElapsed = document.getElementById('kpiAvgElapsed');
   if(elAvgSpeed) elAvgSpeed.innerHTML = (currentSum.speed_avg ? currentSum.speed_avg.toFixed(1) : '0.0') + ' <span style="font-size:12px;font-weight:400;color:var(--dim)">tok/s</span>';
-  if(elAvgElapsed) elAvgElapsed.textContent = '平均耗时 ' + (currentSum.elapsed_ms_avg ? (currentSum.elapsed_ms_avg / 1000).toFixed(2) + ' s' : '—');
+  if(elAvgElapsed) elAvgElapsed.textContent = '平均耗时 ' + ms(currentSum.elapsed_ms_avg);
 
   // KPI 4: 平均首字延迟，单独一张卡
   const elAvgLatency = document.getElementById('kpiAvgLatency');
-  if(elAvgLatency) elAvgLatency.innerHTML = currentSum.ttft_ms_avg
-    ? fmt(currentSum.ttft_ms_avg) + ' <span style="font-size:12px;font-weight:400;color:var(--dim)">ms</span>'
-    : '—';
+  if(elAvgLatency) elAvgLatency.textContent = ms(currentSum.ttft_ms_avg);
 
   // KPI 5: 缓存命中率
   const elCacheRate = document.getElementById('kpiCacheRate');
   if(elCacheRate) elCacheRate.textContent = (currentSum.cache_hit_pct != null ? currentSum.cache_hit_pct.toFixed(1) : '0.0') + '%';
+  const elCacheDetail = document.getElementById('kpiCacheDetail');
+  if(elCacheDetail) elCacheDetail.textContent = '缓存 ' + fmtCompact(currentSum.cached_tokens || 0) + ' tokens · 提示词前缀命中复用比';
 
   // KPI 6: 请求数（成功数）与 KPI 7: 成功率，拆成两张卡
   const elReqTitle = document.getElementById('kpiReqTitle');
@@ -11247,7 +11268,9 @@ function renderAnalytics(data){
   // 这里不能把「没有数」渲染成 ￥0.000。
   if(elCostValue) elCostValue.innerHTML = PRICING_ON
     ? fmtCostBoth(currentSum.cost_cny != null ? currentSum.cost_cny : 0, 14) : '—';
-  if(elCostDetail) elCostDetail.innerHTML = '按 OpenRouter 模型价折算的等价 token 花费';
+  if(elCostDetail) elCostDetail.innerHTML = (PRICING_ON && analyticsRange !== 'all' && sumAll.cost_cny != null)
+    ? '总计（全部历史）' + fmtCostBoth(sumAll.cost_cny, 11) + '<br>按 OpenRouter 模型价折算'
+    : '按 OpenRouter 模型价折算的等价 token 花费';
 
   // Table 1: 账号透视表
   const acctTbody = document.getElementById('analyticsAccountTbody');
@@ -11273,7 +11296,7 @@ function renderAnalytics(data){
           pills = entries.map(([mid, ms]) => {
             return '<span class="model-pill">'
               + '<b style="color:var(--fg)">' + esc(mid) + '</b>: '
-              + ms.requests + '次 · <b style="color:var(--accent)">' + fmt(ms.tokens) + '</b> tok'
+              + ms.requests + '次 · <b style="color:var(--accent)">' + fmtCompact(ms.tokens) + '</b> tok'
               + '</span>';
           }).join('');
         }
@@ -11299,7 +11322,7 @@ function renderAnalytics(data){
           + '<td>' + realmBadge + '</td>'
           + '<td>' + creditStr + '</td>'
           + '<td>' + fmt(st.requests || 0) + '</td>'
-          + '<td><b style="color:var(--accent)">' + fmt(st.total_tokens || 0) + '</b></td>'
+          + '<td><b style="color:var(--accent)">' + fmtCompact(st.total_tokens || 0) + '</b></td>'
           + '<td><b style="color:var(--accent2)">' + (st.credit != null ? Number(st.credit).toFixed(2) : '0.00') + '</b></td>'
           + '<td style="text-align:left;max-width:440px">' + pills + '</td>'
           + '<td class="pricing-col" style="color:var(--warn)" title="OpenRouter 价估算：按 OpenRouter 公布的模型价折算，覆盖该账号在所选区间内的请求；按条件定价的模型（输入长度阈值或时段）按每条请求取档；单条请求实际用的策略、三档单价与匹配来源见「最近请求」里那条的悬停提示">'
@@ -11356,14 +11379,14 @@ function keyModelPills(k){
   const pills = (k.models || []).map(m =>
     '<span class="model-pill">'
     + '<b style="color:var(--fg)">' + esc(m.model) + '</b>: '
-    + m.requests + '次 · <b style="color:var(--accent)">' + fmt(m.tokens) + '</b> tok'
+    + m.requests + '次 · <b style="color:var(--accent)">' + fmtCompact(m.tokens) + '</b> tok'
     + '</span>');
   const rest = k.models_other;
   if(rest){
     pills.push('<span class="model-pill">'
       + '<b style="color:var(--dim)">' + esc(rest.model || '(其他)') + '</b> '
       + '<span style="color:var(--dim)">' + (rest.models || 0) + ' 个模型 · </span>'
-      + rest.requests + '次 · ' + fmt(rest.tokens) + ' tok</span>');
+      + rest.requests + '次 · ' + fmtCompact(rest.tokens) + ' tok</span>');
   }
   return pills.length ? pills.join('') : '<span style="color:var(--dim)">无调用</span>';
 }
@@ -11417,13 +11440,13 @@ function renderKeyTable(data){
       + (st.errors ? '<span style="color:var(--bad);font-size:11px"> · 失败 ' + fmt(st.errors) + '</span>' : '')
       + '</td>';
     const tokCell = '<td data-label="消耗总 Token"><b style="color:var(--accent)">'
-      + fmt(st.total_tokens || 0) + '</b></td>';
+      + fmtCompact(st.total_tokens || 0) + '</b></td>';
     const splitCell = '<td data-label="输入 · 输出 · 思考" style="font-size:12px">'
-      + '<span style="color:var(--accent)">' + fmt(st.prompt_tokens || 0) + '</span>'
+      + '<span style="color:var(--accent)">' + fmtCompact(st.prompt_tokens || 0) + '</span>'
       + ' <span style="color:var(--dim-light)">/</span> '
-      + '<span style="color:var(--accent2)">' + fmt(st.completion_tokens || 0) + '</span>'
+      + '<span style="color:var(--accent2)">' + fmtCompact(st.completion_tokens || 0) + '</span>'
       + ' <span style="color:var(--dim-light)">/</span> '
-      + '<span style="color:var(--think)">' + fmt(st.reasoning_tokens || 0) + '</span>'
+      + '<span style="color:var(--think)">' + fmtCompact(st.reasoning_tokens || 0) + '</span>'
       + '</td>';
     const cacheCell = '<td data-label="缓存命中">'
       + (st.cache_hit_pct != null ? st.cache_hit_pct.toFixed(1) : '0.0') + '%</td>';

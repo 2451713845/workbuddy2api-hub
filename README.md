@@ -357,6 +357,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- **设置页补上「出口级瞬时失败退避」开关**：`egress_backoff_enabled`（#292 引入，默认关）此前只能改 `accounts/settings.json`，面板上没有入口——功能等于打不开。现在「设置」页有勾选框与「保存」，走 `/settings/save` 的严格布尔校验（字符串 "false" 会被 400 拒掉，不会静默当真值）；英繁词典一并补齐。
 - **账号手动权重与备注**（#289）：账号表新增「权重」列（下拉 1-10，默认 1）——权重 >1 的账号优先于一切自动偏好接单，多个高权重账号之间按权重平滑加权分流量（nginx 同款算法，谁也不独占），它们都不可用时照旧落回自动偏好与轮询；全部为 1（默认）时分派与从前完全一致。另有账号备注（点「+ 备注」编辑，空串清除，上限 200 字），纯展示、不参与调度，随凭证档持久化；账号列表排序改为「有备注置顶 → 权重高在前 → 同权重启用在前」。新增 `tests/_test_manual_weight.py`、`tests/_test_account_note.py`、`tests/_test_account_weight.js`。
 - **修复：`stop` 传字符串的请求一律被上游 400（code 11101）**：OpenAI 把 `stop` 声明成 `string | array`，客户端传单个字符串是合法请求；本上游的 Go 端把该字段定死为 `[]string`，收到字符串直接 `Unmarshal chat params failed with error: json: cannot unmarshal string into Go struct field Request.stop of type []string`。网关此前原样透传，于是按 OpenAI 规范写的客户端在这个字段上根本发不出去（实测一个 Go 客户端连续 622 次全部失败，横跨 11 天）。现在 `build_upstream_body()` 在出网关前调用新的 `normalize_stop()`：单字符串归一化成单元素数组（语义等价——OpenAI 里单字符串就是单元素数组），数组形式过滤掉空串与非字符串元素，空字符串 / 空数组 / `null` / 非法类型一律删字段（它们的实际含义都是「没有停止序列」，而空值在上游同样会被判参数不合法）。
   - `tests/_test_stop_normalization.py`（新套件，17 项）：钉住字符串包装、数组保序与过滤、六种空值 / 非法类型的删字段、无 `stop` 时不发明字段，以及 `build_upstream_body()` 端到端的四种形状；README 套件计数 125 → 126。

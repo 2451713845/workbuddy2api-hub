@@ -131,7 +131,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 120 个套件：87 个 Python + 33 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 121 个套件：88 个 Python + 33 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -364,6 +364,10 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 - **新增「配置器 CLI」：客户端不在网关机器上也能一条命令接入**（#280）：看板的一键配置运行在网关进程里，只在网关本机、用 `127.0.0.1` 打开看板时可用（远程访问与容器 / OpenWrt 部署按设计拒绝），网关跑在服务器 / NAS / 路由器上时，客户端装在别的电脑就用不上。现在 `wb_agents.py` 同时是可执行的配置器——`list` / `status` / `apply` / `restore`，在**客户端所在的机器**本地写配置（与看板共用同一套写入、备份、还原逻辑），只通过 HTTP 从网关取模型表；网关侧新增 `GET /agents/cli` 下发该脚本（免面板鉴权，正文与仓库内 `wb_agents.py` 逐字节一致、不含机密）。`--dry-run` 与真实写入共用同一条 `plan()` 生成路径；Key 走 `--key` → `WB_PROXY_API_KEY` → 交互提示，提示仅在 stdin 与 stdout 都是终端时出现（避免没有控制台的进程里 `getpass` 永久阻塞）。
   - 顺手修「apply → apply → restore 把自产文件当原件还原」：按内容哈希判定归属——仍逐字节等于我们最后写入的 → `restore` 删除；被用户手改过 → 备份并恢复用户版本。此前含 API Key 的 `.credentials.yaml` 会留在磁盘上，与文档承诺相悖。
   - `release/portable_runtime.py` 的 `REQUIRED_FILES` 补 `Lib/getpass.py`（新增 import 后裁剪运行时缺该模块）；README 套件计数 119 → 120。
+
+- **账号工具栏新增「一键切换所有出站身份」**（#254）：一次把**全部账号**（含另一个版本）的出站身份切到下一个——WB → VSC → CLI → 循环。按钮上直接显示当前身分，各账号不一致时显示「混合」，此时点一下统一成 WB。服务端 `/accounts/product` 本来就支持不带 `uid` 的全量切换（面板此前只有单账号的行内按钮，以及 429 时的自动换身分），这次补的是入口与提示；切完当场落盘，重启不丢。
+  - `tests/_test_product_switch.py`（新套件）：钉住全量 / 按区域 / 单账号三条分支、非法身分被拒、落盘后重启仍在、重复切换不报变更；
+  - `tests/_test_accounts_page.js`：钉住按钮位置、轮转顺序与「不带 uid」的提交形状，并在假 DOM 里真跑一遍。
 
 - **补一道「冲突标记」门禁**：仓库里已经三次把解冲突的残留提交进 main（#131 专门清过一次 dashboard 的，README 又在 #243/#245 那批合并里带进 12~15 行），此前没有任何测试盯它——Python 文件会直接 `SyntaxError`，HTML/JS 则是静默坏掉，回滚检查还会把「合并时顺手整理掉这些行」算成弄丢 main 的改动（#245 那次报红就是这个）。`tests/_test_release_engineering.py` 新增 `RepoHygieneTests`：扫全树（跳过运行时数据与打包产物目录），任一行以 `<<<<<<<` / `>>>>>>>` / `|||||||` 开头即失败。
 

@@ -1230,6 +1230,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '最低保留积分': 'Minimum reserved credits',
     '最大输出': 'Max output',
     '最快到期优先': 'Expiring soonest first',
+    '权重': 'Weight',
+    '权重 >1 的账号优先接单，多个高权重账号按权重比分流量；它们都接不了单时其他账号照常顶上。1 = 不干预，临期积分优先等自动规则照旧。': 'Accounts with weight >1 are dispatched first; several weighted accounts split traffic by weight, and when none of them can take requests the others serve as usual. 1 = no override, automatic rules such as expiring-credits-first apply as before.',
+    '备注': 'Note',
+    '+ 备注': '+ note',
+    '点击编辑备注': 'Click to edit the note',
+    '点击添加备注，比如「批量」/「自用」': 'Click to add a note, e.g. "batch" / "personal"',
     '最近将过期': 'Expiring soonest',
     '最近请求': 'Recent requests',
     '有': '',
@@ -2181,6 +2187,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "账号当日消费的积分达到该值后，只允许请求免费模型（目录中标记为 x0.00 的模型），需要花费积分的模型自动切到其他账号；本地时间 0 点后自动恢复。填 0 表示关闭（默认）。": "帳號當日消費的積分達到該值後，只允許請求免費模型（目錄中標記為 x0.00 的模型），需要花費積分的模型自動切到其他帳號；本地時間 0 點後自動恢復。填 0 表示關閉（預設）。",
     "账号「最早到期的积分包」（还有剩余、且到期会真正作废的那些）距今不超过该天数时，分派优先使用临期积分的账号——分到的流量更多、越接近到期份额越大，但不会全压在一个账号上（到期日相同或相近的账号彼此等权）；这些账号暂时都不可用（冷却、达日限额等）时，其他账号照常顶上。填 0 表示关闭；天数取自各账号最近一次刷新的积分数据。": "帳號「最早到期的積分包」（還有剩餘、且到期會真正作廢的那些）距今不超過該天數時，分派優先使用臨期積分的帳號——分到的流量更多、越接近到期份額越大，但不會全壓在一個帳號上（到期日相同或相近的帳號彼此等權）；這些帳號暫時都不可用（冷卻、達日限額等）時，其他帳號照常頂上。填 0 表示關閉；天數取自各帳號最近一次重新整理的積分資料。",
     "剩余用量优先调度": "剩餘用量優先排程",
+    "权重 >1 的账号优先接单，多个高权重账号按权重比分流量；它们都接不了单时其他账号照常顶上。1 = 不干预，临期积分优先等自动规则照旧。": "權重 >1 的帳號優先接單，多個高權重帳號按權重比分流量；它們都接不了單時其他帳號照常頂上。1 = 不干預，臨期積分優先等自動規則照舊。",
+    "点击编辑备注": "點擊編輯備註",
+    "点击添加备注，比如「批量」/「自用」": "點擊新增備註，例如「批量」/「自用」",
     "按「剩余用量估算」优先调度：某 (账号 × 模型) 的估计剩余越接近耗尽，分到的请求越多——先把快用完的额度用掉，等它到点重置。剩余不到 30% 开始加权、5% 以内权重最高；没有预算样本、或剩余为 0 / 冷却中的组合不参与。默认关闭。": "按「剩餘用量估算」優先排程：某 (帳號 × 模型) 的估計剩餘越接近耗盡，分到的請求越多——先把快用完的額度用掉，等它到點重置。剩餘不到 30% 開始加權、5% 以內權重最高；沒有預算樣本、或剩餘為 0 / 冷卻中的組合不參與。預設關閉。",
     "注意：估算由撞线样本反推的预算与本地用量得出，本身有误差；开启后接近耗尽的账号会明显多接流量，也可能更早撞到上游限额（撞线后该模型停用到上游给出的恢复时刻）。": "注意：估算由撞線樣本反推的預算與本地用量得出，本身有誤差；開啟後接近耗盡的帳號會明顯多接流量，也可能更早撞到上游限額（撞線後該模型停用到上游給出的恢復時刻）。",
     "启用优先调度": "啟用優先排程",
@@ -5828,6 +5837,9 @@ function closeActivityHistory(){
   if(mask) mask.style.display = 'none';
 }
 
+// 账号的手动调度权重提示：与 wb_accounts._pick_weighted_first 的行为一一对应。
+const WEIGHT_TIP = '权重 >1 的账号优先接单，多个高权重账号按权重比分流量；它们都接不了单时其他账号照常顶上。已开始的会话保持粘性不换号，权重对新会话生效。1 = 不干预，临期积分优先等自动规则照旧。';
+
 function accountRow(a){
   const realmBadge = a.realm === 'cn'
     ? '<span class="realm-badge-cn">国内版</span>'
@@ -5879,16 +5891,29 @@ function accountRow(a){
        + '<span style="color:var(--dim)">未查询</span>'
        + '<span class="badge mini" style="font-size:10px;padding:1px 5px;cursor:pointer" onclick="openCreditsDetail(&quot;' + uidAttr + '&quot;)" title="点击查询积分明细">查询</span>'
        + '</div>');
+  // 权重下拉：选项给 1-10；历史值超出范围时不让 select 悄悄跳回最近的档位，
+  // 补一个选中项把真实值显示出来。
+  const weight = Math.max(1, Math.min(100, Number(a.weight || 1) || 1));
+  let weightOpts = '';
+  for(let i = 1; i <= 10; i++){
+    weightOpts += '<option value="' + i + '"' + (weight === i ? ' selected' : '') + '>' + i + '</option>';
+  }
+  if(weight > 10) weightOpts += '<option value="' + weight + '" selected>' + weight + '</option>';
   return '<tr>'
     + '<td style="text-align:center;white-space:nowrap" data-label="版本">' + realmBadge + '</td>'
     + '<td style="text-align:left" data-label="账号">'
     +   '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(a.nickname) + '</div>'
     + '<div class="mono" style="color:var(--dim);font-size:11px">' + esc(a.uid.slice(0,8)) + ' · ' + esc(a.source) + ' · 到期 ' + esc(a.expiresIn || '?') + '</div>'
     + (a.machineId ? ('<div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px" title="由账号UID稳定派生的专属设备码，防多号关联风控">设备码: ' + esc(a.machineId.slice(0,14)) + '...</div>') : '')
+    + (a.note
+        ? '<div style="font-size:11px;color:var(--accent2);margin-top:2px;cursor:pointer" title="点击编辑备注" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">备注: ' + esc(a.note) + '</div>'
+        : '<div style="font-size:10px;color:var(--dim);margin-top:2px;cursor:pointer;opacity:.7" title="点击添加备注，比如「批量」/「自用」" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">+ 备注</div>')
     + err + pills + limitPills + '</td>'
     + '<td style="text-align:center" data-label="状态">' + state + '</td>'
     + '<td style="text-align:center" data-label="今日活动">' + activityStatusChip(a) + '</td>'
     + '<td style="text-align:center" data-label="出口">' + slotSelectHtml(a) + '</td>'
+    + '<td style="text-align:center;white-space:nowrap" data-label="权重">'
+    +   '<select style="font-size:11px;padding:2px 4px" title="' + esc(WEIGHT_TIP) + '" onchange="setAccountWeight(&quot;' + uidAttr + '&quot;, this.value, this)">' + weightOpts + '</select></td>'
     + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'
     + '<td style="text-align:right" data-label="请求">' + fmt(usage.requests) + '</td>'
     + '<td style="text-align:right" data-label="总 token">' + fmt(usage.total_tokens) + '</td>'
@@ -6213,10 +6238,18 @@ function renderAccounts(){
   const box = document.getElementById('accounts');
   const currentView = (window.VIEW_REALM || "intl");
   let list = accountsInView();
-  // Enabled accounts first; disabled ones sink to the bottom. Within each
-  // group keep the server order stable so the table does not jump around.
+  // 排序：停用的永远沉底（备注/权重再高也一样）→ 备注是启用组内的加分项
+  // （有备注的账号只在同权重时排前面，不再全局置顶）→ 权重高的在前 →
+  // 同权重保持服务端顺序稳定，表格不乱跳。
   list = list.map((a, i) => [a, i])
-    .sort((x, y) => (x[0].enabled === y[0].enabled) ? (x[1] - y[1]) : (x[0].enabled ? -1 : 1))
+    .sort((x, y) => {
+      if(x[0].enabled !== y[0].enabled) return x[0].enabled ? -1 : 1;
+      const nx = x[0].note ? 0 : 1, ny = y[0].note ? 0 : 1;
+      if(nx !== ny) return nx - ny;
+      const wx = Number(x[0].weight || 1) || 1, wy = Number(y[0].weight || 1) || 1;
+      if(wx !== wy) return wy - wx;
+      return x[1] - y[1];
+    })
     .map(pair => pair[0]);
   const usable = list.filter(a => a.enabled).length;
   const viewName = currentView === 'cn' ? '国内版' : '国际版';
@@ -6241,6 +6274,7 @@ function renderAccounts(){
     + '<th style="text-align:center;width:84px">状态</th>'
     + '<th style="text-align:center;width:118px">今日活动</th>'
     + '<th style="text-align:center;width:150px">出口</th>'
+    + '<th style="text-align:center;width:64px">权重</th>'
     + '<th style="text-align:left;width:120px">积分</th>'
     + '<th style="text-align:right;width:70px">请求</th>'
     + '<th style="text-align:right;width:88px">总 token</th>'
@@ -6306,6 +6340,31 @@ async function toggleAccount(uid, enable, btn){
     toast('操作失败: ' + e.message, 'bad');
   }finally{
     if(btn) btn.disabled = false;
+  }
+}
+async function setAccountWeight(uid, weight, sel){
+  if(sel) sel.disabled = true;
+  try{
+    await postJSON('/accounts/set', {uid: uid, weight: Number(weight)});
+    await loadAccounts();
+    toast(Number(weight) > 1 ? '权重已调整：该账号将优先接单' : '权重已恢复默认', 'ok');
+  }catch(e){
+    toast('权重设置失败: ' + e.message, 'bad');
+    renderAccounts();
+  }finally{
+    if(sel) sel.disabled = false;
+  }
+}
+async function editAccountNote(uid){
+  const cur = (window.ACCOUNTS || []).find(a => a.uid === uid);
+  const next = prompt('账号备注（留空清除；可用来标记「批量」/「自用」）:', (cur && cur.note) || '');
+  if(next === null) return;
+  try{
+    await postJSON('/accounts/set', {uid: uid, note: next});
+    await loadAccounts();
+    toast(next.trim() ? '备注已保存' : '备注已清除', 'ok');
+  }catch(e){
+    toast('备注保存失败: ' + e.message, 'bad');
   }
 }
 async function setAccountProduct(uid, prod, btn){

@@ -60,9 +60,11 @@ import wb_accounts
 import wb_activity
 import wb_atrest
 import wb_catalog
+import wb_egress
 import wb_ipintel
 import wb_pricing
 import wb_settings
+import wb_upstream_pool
 import wb_webtools
 import wb_identity
 import wb_prompt
@@ -8561,6 +8563,11 @@ def gateway_hint(status, message):
 MAX_PRODUCT_SWITCHES = 4
 _SWITCH_LOG = {}
 
+#: 出口级退避在单次请求里最多睡这么久（见 wb_egress）：退避阶梯可以到十几秒，
+#: 但把一个客户端请求按住十几秒是不可接受的，所以只睡这个上限；共享计数器仍然
+#: 让并发请求一起变慢（这才是「一次短暂的全局退避」）。
+EGRESS_SLEEP_MAX = 5.0
+
 
 def auto_switch_product_enabled():
     """Whether a 429 may rotate the outbound identity (panel setting, off by default)."""
@@ -8937,6 +8944,22 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # Panel parity: header/idle timeouts are read once per request, not
     # once per retry, so a settings read never lands in the retry loop.
     header_timeout, idle_timeout = upstream_timeouts()
+    # Same treatment for the egress-level backoff switch (issue #271): one read
+    # per request, and when it is off the retry loop below is byte-for-byte the
+    # old path.
+    egress_backoff = wb_settings.egress_backoff_enabled(ACCOUNTS_DIR)
+    # 同一段出口在一次请求里只记一次：重试轮（tried.clear() 之后整池重轮）会把
+    # 同一个账号 / 同一段出口再挑一遍，若每次都记，一次请求就能把共享计数器推高
+    # 好几步——那正是 issue #271 里「一次请求给同一账号记好几笔」的另一半。已经
+    # 记过的那一段沿用同一段退避，不重复记。
+    egress_wait = {}
+
+    def charge_egress(url, proxy):
+        key = wb_upstream_pool.egress_key(url, proxy)
+        if key not in egress_wait:
+            egress_wait[key] = wb_egress.note_transient(key)
+        return egress_wait[key]
+
     max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
     # 每次失败都把【出错的那个账号】从这段对话的历史里降级（demote），而不是
     # 忘掉整段对话：重选时优先回到还留着这段前缀的暖号（见 SessionAffinity），
@@ -8973,6 +8996,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                                        proxy=account.proxy)
             _apply_stream_idle_timeout(resp, idle_timeout)
             account.note_success(model=model)
+            if egress_backoff:
+                # This outbound path just served a request, so its transient
+                # streak is over (same rule as the account's note_success).
+                wb_egress.note_success(
+                    wb_upstream_pool.egress_key(chat_url, account.proxy))
             reset_switch_counter(account, model)
             # The third element is the reasoning effort this request ran at: the
             # body is rebuilt per attempt, but the effort is a property of the
@@ -9114,6 +9142,20 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 # 不在已知清单里的也不能把错误原样甩回客户端——换号是默认，
                 # 全试完才交出去。
                 transient_hits += 1
+                if egress_backoff and exc.code in (502, 503, 504):
+                    # Gateway-side blips (502/503/504) say the path is unhappy,
+                    # not the credential: charge the egress and back off for
+                    # seconds (issue #271). 500 stays on the account - it can be
+                    # a real fault tied to this credential and needs another look
+                    # before it is moved off the breaker.
+                    wait = charge_egress(chat_url, account.proxy)
+                    log("upstream %s for '%s', backing off the egress %.1fs"
+                        % (exc.code, model, wait))
+                    if session_key and POOL:
+                        POOL.affinity.demote(session_key, account.uid)
+                    last_error = exc
+                    time.sleep(min(wait, EGRESS_SLEEP_MAX))
+                    continue
                 account.note_failure("HTTP %d" % exc.code)
                 log("upstream %s for '%s', retrying (fails=%d)"
                     % (exc.code, model, account.fails))
@@ -9127,6 +9169,18 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 POOL.affinity.demote(session_key, account.uid)
             if is_transient(exc):
                 transient_hits += 1
+                if egress_backoff:
+                    # A transport blip is the path's problem, not the account's:
+                    # charge the egress and back off for seconds (issue #271).
+                    # The account's fails/degrade counters are left alone, so a
+                    # few seconds of flakiness no longer parks healthy accounts.
+                    wait = charge_egress(chat_url, account.proxy)
+                    log("account %s: upstream connection hiccup for '%s' (%s), "
+                        "backing off the egress %.1fs"
+                        % (account.uid[:8], model, type(exc).__name__, wait))
+                    last_error = exc
+                    time.sleep(min(wait, EGRESS_SLEEP_MAX))
+                    continue
                 account.note_unknown_failure("connection: %s" % type(exc).__name__)
                 # 带上 UID：这一行同时是一次扣分（连续 3 次就把账号熔断 30
                 # 分钟），不写清楚是谁挨的这一下，事后只能看着一串 hiccup 猜

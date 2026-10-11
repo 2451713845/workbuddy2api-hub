@@ -80,7 +80,7 @@ REQUIRED_FILES = (
     "Lib/uuid.py", "Lib/secrets.py",
     "Lib/argparse.py", "Lib/base64.py", "Lib/bisect.py", "Lib/datetime.py",
     "Lib/difflib.py", "Lib/fnmatch.py", "Lib/getpass.py", "Lib/ipaddress.py",
-    "Lib/queue.py", "Lib/shutil.py",
+    "Lib/queue.py", "Lib/shutil.py", "Lib/random.py",
     "Lib/subprocess.py", "Lib/threading.py",
     "Lib/html/__init__.py", "Lib/http/__init__.py", "Lib/http/client.py",
     "Lib/concurrent/__init__.py", "Lib/concurrent/futures/__init__.py",

@@ -175,11 +175,14 @@ def restart_fold():
         P._remaining_cache.update({"at": 0.0, "built_at": 0.0, "data": None})
 
 
+def remaining_checkpoint_path():
+    """remaining 这一类状态的 checkpoint 文件（v4 起一类一份）。"""
+    return P._usage_cache_kind_path("remaining")
+
+
 def reload_checkpoint_cache():
-    """让 _usage_cache_data() 重新读一次文件（新进程只读一次，测试要重放）。"""
-    with P._usage_cache_lock:
-        P._usage_cache_loaded = False
-        P._usage_cache_read_result = None
+    """忘掉已读的 checkpoint（新进程只读一次，测试要重放）。"""
+    P._usage_cache_forget()
 
 
 def cache_env(min_bytes=None, min_seconds=None):
@@ -705,7 +708,7 @@ class RemainingUsageTests(unittest.TestCase):
         cache_env(min_bytes=1, min_seconds=0)
         try:
             first = payload(accounts, now=now)
-            self.assertTrue(os.path.exists(P._usage_cache_path()),
+            self.assertTrue(os.path.exists(remaining_checkpoint_path()),
                             "折过一遍之后应该写出 checkpoint")
             self.assertGreater(len(first["rows"]), 0)
 
@@ -739,9 +742,9 @@ class RemainingUsageTests(unittest.TestCase):
         cache_env(min_bytes=1, min_seconds=0)
         try:
             first = payload(accounts, now=now)
-            path = pathlib.Path(P._usage_cache_path())
+            path = pathlib.Path(remaining_checkpoint_path())
             raw = json.loads(path.read_text(encoding="utf-8"))
-            entry = raw["remaining"][0]
+            entry = raw["entries"][0]
             pair = entry["usage"][next(iter(entry["usage"]))]
             pair["at"] = list(reversed(pair["at"]))
             pair["cum"] = list(reversed(pair["cum"]))
@@ -768,9 +771,9 @@ class RemainingUsageTests(unittest.TestCase):
         cache_env(min_bytes=1, min_seconds=0)
         try:
             first = payload(accounts, now=now)
-            path = pathlib.Path(P._usage_cache_path())
+            path = pathlib.Path(remaining_checkpoint_path())
             raw = json.loads(path.read_text(encoding="utf-8"))
-            entry = raw["remaining"][0]
+            entry = raw["entries"][0]
             pair = entry["usage"][next(iter(entry["usage"]))]
             pair["base"] = pair["cum"][-1] + 1
             path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")

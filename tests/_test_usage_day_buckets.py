@@ -520,12 +520,13 @@ for name in ("today", "week", "month"):
     check("窗口 %s：日桶路径 == 逐行口径（整包逐字节）" % name, ref == got,
           first_diff(ref, got))
 # 日桶状态不可用时现折的那份（_scan_*_window_days）也必须与有日桶时一致：
-# 清掉状态后先只调一次窗口，再把结果与有日桶时的窗口比。
+# 清掉状态后先折出一份 all-time（窗口请求本身不折——冷状态直接走扫描，
+# 见 T14 的 _usage_snap_state_cold），再把结果与有日桶时的窗口比。
 lo = window_start("week")
 day_key = time.strftime("%Y-%m-%d", time.localtime(lo))
 cache_env_nowrite()
 restart()
-P._usage_snapshot_uncached(since=lo, until=None)
+P._usage_snapshot_uncached()
 from_state = P._empty_stats()
 for k in sorted(P._usage_snap_state[None]["days"]):
     if k >= day_key:

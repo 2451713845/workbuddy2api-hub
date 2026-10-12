@@ -131,7 +131,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 136 个套件：100 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 137 个套件：101 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -356,6 +356,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **冷状态的窗口请求不再付全量重折（T14）**：价表**内容**变化会让带价格指纹的状态（snapshot×3 + analytics×2 共 5 条）判废，此前首个窗口请求（`/usage` 的 `range=today/week/month`、自定义区间）会先把整份日志从零重折一遍（真机 47k 行实测 15.1s）才答得出窗口——预热器每 2 分钟才吸收一次，撞上就卡。现在窗口路径发现状态冷（从没折过 / checkpoint 采纳失败 / 刚被价表、realm、日志判废）时不再折状态，直接走既有的按日/按小时分组的冷扫描（`_scan_usage_snapshot_window_days` / `_hours`、`_scan_usage_analytics_window_*`，~1s 量级，窗口外的行挡在解析之前）；全量重折留给 all-time 视图（`/usage` 不带 range、analytics 的 all-time 半——它们本来就是载荷的一半）与预热器，重折照常发生，窗口请求也不会把状态冻在冷态。冷扫描与热态桶求和逐字节相同（既有承诺，本批新增套件重新对拍，含与闭窗口走桶的共存用例）。analytics 的窗口半同理（端点仍照折 all-time 半）；series 不在价表失效范围内（折叠不算价、没有 all-time 重建入口），行为不变。新增 `tests/_test_cold_window_scan.py`；README 套件计数 136 → 137。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.1，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 ## 七、致谢与引用声明 (Credits & References)

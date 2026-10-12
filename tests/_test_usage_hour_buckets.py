@@ -885,6 +885,9 @@ check("关掉开关：状态里没有日桶/小时桶（窗口路径压根不碰
       (P._usage_snap_state.get(None) or {}).get("days"))
 cache_env_nowrite()
 restart()
+# 折出一份 all-time（窗口请求本身不折——冷状态直接走扫描，见 T14 的
+# _usage_snap_state_cold）：这条比的是「小时层服务」与「关掉开关的扫描」。
+P._usage_snapshot_uncached()
 got = canon(window_public(WINDOWS[1][1]))
 check("开着开关：整点窗口结果与关掉时逐字节一致（精确价下）", ref == got,
       first_diff(ref, got))
@@ -941,7 +944,9 @@ if hasattr(time, "tzset"):
             since = windows[2][1]
             cache_env_nowrite()
             restart()
-            P._usage_snapshot_uncached(None, since=since, until=None)
+            # 折出一份 all-time（窗口请求本身不折——冷状态直接走扫描，
+            # 见 T14 的 _usage_snap_state_cold），下面的层校验才有桶可看。
+            P._usage_snapshot_uncached()
             key = P._local_day_key(since)
             state = P._usage_snap_state[None]
             check("对齐的整点窗口本来就走层",

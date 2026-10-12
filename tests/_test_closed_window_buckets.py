@@ -414,8 +414,8 @@ def make_checkpoint():
 
 def live():
     """把三份状态都折到文件尾（快照 + analytics + 时间序列）。"""
-    snap_window(DAY_LO, DAY_HI)
-    an_window(DAY_LO, DAY_HI)
+    P._usage_alltime_snapshot(None)
+    P._compute_usage_analytics_uncached(None)
     series_window(DAY_LO, DAY_HI)
 
 
@@ -470,7 +470,7 @@ print()
 print("[1] 边沿账：只记整秒行；闸门按 until 放行/拦下")
 cache_env_nowrite()
 restart()
-window_raw(DAY_LO, DAY_HI)
+P._usage_alltime_snapshot(None)
 state = P._usage_snap_state[None]
 check("账里就是三个整秒行（日志顺序）",
       state["hits"] == [int(x) for x in INT_ROWS], state["hits"])
@@ -488,6 +488,10 @@ print("[2] 对齐闭窗口走桶：日/小时/分钟三档，计数桩证明不�
 REF_DAY = canon(ref_window(DAY_LO, DAY_HI))
 cache_env_nowrite()
 restart()
+# 在 #301 之后，冷状态下的窗口请求改走冷扫描以避免全量重折阻塞；
+# 先发一次 all-time 请求让状态与日/小时桶转热，后续窗口请求才能走桶！
+P._usage_alltime_snapshot(None)
+P._compute_usage_analytics_uncached(None)
 with ScanCounter() as counter:
     got = canon(window_raw(DAY_LO, DAY_HI))
 check("日格点闭窗口：桶路径回答、扫描 0 次、与改动前口径逐字节一致",
@@ -499,6 +503,7 @@ check("日格点闭窗口：桶路径 == 按日分组冷路径（逐字节）",
 REF_HOUR = canon(ref_window(HOUR_LO, HOUR_HI))
 cache_env_nowrite()
 restart()
+P._usage_alltime_snapshot(None)
 with ScanCounter() as counter:
     got = canon(window_raw(HOUR_LO, HOUR_HI))
 check("小时格点闭窗口：桶路径回答、扫描 0 次、与改动前口径逐字节一致",
@@ -551,6 +556,7 @@ print("[3] 边界行 = since / 窗口内整点：必须计入（左闭与桶内�
 # 「去掉那行会怎样」反向钉一次：少掉它，令牌数就不对了。
 cache_env_nowrite()
 restart()
+P._usage_alltime_snapshot(None)
 window_raw(DAY_LO, DAY_HI)
 no_left = P._empty_stats()
 for key in sorted(P._usage_snap_state[None]["days"]):
@@ -587,6 +593,10 @@ write_log(ROWS + [extra_day])
 REF = canon(ref_window(DAY_LO, DAY_HI))
 cache_env_nowrite()
 restart()
+# 在 #301 之后，冷状态下的窗口请求改走冷扫描以避免全量重折阻塞；
+# 先发一次 all-time 请求让状态与日/小时桶转热，后续窗口请求才能走桶！
+P._usage_alltime_snapshot(None)
+P._compute_usage_analytics_uncached(None)
 with ScanCounter() as counter:
     got = canon(window_raw(DAY_LO, DAY_HI))
 check("at == until（午夜整秒行）：闸门拦住桶路径、退回扫描、逐字节一致",
@@ -677,7 +687,7 @@ overflow_rows = [row(HOUR_LO + 30 + i, "m-a", "u1", 10, 1)
 write_log(ROWS + overflow_rows)
 cache_env_nowrite()
 restart()
-window_raw(DAY_LO, DAY_HI)
+P._usage_alltime_snapshot(None)
 state = P._usage_snap_state[None]
 check("账溢出标记亮起（记满后停记）", state["hits_overflow"] is True
       and len(state["hits"]) == P._CLOSED_WINDOW_HITS_MAX,
@@ -921,6 +931,7 @@ check("账里去掉 until 后切片又能用",
 # snapshot 侧同一条：把今天的小时桶 at 挪 1800 秒 → 小时层拒绝服务。
 cache_env_nowrite()
 restart()
+P._usage_alltime_snapshot(None)
 window_raw(HOUR_LO, HOUR_HI)
 snap_state = P._usage_snap_state[None]
 check("对齐的小时闭窗口本来就走层",

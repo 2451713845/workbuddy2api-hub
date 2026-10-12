@@ -542,7 +542,7 @@ for label, since, until in WINDOWS[:5]:
     restart()
     P._usage_snapshot_uncached()      # 折出小时桶
     layered = canon(window_raw(since, until))
-    cold = canon(P._scan_usage_snapshot_window_hours(None, since))
+    cold = canon(P._scan_usage_snapshot_window_hours(None, since, None))
     check("窗口 %s：小时桶之和 == 按小时分组的冷路径" % label, layered == cold,
           first_diff(cold, layered))
 # realm 过滤：三个 realm 视角都要与逐行口径一致（小时桶按 realm 分开折）。
@@ -757,7 +757,7 @@ def _none_today(entry):
 
 state = load_mutated(_none_today)
 check("今天那天的表被摘过（None）：层拒绝服务",
-      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None) is None)
+      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None, None) is None)
 check("表被摘过时窗口退回冷路径，结果仍然正确",
       canon(window_public(WINDOWS[1][1]))
       == canon(GOLDEN_OBJ["win_" + WINDOWS[1][0]]))
@@ -769,7 +769,7 @@ def _drop_today(entry):
 
 state = load_mutated(_drop_today)
 check("今天那天的表整个丢了：层拒绝服务",
-      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None) is None)
+      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None, None) is None)
 
 
 def _drop_yesterday(entry):
@@ -778,7 +778,7 @@ def _drop_yesterday(entry):
 
 state = load_mutated(_drop_yesterday)
 check("窗口起点那天的表丢了：层拒绝服务（不能只跳过那一天）",
-      P._usage_snapshot_window_from_hours(None, WINDOWS[2][1], None) is None)
+      P._usage_snapshot_window_from_hours(None, WINDOWS[2][1], None, None) is None)
 check("起点那天丢表时窗口退回冷路径，结果仍然正确（没少算昨天）",
       canon(window_public(WINDOWS[2][1]))
       == canon(GOLDEN_OBJ["win_" + WINDOWS[2][0]]))
@@ -790,7 +790,7 @@ def _old_floor(entry):
 
 state = load_mutated(_old_floor)
 check("hours_floor_at 比窗口起点还新：层拒绝服务",
-      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None) is None)
+      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None, None) is None)
 
 
 def _new_days_floor(entry):
@@ -799,7 +799,7 @@ def _new_days_floor(entry):
 
 state = load_mutated(_new_days_floor)
 check("days_floor 比窗口起点还新：层拒绝服务",
-      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None) is None)
+      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None, None) is None)
 
 
 def _shifted_at(entry):
@@ -808,7 +808,7 @@ def _shifted_at(entry):
 
 state = load_mutated(_shifted_at)
 check("小时桶 at 与日桶对不上：层拒绝服务（格点校验）",
-      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None) is None)
+      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None, None) is None)
 
 
 def _bad_day_at(entry):
@@ -817,7 +817,7 @@ def _bad_day_at(entry):
 
 state = load_mutated(_bad_day_at)
 check("日桶 at 被挪了半小时：层拒绝服务（格点校验）",
-      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None) is None)
+      P._usage_snapshot_window_from_hours(None, WINDOWS[1][1], None, None) is None)
 
 print()
 print("[7] 保留/剪枝：小时层只留最近几天，够不到的窗口退回冷路径")
@@ -945,17 +945,18 @@ if hasattr(time, "tzset"):
             key = P._local_day_key(since)
             state = P._usage_snap_state[None]
             check("对齐的整点窗口本来就走层",
-                  P._usage_snapshot_window_from_hours(None, since, None)
+                  P._usage_snapshot_window_from_hours(None, since, None, None)
                   is not None)
             # 取窗口起点之后的小时（起点那天的更早小时本来就会被跳过）。
             hours = state["days"][key]["hours"]
             h_key = sorted(hours, key=int)[-1]
             hours[h_key]["at"] += 1800
             check("小时桶 at 不落在 3600 格点上时求和放弃（退回冷路径）",
-                  P._usage_snapshot_window_from_hours(None, since, None) is None)
+                  P._usage_snapshot_window_from_hours(None, since, None, None)
+                  is None)
             hours[h_key]["at"] -= 1800
             check("恢复后求和又能用",
-                  P._usage_snapshot_window_from_hours(None, since, None)
+                  P._usage_snapshot_window_from_hours(None, since, None, None)
                   is not None)
     finally:
         _time.time = lambda: FROZEN

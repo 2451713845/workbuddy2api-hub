@@ -13185,6 +13185,12 @@ def chat_to_messages(obj):
         message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
         finish = choices[0].get("finish_reason") or ""
     content = []
+    # The upstream thinking trace becomes a native thinking block so clients
+    # such as Claude Code can render it; the request side drops incoming
+    # thinking blocks, so nothing unsigned ever reaches the upstream.
+    reasoning = _anthropic_text(message.get("reasoning_content"))
+    if reasoning:
+        content.append({"type": "thinking", "thinking": reasoning})
     text = message.get("content")
     if isinstance(text, list):
         text = "".join(_anthropic_block_text(part) for part in text if isinstance(part, dict))
@@ -13239,6 +13245,8 @@ def stream_messages_events(raw_iter, model, holder=None):
         "id": "",
         "model": model,
         "stop": "end_turn",
+        "thinking_open": False,
+        "thinking_idx": None,
         "text_open": False,
         "text_idx": None,
         "next": 0,
@@ -13270,16 +13278,33 @@ def stream_messages_events(raw_iter, model, holder=None):
             }
         })
 
+    def ensure_thinking():
+        frames = []
+        if not state["thinking_open"]:
+            state["thinking_idx"] = state["next"]
+            state["next"] += 1
+            state["thinking_open"] = True
+            frames.append(anthropic_sse_frame("content_block_start", {
+                "index": state["thinking_idx"],
+                "content_block": {"type": "thinking", "thinking": ""},
+            }))
+        return frames
+
     def ensure_text():
-        if state["text_open"]:
-            return None
-        state["text_idx"] = state["next"]
-        state["next"] += 1
-        state["text_open"] = True
-        return anthropic_sse_frame("content_block_start", {
-            "index": state["text_idx"],
-            "content_block": {"type": "text", "text": ""},
-        })
+        frames = []
+        if not state["text_open"]:
+            if state["thinking_open"]:
+                state["thinking_open"] = False
+                frames.append(anthropic_sse_frame(
+                    "content_block_stop", {"index": state["thinking_idx"]}))
+            state["text_idx"] = state["next"]
+            state["next"] += 1
+            state["text_open"] = True
+            frames.append(anthropic_sse_frame("content_block_start", {
+                "index": state["text_idx"],
+                "content_block": {"type": "text", "text": ""},
+            }))
+        return frames
 
     for line in raw_iter:
         if state["done"] or state["failed"]:
@@ -13316,10 +13341,19 @@ def stream_messages_events(raw_iter, model, holder=None):
             continue
         choice = choices[0] if isinstance(choices[0], dict) else {}
         delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+        # Upstream thinking trace (deepseek-style reasoning_content) becomes
+        # native thinking blocks so the client can display the reasoning.
+        reason = delta.get("reasoning_content")
+        if isinstance(reason, str) and reason:
+            for frame in ensure_thinking():
+                yield frame
+            yield anthropic_sse_frame("content_block_delta", {
+                "index": state["thinking_idx"],
+                "delta": {"type": "thinking_delta", "thinking": reason},
+            })
         text = delta.get("content")
         if isinstance(text, str) and text:
-            frame = ensure_text()
-            if frame:
+            for frame in ensure_text():
                 yield frame
             yield anthropic_sse_frame("content_block_delta", {
                 "index": state["text_idx"],
@@ -13344,6 +13378,9 @@ def stream_messages_events(raw_iter, model, holder=None):
                 entry["name"] = _anthropic_text(fn.get("name"))
             args = fn.get("arguments") if fn.get("arguments") is not None else ""
             if not entry["opened"] and (entry["id"] or entry["name"] or args):
+                if state["thinking_open"]:
+                    state["thinking_open"] = False
+                    yield anthropic_sse_frame("content_block_stop", {"index": state["thinking_idx"]})
                 if state["text_open"]:
                     state["text_open"] = False
                     yield anthropic_sse_frame("content_block_stop", {"index": state["text_idx"]})
@@ -13375,6 +13412,9 @@ def stream_messages_events(raw_iter, model, holder=None):
         start = ensure_start(None)
         if start:
             yield start
+    if state["thinking_open"]:
+        state["thinking_open"] = False
+        yield anthropic_sse_frame("content_block_stop", {"index": state["thinking_idx"]})
     if state["text_open"]:
         state["text_open"] = False
         yield anthropic_sse_frame("content_block_stop", {"index": state["text_idx"]})

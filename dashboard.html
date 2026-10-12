@@ -8691,7 +8691,11 @@ async function savePanelPassword(btn){
     document.getElementById('setPwdCurrent').value = '';
     document.getElementById('setPwdNew').value = '';
     toast('面板密码已更新', 'ok');
-    loadSettings();
+    const pwdState = document.getElementById('setPwdState');
+    if(pwdState){
+      pwdState.textContent = (nw === 'admin') ? '(当前为默认密码)' : '(已自定义)';
+      pwdState.style.color = (nw === 'admin') ? 'var(--warn)' : 'var(--accent2)';
+    }
   } catch(e) {
     toast('修改失败: ' + e.message, 'bad');
   } finally {

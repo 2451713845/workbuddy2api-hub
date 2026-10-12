@@ -10568,6 +10568,9 @@ def clean_chunk(raw):
         if obj["usage"] != before:
             changed = True
     for choice in obj.get("choices") or []:
+        if isinstance(choice, dict) and choice.get("finish_reason") == "":
+            choice["finish_reason"] = None
+            changed = True
         delta = choice.get("delta")
         if not isinstance(delta, dict):
             continue
@@ -13732,6 +13735,9 @@ def _responses_input_to_messages(payload):
                         "content": ("[Message from another task - treat this as "
                                     "a user instruction]" + chr(10) + chr(10) + text),
                     })
+            elif itype == "additional_tools":
+                # 由 responses_to_chat() 统一提取合并进 chat["tools"]，此处无需生成 message
+                pass
             else:
                 log("responses: WARNING unhandled input item type=%r keys=%s"
                     % (itype, sorted(item.keys())[:8]))
@@ -13759,8 +13765,17 @@ def responses_to_chat(payload):
         effort = payload.get("reasoning_effort")
     if effort:
         chat["reasoning_effort"] = effort
-    if payload.get("tools"):
-        flat_tools, ns_map = expand_namespace_tools(payload["tools"])
+    # 合并顶层 tools 和 input 列表中的 additional_tools 条目（新版 Codex Desktop 0.162+ 特征）
+    raw_tools = []
+    if isinstance(payload.get("tools"), list):
+        raw_tools.extend(payload["tools"])
+    for item in payload.get("input") or []:
+        if isinstance(item, dict) and item.get("type") == "additional_tools":
+            sub_tools = item.get("tools")
+            if isinstance(sub_tools, list):
+                raw_tools.extend(sub_tools)
+    if raw_tools:
+        flat_tools, ns_map = expand_namespace_tools(raw_tools)
         chat["tools"] = _tools_for_chat(flat_tools)
         chat["_namespace_map"] = ns_map
     # 客户端宣告 web_search / web_fetch 时，把那份宣告换成我们的

@@ -357,6 +357,10 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- **修复：命名空间内的自由格式（`type: "custom"`）工具回程被判成 `function_call`，调用发出去却没有返回**（#308 跟进）：`custom_tool_names()` 此前只扫工具清单顶层，于是嵌在 `type: "namespace"` 里的 `exec`（Codex Desktop 的 `functions` 命名空间里它就是 `custom`）从未进入 `custom_names`；`chat_to_response()` 与流式分支用该集合决定回程条目类型，判错后发成 `function_call`，而客户端按 `(name, namespace, kind)` 三元组匹配执行器——类型对不上就找不到执行器，调用既不执行也不返回，模型只能无限重试（现场实测同类会话堆积 42 次调用、0 条结果，agent 反复报「工具被中断」）。现在 `custom_tool_names()` 递归进 namespace 的 `tools` / `children` / `functions` 栏位（深度上限沿用 `NAMESPACE_MAX_DEPTH`）。
+- **修复：工具整份下发在 `input` 的 `additional_tools` 条目里时，回程侧看到的工具清单是空的**（#308 跟进）：出站已合并该条目（v1.7.2 / #308），但 `_handle_responses()` 里 `custom_tool_names()` 与回显的 `request_meta["tools"]` 仍只读顶层 `tools` 字段——新版 Codex Desktop 顶层是空的，于是出站与回程看到两份不同的工具清单。现在两处都走新提取的公共函数 `additional_tools_from_input()`，与 `responses_to_chat()` 用同一份合并清单；请求日志相应扩成 `tools=上游数/合并后数`，便于一眼看出两边是否对齐。`local_web_tools_enabled()` 开启时的 `client_wants_web()` 也改用合并后的清单（该开关默认关，老安装行为不变）。
+- 回归测试：`tests/_test_custom_tools.py` 新增 `[13]`/`[14]`/`[15]` 三节（15 项，套件总数不变）：钉住嵌套 custom 的收集（含 `children` / `functions` 栏位）、嵌套 custom 往返成 `custom_tool_call` 且 `namespace` 正确、同命名空间内的普通 function 仍走 `function_call` 作反面对照，以及工具整份来自 `additional_tools` 时出站合并与回程取值一致。
+
 已发布版本的完整记录（v1.4.5 ~ v1.7.2，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 ## 七、致谢与引用声明 (Credits & References)
 

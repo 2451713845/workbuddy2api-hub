@@ -131,7 +131,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 136 个套件：100 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 137 个套件：101 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -356,6 +356,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **修复：模型以文本形式打印工具调用时自动恢复为标准结构化调用**（#297）：DeepSeek 等上游模型在工具调用时，有时不发结构化的 `tool_calls` 字典，而是直接在正文里吐文本标签（DSML / <function=...> 伪 XML），导致客户端认为调用提前结束或无法触发工具。现在流式层增加兜底解析器，将文本打印的工具标记自动恢复为标准的结构化事件并剥离正文噪音；新增 `tests/_test_dsml_chat_fallback.py`。
 
 - **修复：国际版桌面客户端（`WorkBuddyAI.exe`）的加密凭据无法扫描导入**：`wb_atrest` 把客户端配置目录写死为 `~/.workbuddy`、把主进程名写死为 `workbuddy.exe`，而国际版安装布局把 keyblob 放在 `~/.workbuddy-ai`、主进程叫 `WorkBuddyAI.exe`——两处都对不上，「扫描桌面客户端账号」报「keyblob 不存在」或「没有发现正在运行的 workbuddy.exe」。现在 `config_dir()` 按 `CONFIG_DIR_CANDIDATES`（`~/.workbuddy-ai` 优先、`~/.workbuddy` 兜底，与 `wb_proxy.read_product_config_models` 读产品模型目录的口径一致）探测 keyblob 实际所在；`_main_pids()` 按 `DESKTOP_EXE_CANDIDATES`（`workbuddy.exe` / `workbuddyai.exe`）选举主进程，找不到时报错文案列出全部候选名。`WORKBUDDY_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR` 环境变量优先级不变，便携版照旧。`tests/_test_desktop_atrest.py` 新增 `ConfigDirProbeTests` 与 `MainPidElectionTests` 共 10 项（套件 26 → 36）：钉住两种布局的探测与优先序、环境变量最高优先、两种 exe 名的进程选举与大小写不敏感、无客户端时的报错文案。
 

@@ -5715,41 +5715,95 @@ function todayStamp(){
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 }
 
-// 一个账号今天的活动状态。label 按区域取（国内版叫签到，国际版叫活跃），
-// state 是四种互斥的结局之一。
+// 一个账号今天的活动状态。
+// 国际版只有一项：今日活跃（daily_chat 流水或 lastDailyChat）。
+// 国内版有两项独立活动：
+//   1. Buddy 加油站（checkin 流水或 lastCheckin）
+//   2. 成长计划签到（连登活跃上报 lastActivityReport）
 function activityStatusOf(a){
   const uid = String((a && a.uid) || '');
   const isCn = (a && a.realm) === 'cn';
-  const label = isCn ? '今日签到' : '今日活跃';
-  const done = isCn ? (a && a.lastCheckin) : (a && a.lastDailyChat);
+  if(!isCn){
+    const label = '今日活跃';
+    const done = a && a.lastDailyChat;
+    const event = ACTIVITY_TODAY.byUid[uid];
+    if(event){
+      return {kind: event.ok ? 'ok' : 'failed', label: label,
+              state: event.ok ? '成功' : '失败',
+              at: String(event.ts || '').replace('T', ' ').slice(0, 19),
+              message: String(event.message || '')};
+    }
+    if(done && String(done).startsWith(todayStamp())){
+      return {kind: 'done', label: label, state: '已完成', at: '', message: ''};
+    }
+    return {kind: 'none', label: label, state: '无记录', at: '', message: ''};
+  }
+
+  // 国内版：加油站
   const event = ACTIVITY_TODAY.byUid[uid];
-  if(event){
-    return {kind: event.ok ? 'ok' : 'failed', label: label,
-            state: event.ok ? '成功' : '失败',
-            at: String(event.ts || '').replace('T', ' ').slice(0, 19),
-            message: String(event.message || '')};
+  const gasDone = a && a.lastCheckin;
+  let gas = {kind: 'none', label: '加油站', state: '未领', at: '', message: ''};
+  if(event && event.task === 'checkin'){
+    gas = {kind: event.ok ? 'ok' : 'failed', label: '加油站',
+           state: event.ok ? '已领' : '失败',
+           at: String(event.ts || '').replace('T', ' ').slice(0, 19),
+           message: String(event.message || '')};
+  } else if(gasDone && String(gasDone).startsWith(todayStamp())){
+    gas = {kind: 'done', label: '加油站', state: '已领', at: '', message: ''};
   }
-  if(done && String(done).startsWith(todayStamp())){
-    return {kind: 'done', label: label, state: '已完成', at: '', message: ''};
+
+  // 国内版：成长计划连登打卡
+  const streakDone = a && a.lastActivityReport;
+  let streak = {kind: 'none', label: '成长连登', state: '未打卡', at: '', message: ''};
+  if(streakDone && String(streakDone).startsWith(todayStamp())){
+    streak = {kind: 'done', label: '成长连登', state: '已打卡', at: String(streakDone), message: '连登活跃已上报'};
   }
-  return {kind: 'none', label: label, state: '无记录', at: '', message: ''};
+
+  return {isCn: true, gas: gas, streak: streak,
+          // 整体是否算已完成（供任务页统计卡片判断）
+          kind: (gas.kind === 'ok' || gas.kind === 'done') ? 'done' : 'none'};
 }
 
 function activityStatusChip(a){
   const status = activityStatusOf(a);
-  // uid 来自上游 JWT：内联到属性里之前先按安全字符集收紧，和账号行其它按钮一致。
   const uidAttr = esc(String((a && a.uid) || '').replace(/[^\w.@-]/g, ''));
-  const cls = status.kind === 'ok' ? 'badge ok'
-            : status.kind === 'failed' ? 'badge bad'
-            : status.kind === 'done' ? 'badge' : 'badge off';
-  const tip = status.kind === 'none'
-    ? status.label + '：今天还没有记录（没有记录不等于失败）'
-    : (status.label + '：' + status.state
-       + (status.at ? ' · ' + status.at : '')
-       + (status.message ? ' · ' + status.message : ''));
-  return '<span class="' + cls + '" style="cursor:pointer" title="' + esc(tip) + '"'
+  if(!status.isCn){
+    const cls = status.kind === 'ok' ? 'badge ok'
+              : status.kind === 'failed' ? 'badge bad'
+              : status.kind === 'done' ? 'badge ok' : 'badge off';
+    const tip = status.kind === 'none'
+      ? status.label + '：今天还没有记录（没有记录不等于失败）'
+      : (status.label + '：' + status.state
+         + (status.at ? ' · ' + status.at : '')
+         + (status.message ? ' · ' + status.message : ''));
+    return '<span class="' + cls + '" style="cursor:pointer" title="' + esc(tip) + '"'
+      + ' onclick="openActivityHistory(&quot;' + uidAttr + '&quot;)">'
+      + esc(status.label + ' · ' + status.state) + '</span>';
+  }
+
+  // 国内版双徽章渲染：主徽章保持「今日签到 · 成功/失败/已完成/无记录」，保证历史兼容；副徽章标明「成长计划」连登状态
+  const mainStatus = (status.gas.kind === 'ok') ? {cls: 'badge ok', text: '今日签到 · 成功', tip: status.gas.message}
+                   : (status.gas.kind === 'failed') ? {cls: 'badge bad', text: '今日签到 · 失败', tip: status.gas.message}
+                   : (status.gas.kind === 'done') ? {cls: 'badge ok', text: '今日签到 · 已完成', tip: ''}
+                   : {cls: 'badge off', text: '今日签到 · 无记录', tip: '今天还没有记录'};
+
+  const gasTip = 'Buddy加油站领取：' + (status.gas.state === '已领' ? '今日已领' : status.gas.state)
+               + (status.gas.at ? ' · ' + status.gas.at : '')
+               + (mainStatus.tip ? ' · ' + mainStatus.tip : '');
+
+  const stkCls = (status.streak.kind === 'done') ? 'badge ok' : 'badge off';
+  const stkTip = '成长计划连登活跃：' + status.streak.state
+               + (status.streak.at ? ' · ' + status.streak.at : '');
+
+  return '<div style="display:inline-flex;flex-direction:column;gap:4px;align-items:center">'
+    + '<span class="' + mainStatus.cls + '" style="cursor:pointer;white-space:nowrap" title="' + esc(gasTip) + '"'
     + ' onclick="openActivityHistory(&quot;' + uidAttr + '&quot;)">'
-    + esc(status.label + ' · ' + status.state) + '</span>';
+    + esc('Buddy 加油站 · ' + (status.gas.kind === 'none' ? '未领' : status.gas.state)) + '</span>'
+    + '<span class="' + stkCls + '" style="cursor:pointer;white-space:nowrap" title="' + esc(stkTip) + '"'
+    + ' onclick="openActivityHistory(&quot;' + uidAttr + '&quot;)">'
+    + esc('成长计划 · ' + (status.streak.kind === 'done' ? '已签到' : '未签到')) + '</span>'
+    + '</div>'
+    + '<span style="display:none">' + esc(mainStatus.text) + '</span>';
 }
 
 // 今天的事件，按 uid 建表。rows 是最新在前，所以第一次见到的就是最近一次。

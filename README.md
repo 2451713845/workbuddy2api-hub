@@ -357,6 +357,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- **修复：国际版桌面客户端（`WorkBuddyAI.exe`）的加密凭据无法扫描导入**：`wb_atrest` 把客户端配置目录写死为 `~/.workbuddy`、把主进程名写死为 `workbuddy.exe`，而国际版安装布局把 keyblob 放在 `~/.workbuddy-ai`、主进程叫 `WorkBuddyAI.exe`——两处都对不上，「扫描桌面客户端账号」报「keyblob 不存在」或「没有发现正在运行的 workbuddy.exe」。现在 `config_dir()` 按 `CONFIG_DIR_CANDIDATES`（`~/.workbuddy-ai` 优先、`~/.workbuddy` 兜底，与 `wb_proxy.read_product_config_models` 读产品模型目录的口径一致）探测 keyblob 实际所在；`_main_pids()` 按 `DESKTOP_EXE_CANDIDATES`（`workbuddy.exe` / `workbuddyai.exe`）选举主进程，找不到时报错文案列出全部候选名。`WORKBUDDY_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR` 环境变量优先级不变，便携版照旧。`tests/_test_desktop_atrest.py` 新增 `ConfigDirProbeTests` 与 `MainPidElectionTests` 共 10 项（套件 26 → 36）：钉住两种布局的探测与优先序、环境变量最高优先、两种 exe 名的进程选举与大小写不敏感、无客户端时的报错文案。
+
 已发布版本的完整记录（v1.4.5 ~ v1.7.1，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 ## 七、致谢与引用声明 (Credits & References)
 

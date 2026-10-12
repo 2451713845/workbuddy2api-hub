@@ -131,7 +131,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 136 个套件：100 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 137 个套件：101 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -356,6 +356,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **闭窗口（自定义区间两端都填）对齐走桶：`/usage`、`/usage/analytics`、`/usage/timeseries` 的闭窗口不再整段扫日志**：此前只有 `until` 开放的窗口能借用存量桶/环，`until` 一给出（面板自定义区间两个输入框都填）就退回整段扫描——真机（47k 行）闭 30 天 **13 337ms**、闭整点 7:00-8:00 **1 072ms**、timeseries 闭窗口 **1 101ms**。现在闭窗口 `[since, until]`（**两端都含**，口径未动）在两端都落在同一套格点上时按「`at < until` 的那批桶」求和：日格点走日桶、小时格点走小时层、`step=60` 的窗口走分钟环，三条路都不再读日志。桶按 `at` 严格切分，切不出「恰好落在 `until` 上」的行，所以折叠时给整秒行记一笔**边沿账**（真实日志的 `at` 是浮点秒，几乎为零；手改过的日志超过 256 条就停记并留痕），查询时那一刻没有整秒行才走桶，否则退回整段扫描（正确性优先，结果与改动前逐字节一致）。边沿账随三份状态落盘（checkpoint 加 `hits`/`hits_overflow` 两个键，schema 不变）；旧条目没有这两个键会被校验器拒 → 升级后第一次刷新一次性重折（与 v3→v4 缺小时表时的处置一致）。逐字节对拍：同窗口「桶求和」vs「整段扫」在边界行（`at` 恰好 = `since` / = `until` / = 整点 / = 午夜）上全部相同；新增测试套件 `tests/_test_closed_window_buckets.py`。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.1，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 ## 七、致谢与引用声明 (Credits & References)

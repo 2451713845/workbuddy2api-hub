@@ -530,7 +530,7 @@ from_state = P._empty_stats()
 for k in sorted(P._usage_snap_state[None]["days"]):
     if k >= day_key:
         P._add_usage_snapshot(from_state, P._usage_snap_state[None]["days"][k])
-COLD_SNAP = P._scan_usage_snapshot_window_days(None, lo)
+COLD_SNAP = P._scan_usage_snapshot_window_days(None, lo, None)
 check("冷路径（现折日桶）的 snapshot == 有日桶时相加的结果",
       canon(COLD_SNAP) == canon(from_state),
       first_diff(canon(from_state), canon(COLD_SNAP)))
@@ -542,9 +542,9 @@ for k in sorted(P._analytics_state[None]["days"]):
     if k >= day_key:
         P._add_analytics_window_maps(from_state, P._analytics_state[None]["days"][k])
 check("冷路径（现折日桶）的 analytics 窗口半 == 有日桶时相加的结果",
-      canon(P._scan_usage_analytics_window_days(None, lo)) == canon(from_state),
+      canon(P._scan_usage_analytics_window_days(None, lo, None)) == canon(from_state),
       first_diff(canon(from_state),
-                 canon(P._scan_usage_analytics_window_days(None, lo))))
+                 canon(P._scan_usage_analytics_window_days(None, lo, None))))
 
 print()
 print("[3] 封口：越过的那天不再重折（对象原样复用），只有今天在长")

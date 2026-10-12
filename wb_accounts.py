@@ -1410,7 +1410,8 @@ class Account(object):
         settings.json 里的 daily_chat_web 决定，True/False 可显式指定。
 
         trigger 只用于活动历史的来源标注；整次尝试记一行，网页通道那一步的结果
-        并进同一行的说明里，不再多记一行。
+        并进同一行的说明里，不再多记一行。ok 以真正计入积分的网页腿为准：网页腿
+        开着且失败时整次算失败（桌面腿跑过也不算数）。
         """
         if self.realm != "intl":
             return {"ok": False, "error": "daily chat is only for international accounts"}
@@ -1453,12 +1454,15 @@ class Account(object):
                                      % (res.get("status") or "completed",
                                         res.get("chunks") or 0, res.get("elapsed_ms") or 0))
                 else:
-                    result["msg"] = ("每日活跃对话成功完成（网页通道失败：%s）"
-                                     % res.get("error"))
+                    # 桌面腿成功不等于当天打卡完成：计入官方「每日活跃」的只有网页腿
+                    # （#75/#59/#90）。面板与活动历史按 ok 画成功/失败，网页腿失败却
+                    # 报成功的话，「今天这 30/50 积分没到账」在界面上一直看不见。
+                    result["ok"] = False
+                    result["error"] = "网页通道失败：%s" % res.get("error")
+                    result["msg"] = "每日活跃对话未完成（网页通道失败：%s）" % res.get("error")
             # 只有真正计入官方「每日活跃」的网页通道成功了才算今天做过：网页腿失败时
             # 若照写 lastDailyChat，当天后续巡检会直接跳过该账号，那天的 30/50 积分静默
-            # 丢掉且不再重试（面板还显示成功）。web=False（没开网页通道）时维持原
-            # 语义：桌面腿成功即算完成。
+            # 丢掉且不再重试。web=False（没开网页通道）时维持原语义：桌面腿成功即算完成。
             if web_ok:
                 self.last_daily_chat = time.strftime("%Y-%m-%d %H:%M:%S")
                 if self.path and os.path.exists(os.path.dirname(self.path)):

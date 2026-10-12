@@ -131,7 +131,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 139 个套件：103 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 140 个套件：104 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -364,6 +364,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 - **闭窗口（自定义区间两端都填）对齐走桶：`/usage`、`/usage/analytics`、`/usage/timeseries` 的闭窗口不再整段扫日志**：此前只有 `until` 开放的窗口能借用存量桶/环，`until` 一给出（面板自定义区间两个输入框都填）就退回整段扫描——真机（47k 行）闭 30 天 **13 337ms**、闭整点 7:00-8:00 **1 072ms**、timeseries 闭窗口 **1 101ms**。现在闭窗口 `[since, until]`（**两端都含**，口径未动）在两端都落在同一套格点上时按「`at < until` 的那批桶」求和：日格点走日桶、小时格点走小时层、`step=60` 的窗口走分钟环，三条路都不再读日志。桶按 `at` 严格切分，切不出「恰好落在 `until` 上」的行，所以折叠时给整秒行记一笔**边沿账**（真实日志的 `at` 是浮点秒，几乎为零；手改过的日志超过 256 条就停记并留痕），查询时那一刻没有整秒行才走桶，否则退回整段扫描（正确性优先，结果与改动前逐字节一致）。边沿账随三份状态落盘（checkpoint 加 `hits`/`hits_overflow` 两个键，schema 不变）；旧条目没有这两个键会被校验器拒 → 升级后第一次刷新一次性重折（与 v3→v4 缺小时表时的处置一致）。逐字节对拍：同窗口「桶求和」vs「整段扫」在边界行（`at` 恰好 = `since` / = `until` / = 整点 / = 午夜）上全部相同；新增测试套件 `tests/_test_closed_window_buckets.py`。
 
 - **未对齐窗口的整段扫描：窗外的行不再 decode（bytes 级预过滤）**：起点不落在本地午夜/整点/分钟格点上的自定义区间走 `_scan_usage_snapshot_window` 一族——整段读日志、逐行 `decode + strip`，再由 `_line_outside_window` 判窗口。窗外的行只是不折，decode 照付；而窄窗口在几万行的日志上把绝大部分行都判在窗外，decode 是这条路径上唯一能整段省掉的开销。现在同一道判定先跑一遍**未解码的行**（新增 `_line_outside_window_bytes`，`_scan_usage_from` 新增 `skip_raw` 参数，六个窗口读取器都传）：能按字节读准、且整行 ASCII（decode 必然成功）的窗外行连 decode 都不再付；读不准的行——非首键 at、重复 at、整数 token、转义引号、坏字节、非 ASCII——一律返回 False，照旧解码后交给文本判定，保守语义一条不改（字节版说"窗外"的行，文本版也必须说"窗外"，反之只许出现在"字节版认不出"那一侧）。本机（11.7MB / 21445 行，与其他任务共享的机器，多轮取最小）：26 分钟未对齐窗口 `_scan_usage_snapshot_window` 91ms → 84ms、端到端 `usage_snapshot(custom)` 86ms → 82ms，10 小时窗口 90ms → 87ms；同窗口 decode 次数 **21445 → 352**（`json.loads` 次数与旧路径完全相同），输出逐字节不变（31 场景冻结时钟跨树对拍 0 差异）。新增测试套件 `tests/_test_usage_bytes_prefilter.py`（25 项：27 条 TRICKY 形状逐条对拍、十三个读取器开/关逐字节对拍、decode 计数桩、坏字节/半行/跨块行/窗口边界）。
+
+- **冷状态的窗口请求不再付全量重折（T14）**：价表**内容**变化会让带价格指纹的状态（snapshot×3 + analytics×2 共 5 条）判废，此前首个窗口请求（`/usage` 的 `range=today/week/month`、自定义区间）会先把整份日志从零重折一遍（真机 47k 行实测 15.1s）才答得出窗口——预热器每 2 分钟才吸收一次，撞上就卡。现在窗口路径发现状态冷（从没折过 / checkpoint 采纳失败 / 刚被价表、realm、日志判废）时不再折状态，直接走既有的按日/按小时分组的冷扫描（`_scan_usage_snapshot_window_days` / `_hours`、`_scan_usage_analytics_window_*`，~1s 量级，窗口外的行挡在解析之前）；全量重折留给 all-time 视图（`/usage` 不带 range、analytics 的 all-time 半——它们本来就是载荷的一半）与预热器，重折照常发生，窗口请求也不会把状态冻在冷态。冷扫描与热态桶求和逐字节相同（既有承诺，本批新增套件重新对拍，含与闭窗口走桶的共存用例）。analytics 的窗口半同理（端点仍照折 all-time 半）；series 不在价表失效范围内（折叠不算价、没有 all-time 重建入口），行为不变。新增 `tests/_test_cold_window_scan.py`；README 套件计数 136 → 137。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.1，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 ## 七、致谢与引用声明 (Credits & References)

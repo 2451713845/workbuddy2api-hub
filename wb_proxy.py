@@ -3714,12 +3714,21 @@ _usage_snap_state = {}
 _usage_snap_state_lock = threading.Lock()
 
 
-def _usage_snap_state_ready(r, pricing_on):
-    """把 `r` 的 all-time 折叠推进到文件尾；返回 (state, offset, error)。
+def _usage_snap_state_advance(r, pricing_on):
+    """（不折叠）取/建状态、采纳 checkpoint、判废归零、记身份指纹。
 
-    调用方必须已持有 _usage_snap_state_lock。日桶与 all-time 折叠共用这一次
-    扫描（见 _fold_usage_snapshot 的 also），所以窗口半与 all-time 半描述的
-    永远是同一段字节——这正是旧实现用 stop_at 想保证的事。
+    调用方必须已持有 _usage_snap_state_lock。返回本次扫描取到的价表代次
+    （_pricing_inputs 的元组）：调用方把它传给折叠当行级记忆的代次，与记进
+    状态指纹的是同一份，两处不会看到两份价表。
+
+    状态是否「冷」（这次要付一次全量重折）看折过的位置：state["offset"] > 0
+    表示有可续折的数据；0 表示折叠要从文件头开始——状态刚建、刚被价表 /
+    realm / 日志判废、或 checkpoint 采纳失败。判定只看已折位置与三份指纹，
+    一行都不折，所以窗口路径拿它分流是纯加速：重折之后两边给出的字节完全
+    一致（见 _usage_snap_state_cold）。
+
+    采纳/判废只有这一段定义：_usage_snap_state_ready（all-time 折叠）与
+    窗口路径的冷热判定共用它，两边的规则因此不会漂移。
     """
     state = _usage_snap_state.get(r)
     if state is None:
@@ -3744,6 +3753,38 @@ def _usage_snap_state_ready(r, pricing_on):
                       "days": {}, "days_floor": None, "hours_floor_at": None,
                       "hits": [], "hits_overflow": False})
     state.update({"pricing": pricing, "realm": realm, "key": log_key})
+    return pricing
+
+
+def _usage_snap_state_cold(r, pricing_on):
+    """窗口请求现在会不会付一次全量重折？True = 会（窗口改走冷扫描）。
+
+    调用方必须已持有 _usage_snap_state_lock。判定就是 all-time 折叠的前半段
+    （_usage_snap_state_advance），不折任何行；为真时窗口半改走按日/按小时
+    分组的冷扫描（_scan_usage_snapshot_window_days / _hours，~1s 量级），
+    重折留给 all-time 视图（_usage_alltime_snapshot）与预热器。
+
+    这条路不写折叠结果，也不改「重折该不该发生」：状态里 offset 仍是 0，
+    下一个 all-time 请求照样从文件头折到文件尾——窗口请求不会把状态冻在
+    冷态。重折发生之后，走不走这条路给出的字节完全相同（冷扫描与日桶/小时
+    桶之和本就是同一批行、同一个求和口径，见两个冷路径函数的 docstring）。
+    """
+    _usage_snap_state_advance(r, pricing_on)
+    return _usage_snap_state[r]["offset"] <= 0
+
+
+def _usage_snap_state_ready(r, pricing_on):
+    """把 `r` 的 all-time 折叠推进到文件尾；返回 (state, offset, error)。
+
+    调用方必须已持有 _usage_snap_state_lock。日桶与 all-time 折叠共用这一次
+    扫描（见 _fold_usage_snapshot 的 also），所以窗口半与 all-time 半描述的
+    永远是同一段字节——这正是旧实现用 stop_at 想保证的事。
+
+    采纳 checkpoint 与判废归零在 _usage_snap_state_advance 里（窗口路径的
+    冷热判定也用那一段，见 _usage_snap_state_cold），这里只管折到文件尾。
+    """
+    pricing = _usage_snap_state_advance(r, pricing_on)
+    state = _usage_snap_state[r]
 
     def fold(row):
         # 一行折三处：all-time 半 + 它所属那天的窗口半 + 那个小时的小时桶。
@@ -3840,8 +3881,15 @@ def _usage_snapshot_window_from_days(r, since, until, pricing_on):
     until 那天那一桶，见 _usage_hour_bucket），桶切不出那一刻的行，所以
     那一刻有整秒行时整条路退回 None（见 _closed_window_edge_ok），调用方
     接着整段扫描，结果不变。
+
+    状态冷（从没折过/刚被价表、realm、日志判废/采纳失败）时直接返回 None：
+    那条路要先付一次全量重折，窗口请求不背它——调用方退回按日分组的冷扫描
+    （同一批行、同一个求和口径，逐字节相同），重折留给 all-time 视图与
+    预热器（见 _usage_snap_state_cold）。
     """
     with _usage_snap_state_lock:
+        if _usage_snap_state_cold(r, pricing_on):
+            return None
         state, offset, error = _usage_snap_state_ready(r, pricing_on)
         if error is not None:
             # 折叠失败时状态已经归零，日桶跟着清空：这一次退回整段扫描，
@@ -3889,6 +3937,13 @@ def _usage_snapshot_window_from_hours(r, since, until, pricing_on):
         没有整秒行（见 _closed_window_edge_ok）：桶按 at 严格切分，窗口
         只取 at < until 的那批桶，恰好落在 until 上的行由边沿账挡回整段
         扫描。
+
+        情形——与 _series_slice 的格点校验同源。
+
+    状态冷（从没折过/刚被价表、realm、日志判废/采纳失败）时直接返回 None：
+    那条路要先付一次全量重折，窗口请求不背它——调用方退回按小时分组的冷
+    扫描（同一批行、同一个求和口径，逐字节相同），重折留给 all-time 视图
+    与预热器（见 _usage_snap_state_cold）。
     """
     key = _hour_window_key(since)
     if key is None:
@@ -3900,6 +3955,8 @@ def _usage_snapshot_window_from_hours(r, since, until, pricing_on):
         if until_key is None:
             return None
     with _usage_snap_state_lock:
+        if _usage_snap_state_cold(r, pricing_on):
+            return None
         state, offset, error = _usage_snap_state_ready(r, pricing_on)
         if error is not None:
             log(f"usage snapshot read failed: {error}")
@@ -6056,16 +6113,15 @@ def _analytics_all_time(realm, pricing_on=None):
     return maps, offset
 
 
-def _analytics_state_ready(realm, pricing_on=None):
-    """把 `realm` 的 all-time 折叠推进到文件尾；返回 (state, offset, error)。
+def _analytics_state_advance(realm, pricing_on=None):
+    """（不折叠）取/建状态、采纳 checkpoint、判废归零、记指纹。
 
-    调用方必须已持有 _analytics_state_lock。日桶、小时子表与 all-time 折叠
-    共用这一次扫描（见 _fold_usage_analytics 的 also），窗口半与 all-time 半
-    因此描述同一段字节。
-
-    `hours_keep` 标记这份状态要维护小时子表（剪枝线比日桶短，见
-    _prune_day_buckets）；`max_at` 是折过的最大 at（含 realm 不匹配的行），
-    小时窗口靠它判断窗口上界有没有切掉桶里的行。
+    调用方必须已持有 _analytics_state_lock。返回本次扫描取到的价表代次
+    （与记进状态指纹的是同一份）。状态是否「冷」（这次要付一次全量重折）看
+    state["offset"]：> 0 表示有可续折的数据，0 表示折叠要从文件头开始——
+    状态刚建、刚被价表 / realm / 日志判废、或 checkpoint 采纳失败。与
+    snapshot 侧同一套分工：采纳/判废只有这一段定义，_analytics_state_ready
+    与窗口路径的冷热判定（_analytics_state_cold）共用它，两边不会漂移。
     """
     state = _analytics_state.get(realm)
     if state is None:
@@ -6092,6 +6148,36 @@ def _analytics_state_ready(realm, pricing_on=None):
                       "days": {}, "days_floor": None, "max_at": 0,
                       "hits": [], "hits_overflow": False})
     state.update({"pricing": pricing, "realm": realm_inputs, "key": log_key})
+    return pricing
+
+
+def _analytics_state_cold(realm, pricing_on=None):
+    """窗口请求现在会不会付一次全量重折？True = 会（窗口改走冷扫描）。
+
+    调用方必须已持有 _analytics_state_lock。语义与 _usage_snap_state_cold
+    逐条相同：判定不折叠、不写结果，窗口请求不会把状态冻在冷态（offset 仍是
+    0，下一个 all-time 半的请求照样从零折到文件尾），重折之后两边字节一致。
+    """
+    _analytics_state_advance(realm, pricing_on)
+    return _analytics_state[realm]["offset"] <= 0
+
+
+def _analytics_state_ready(realm, pricing_on=None):
+    """把 `realm` 的 all-time 折叠推进到文件尾；返回 (state, offset, error)。
+
+    调用方必须已持有 _analytics_state_lock。日桶、小时子表与 all-time 折叠
+    共用这一次扫描（见 _fold_usage_analytics 的 also），窗口半与 all-time 半
+    因此描述同一段字节。
+
+    `hours_keep` 标记这份状态要维护小时子表（剪枝线比日桶短，见
+    _prune_day_buckets）；`max_at` 是折过的最大 at（含 realm 不匹配的行），
+    小时窗口靠它判断窗口上界有没有切掉桶里的行。
+
+    采纳 checkpoint 与判废归零在 _analytics_state_advance 里（窗口路径的
+    冷热判定也用那一段），这里只管折到文件尾。
+    """
+    pricing = _analytics_state_advance(realm, pricing_on)
+    state = _analytics_state[realm]
 
     def fold(row):
         # 一行折三处：all-time 半 + 它所属那天的窗口半 + 那天里它所属那小时
@@ -6129,8 +6215,15 @@ def _analytics_window_from_days(realm, day_key, until, pricing_on):
     until 那天那一桶（桶按 at 严格切分，见 _usage_hour_bucket），桶切不出
     那一刻的行，所以那一刻有整秒行时整条路退回 None（见
     _closed_window_edge_ok），调用方接着整段扫描，结果不变。
+
+    状态冷（从没折过/刚被价表、realm、日志判废/采纳失败）时直接返回 None：
+    那条路要先付一次全量重折，窗口请求不背它——调用方退回按日分组的冷扫描
+    （同一批行、同一个求和口径，逐字节相同），重折留给 all-time 半与预热器
+    （见 _analytics_state_cold）。
     """
     with _analytics_state_lock:
+        if _analytics_state_cold(realm, pricing_on):
+            return None
         state, offset, error = _analytics_state_ready(realm, pricing_on)
         if error is not None:
             log("compute_usage_analytics failed: %s" % error)
@@ -6191,8 +6284,15 @@ def _analytics_window_from_hours(realm, since, until, pricing_on):
       * days_floor 覆盖窗口起点所在的天（更早的天没有桶）；
       * 窗口起点所在的天及其后每一天都有 hours 子表（被剪枝线剪掉、或本地
         午夜落在不存在的小时里而摘掉的那天，都会让窗口整体退回扫描）。
+
+    状态冷（从没折过/刚被价表、realm、日志判废/采纳失败）时直接返回 None：
+    那条路要先付一次全量重折，窗口请求不背它——调用方退回按小时分组的冷
+    扫描（同一批行、同一个求和口径，逐字节相同），重折留给 all-time 半与
+    预热器（见 _analytics_state_cold）。
     """
     with _analytics_state_lock:
+        if _analytics_state_cold(realm, pricing_on):
+            return None
         state, offset, error = _analytics_state_ready(realm, pricing_on)
         if error is not None:
             log("compute_usage_analytics failed: %s" % error)
@@ -7052,9 +7152,11 @@ def _scan_usage_snapshot_window_days(r, since, until, pricing_on=None):
     本地午夜），两边装的是同一批行、同一个「按日分组」的求和口径，只是桶
     一个现折、一个存量。
 
-    这条路通常紧跟一次 all-time 折叠（_usage_snapshot_window_from_days 先
-    折到文件尾才发现日桶不够用），所以行级记忆在这里几乎全中：同一批行刚
-    在 all-time 半算过价与日键。价表照样在本函数开头取一次。
+    状态冷时它是窗口请求的直接答案（不折状态，重折留给 all-time 视图与
+    预热器，见 _usage_snap_state_cold）；其余情形它紧跟一次 all-time 折叠
+    （_usage_snapshot_window_from_days 先折到文件尾才发现日桶不够用），
+    行级记忆几乎全中：同一批行刚在 all-time 半算过价与日键。窗口外的行由
+    skip 挡在解析之前，这条路只付窗口内那批行。价表照样在本函数开头取一次。
     """
     pricing = _pricing_inputs(pricing_on)
     days = {}

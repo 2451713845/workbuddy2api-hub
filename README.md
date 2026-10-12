@@ -131,7 +131,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 141 个套件：105 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 143 个套件：106 个 Python + 37 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -356,6 +356,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **面板窗口限高：所有窗口（区块 + 日志终端）超高时在窗口内部滚动、标题行吸顶，高度在设置页可调**：面板里最长的区块（真机「签到与活跃记录」6801px）会把整页拉得很长，翻过它要滑很久。现在每个窗口超过限高时改为**窗口内部滚动**：区块挂 `max-height:var(--win-max-h)` + `overflow-y:auto`，标题行吸顶——区块自带的 `padding-top` 归零、挪给吸顶首行（否则吸顶后顶部漏出 18px 滚动内容），首行 `margin` 折成 `padding`（下方那条缝同理），窄屏（≤860px）两处一起缩到 14px；日志终端（自带 620px 高度）也在同一变量之下，限高调得比它小时同样生效。三条规则全部挂在 `body.win-capped` 之下，限高关掉时整条不生效、版式与从前逐像素一致。限高存在服务端 `accounts/settings.json` 的 `section_max_height`（与页签显示、账号折叠同一套通道，不用 localStorage），默认 **640px**、**0 = 不限**、上限 4000，设置页新增「面板窗口限高」区块（输入框 + 保存，附英文/正体词条）。边界口径：字段缺失或存坏回落默认 640px（与页签显示、账号折叠的坏值口径一致）；`true` 是 `int` 子类、显式挡掉——否则存成 1px 把窗口压成一条缝；`1e400` 读成 `inf` 时 `int()` 抛的 `OverflowError` 一并挡掉（否则 `/settings` 直接 500）；负的分数像素（`int(-0.5)` = 0）拒绝而不是静默关掉限高；面板侧空输入框同样拦下（`Number('')` 是 0，放过去就是「清空即关闭」）。新增测试套件 `tests/_test_section_max_height.py` + `tests/_test_section_max_height.js`；README 套件计数 141 → 143。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.2，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 ## 七、致谢与引用声明 (Credits & References)

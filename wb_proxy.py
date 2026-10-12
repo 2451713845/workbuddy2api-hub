@@ -9706,6 +9706,7 @@ def runtime_settings_view():
         "model_daily_token_limit": wb_settings.model_daily_token_limit(ACCOUNTS_DIR),
         "pricing_refresh_minutes": wb_settings.pricing_refresh_minutes(ACCOUNTS_DIR),
         "credits_refresh_hours": wb_settings.credits_refresh_hours(ACCOUNTS_DIR),
+        "section_max_height": wb_settings.section_max_height(ACCOUNTS_DIR),
         "ui_language": wb_settings.ui_language(ACCOUNTS_DIR),
         "pricing_variant_inherit": wb_settings.pricing_variant_inherit(ACCOUNTS_DIR),
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
@@ -16566,6 +16567,32 @@ class Handler(BaseHTTPRequestHandler):
                 wb_settings.set_credits_refresh_hours(ACCOUNTS_DIR, hours)
             if CREDITS_REFRESHER:
                 CREDITS_REFRESHER.wake()
+        if "section_max_height" in payload:
+            # Panel window height cap in pixels; 0 turns the cap off. bool is an
+            # int subclass and must be rejected explicitly - true would
+            # otherwise store 1 and shrink every window to a sliver.
+            raw = payload.get("section_max_height")
+            if isinstance(raw, bool) or raw is None:
+                return self._error(400, "section_max_height must be a whole number",
+                                   "invalid_request_error")
+            try:
+                number = int(raw)
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError: a JSON payload may carry Infinity (1e400),
+                # which int() refuses - answer 400, not a 500.
+                return self._error(400, "section_max_height must be a whole number",
+                                   "invalid_request_error")
+            # A fractional count is refused rather than truncated: int(-0.5) is
+            # 0, which would slip past the negative check and silently turn the
+            # cap off.
+            if float(raw) != number:
+                return self._error(400, "section_max_height must be a whole number",
+                                   "invalid_request_error")
+            if number < 0:
+                return self._error(400, "section_max_height cannot be negative",
+                                   "invalid_request_error")
+            reply["section_max_height"] = \
+                wb_settings.set_section_max_height(ACCOUNTS_DIR, number)
         if "ui_language" in payload:
             # Instance-wide default language. The dashboard overrides this per
             # browser with localStorage; this value is the fallback when no

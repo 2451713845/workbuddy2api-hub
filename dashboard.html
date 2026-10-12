@@ -481,6 +481,16 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 .log-tag.tag-accounts{background:rgba(14,165,233,.18);color:#38bdf8}
 .log-tag.tag-auth{background:rgba(244,63,94,.18);color:#fb7185}
 .log-tag.tag-system{background:rgba(100,116,139,.18);color:#94a3b8}
+/* 细分出来的模块标签各有配色；catalog/auth 早先就被推断出来，只是一直没有
+   自己的颜色，和 system 的灰底混在一起。 */
+.log-tag.tag-catalog{background:rgba(45,212,191,.18);color:#2dd4bf}
+.log-tag.tag-agents{background:rgba(129,140,248,.18);color:#818cf8}
+.log-tag.tag-pricing{background:rgba(251,146,60,.18);color:#fb923c}
+.log-tag.tag-egress{background:rgba(34,211,238,.18);color:#22d3ee}
+.log-tag.tag-upstream{background:rgba(244,114,182,.18);color:#f472b6}
+.log-tag.tag-update{background:rgba(147,197,253,.18);color:#93c5fd}
+.log-tag.tag-usage{background:rgba(94,234,212,.18);color:#5eead4}
+.log-tag.tag-webtools{background:rgba(163,230,53,.18);color:#a3e635}
 .log-msg{color:#cbd5e1;flex:1;word-break:break-all;white-space:pre-wrap}
 .log-empty{padding:48px 24px;text-align:center;color:#64748b;font-size:13px;font-family:inherit}
 /* ===== Phone: ≤640px ===== */
@@ -4066,13 +4076,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         <button class="range-btn" id="btnLogLvlError" onclick="setLogFilterLevel('ERROR')">ERROR</button>
       </div>
 
-      <div style="display:inline-flex;gap:3px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
-        <button class="range-btn active" id="btnLogTagAll" onclick="setLogFilterTag('')">全部模块</button>
-        <button class="range-btn" id="btnLogTagChat" onclick="setLogFilterTag('chat')">对话</button>
-        <button class="range-btn" id="btnLogTagTasks" onclick="setLogFilterTag('tasks')">任务福利</button>
-        <button class="range-btn" id="btnLogTagSched" onclick="setLogFilterTag('scheduler')">调度器</button>
-        <button class="range-btn" id="btnLogTagAcct" onclick="setLogFilterTag('accounts')">账号</button>
-        <button class="range-btn" id="btnLogTagSys" onclick="setLogFilterTag('system')">系统</button>
+      <!-- 模块筛选按钮由 renderLogTagFilters() 按当前日志里真正出现过的 tag
+           动态生成：后端细分出新的 tag 时这里自动多一个按钮，不必同步改。 -->
+      <div id="logTagBar" style="display:inline-flex;gap:3px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line);flex-wrap:wrap">
+        <button class="range-btn active" data-tag="" onclick="setLogFilterTag('')">全部模块</button>
       </div>
 
       <div style="flex:1;min-width:180px;position:relative">
@@ -10718,22 +10725,53 @@ function setLogFilterLevel(lvl){
   renderLogs();
 }
 
+/* 模块筛选按钮的固定顺序与中文名。顺序按「排查时最常先看哪个模块」排，未列出
+   的 tag 排到最后并按字母序补上——后端新增 tag 时这里不改也能用。 */
+const LOG_TAG_ORDER = ['chat', 'tasks', 'scheduler', 'accounts', 'agents', 'pricing',
+                       'egress', 'upstream', 'webtools', 'catalog', 'auth', 'settings',
+                       'update', 'usage', 'system'];
+const LOG_TAG_LABELS = {
+  chat: '对话', tasks: '任务福利', scheduler: '调度器', accounts: '账号',
+  agents: '智能体', pricing: '定价', egress: '出口', upstream: '上游',
+  webtools: '网络工具', catalog: '模型', auth: '鉴权', settings: '设置',
+  update: '更新', usage: '用量', system: '系统'
+};
+let logTagBtnKey = null;
+/* 按当前缓冲里真正出现过的 tag 重建按钮组。集合没变就不动 DOM——这个函数每
+   次渲染都会调，重建本身会让正在点的按钮闪一下。 */
+function renderLogTagFilters(){
+  const bar = document.getElementById('logTagBar');
+  if(!bar) return;
+  const seen = new Set();
+  logEntries.forEach(x => { if(x.tag) seen.add(x.tag); });
+  // 当前筛选的 tag 即使暂时没有日志也留在栏里，否则按钮一消失就不知道自己在
+  // 筛什么，也没法一眼切回去。
+  if(logFilterTag) seen.add(logFilterTag);
+  const ordered = LOG_TAG_ORDER.filter(t => seen.has(t))
+    .concat(Array.from(seen).filter(t => LOG_TAG_ORDER.indexOf(t) < 0).sort());
+  const key = ordered.join(',');
+  if(key !== logTagBtnKey){
+    logTagBtnKey = key;
+    bar.innerHTML = '';
+    [{tag: '', label: '全部模块'}]
+      .concat(ordered.map(t => ({tag: t, label: LOG_TAG_LABELS[t] || t})))
+      .forEach(item => {
+        const btn = document.createElement('button');
+        btn.className = 'range-btn';
+        btn.dataset.tag = item.tag;
+        btn.textContent = item.label;
+        btn.onclick = () => setLogFilterTag(item.tag);
+        bar.appendChild(btn);
+      });
+  }
+  bar.querySelectorAll('button').forEach(b => {
+    b.classList.toggle('active', (b.dataset.tag || '') === logFilterTag);
+  });
+}
+
 function setLogFilterTag(tag){
   logFilterTag = tag;
-  const tagMap = {
-    '': 'All',
-    'chat': 'Chat',
-    'tasks': 'Tasks',
-    'scheduler': 'Sched',
-    'accounts': 'Acct',
-    'system': 'Sys'
-  };
-  Object.keys(tagMap).forEach(k => {
-    const btn = document.getElementById('btnLogTag' + tagMap[k]);
-    if(btn){
-      btn.classList.toggle('active', logFilterTag === k);
-    }
-  });
+  renderLogTagFilters();
   renderLogs();
 }
 
@@ -10794,6 +10832,7 @@ function renderLogs(){
   const body = document.getElementById('logTerminalBody');
   if(!body) return;
 
+  renderLogTagFilters();
   const filtered = logEntries.filter(logMatchesFilter);
 
   if(filtered.length === 0){

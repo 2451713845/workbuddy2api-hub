@@ -806,7 +806,12 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
     row["key"] = key or ""
     _persist_usage(row, "error persist failed")
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
-    log(f"request error: model={model}{dur} status={status} msg={str(message)[:180]}", level="ERROR", tag="chat")
+    # 账号与终态也带上看板日志。上面那段本来就把 account 写进了 JSONL，但日志
+    # 行一直没打出来——出错时最想知道的「哪个账号、什么终态」反而要回去翻
+    # usage.jsonl，而 chat done 那条早就有 acct= 了，两侧不对称。
+    acc_tag = f" acct={account[:8]}" if account else ""
+    log(f"request error: model={model}{dur}{acc_tag} status={status} outcome={outcome} msg={str(message)[:180]}",
+        level="ERROR", tag="chat")
     return row
 def _pct(values, q):
     """Nearest-rank percentile (no interpolation) - good enough for latency."""
@@ -9850,6 +9855,44 @@ LOG_BUFFER = deque(maxlen=2000)
 _LOG_LOCK = threading.Lock()
 _LOG_COUNTER = 0
 
+# 日志级别与模块的自动归类。调用点显式传了 level/tag 就用传的，没传才按内容猜。
+#
+# 级别：早先只认英文关键字，而本仓大量日志是中文——定价侧的「抓取失败，继续用
+# 上一版价格」「首次抓取异常」全被判成 INFO，看板上按 ERROR 筛选根本看不到它们。
+# 中文关键字补上后这些才落到正确的级别。英文侧同样收紧了几个明显的漏网（"fail"
+# 只认 "failed"，"fail:" 这种短标签一直没被认出来）。
+_LOG_ERROR_HINTS = (
+    "error", "exception", "failed", "fail:", "reject", "traceback", "errno", "fatal",
+    "11-128", "11101", "11140",
+    "失败", "异常", "错误", "拒绝", "不可用", "无效",
+)
+_LOG_WARN_HINTS = (
+    "warn", "warning", "retry", "timeout", "throttl",
+    "重试", "超时", "告警", "警告", "降级", "限流",
+)
+# 模块：顺序即优先级，越靠前越先判定。新增的 pricing / egress / upstream /
+# update / usage / webtools 都是从原先那个大杂烩 "system" 里拆出来的——这些
+# 模块本来就在打日志，只是推断规则不认识它们的词，于是一律归到 system，事后
+# 想按模块看某一类问题时筛不出来。原有类别（chat/scheduler/tasks/accounts/
+# catalog/auth/settings）的相对顺序保持不变，避免改变既有日志的归类。
+_LOG_TAG_HINTS = (
+    ("chat", ("chat:", "chat done", "request error", "/v1/chat",
+              "/chat/completions", "responses")),
+    ("scheduler", ("scheduler", "调度器")),
+    ("tasks", ("task", "任务", "打卡", "签到", "猫猫", "travel", "growth")),
+    ("accounts", ("account", "账号", "pool", "imported")),
+    ("pricing", ("pricing", "定价", "取价", "价格", "price", "抓取")),
+    ("egress", ("egress", "出口", "槽位", "proxy slot", "mihomo")),
+    ("upstream", ("upstream", "上游")),
+    ("webtools", ("webtool", "web tool", "本地网络工具")),
+    ("catalog", ("model", "catalog", "模型")),
+    ("auth", ("auth", "token", "oauth")),
+    ("settings", ("settings", "设置")),
+    ("update", ("更新", "release")),
+    ("usage", ("usage", "用量")),
+    ("agents", ("agents", "智能体")),
+)
+
 # 可选的 SQLite 落库（默认关闭）。None = 还没初始化（模块 import 期），启动时按
 # settings 建好，之后由面板开关驱动 wb_logstore.LogStore.configure()。关闭时它
 # 要么是 None、要么 enabled=False，整条日志路径与上游一字不差：只写内存环形
@@ -9868,28 +9911,18 @@ def add_log_entry(msg, level=None, tag=None):
     msg_str = str(msg).rstrip()
     if not level:
         lower = msg_str.lower()
-        if any(k in lower for k in ("error", "exception", "failed", "11-128", "11101", "11140", "traceback", "errno", "fatal")):
+        if any(k in lower for k in _LOG_ERROR_HINTS):
             level = "ERROR"
-        elif any(k in lower for k in ("warn", "warning", "retry", "timeout")):
+        elif any(k in lower for k in _LOG_WARN_HINTS):
             level = "WARN"
         else:
             level = "INFO"
     if not tag:
         lower = msg_str.lower()
-        if "chat:" in lower or "chat done" in lower or "/v1/chat" in lower or "/chat/completions" in lower or "responses" in lower:
-            tag = "chat"
-        elif "scheduler" in lower or "调度器" in lower:
-            tag = "scheduler"
-        elif "task" in lower or "任务" in lower or "打卡" in lower or "猫猫" in lower or "travel" in lower:
-            tag = "tasks"
-        elif "account" in lower or "账号" in lower or "pool" in lower or "imported" in lower:
-            tag = "accounts"
-        elif "model" in lower or "catalog" in lower or "模型" in lower:
-            tag = "catalog"
-        elif "auth" in lower or "token" in lower or "oauth" in lower:
-            tag = "auth"
-        elif "settings" in lower or "设置" in lower:
-            tag = "settings"
+        for candidate, hints in _LOG_TAG_HINTS:
+            if any(k in lower for k in hints):
+                tag = candidate
+                break
         else:
             tag = "system"
     with _LOG_LOCK:

@@ -12208,6 +12208,22 @@ def is_transient(exc):
     )
     return any(m in t for m in markers)
 
+def exc_detail(exc, limit=180):
+    """异常的可读原因（类型 + 底层文本），而不只是类型名。
+
+    这些行原先只插值 `type(exc).__name__`，于是现场只剩一串 `URLError`：事后
+    分不清那一下到底是 SSL 握手中断、连接被重置还是读超时，而这三者指向完全
+    不同的根因——上游边缘在丢连接 / 连接被重置 / 连接池复用了已死的连接。
+    URLError 的真实原因挂在 `.reason` 上（`str(exc)` 会包一层 `<urlopen error
+    ...>`，`.reason` 才是干净的内层文本），所以优先取 `.reason`，空则退回
+    `str(exc)`，再空则退回类型名，保证这一格永远有内容。
+    """
+    reason = getattr(exc, "reason", None)
+    text = str(reason) if reason is not None else str(exc)
+    text = (text or "").strip()
+    if not text:
+        return type(exc).__name__
+    return ("%s: %s" % (type(exc).__name__, text))[:limit]
 
 # The shapes the upstream uses for a rate limit. A body naming one is a soft
 # limit; it still says nothing about scope, so the caller decides that from the
@@ -12730,18 +12746,18 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     wait = charge_egress(chat_url, account.proxy)
                     log("account %s: upstream connection hiccup for '%s' (%s), "
                         "backing off the egress %.1fs"
-                        % (account.uid[:8], model, type(exc).__name__, wait))
+                        % (account.uid[:8], model, exc_detail(exc), wait))
                     last_error = exc
                     time.sleep(min(wait, EGRESS_SLEEP_MAX))
                     continue
-                charge_account(account, "connection: %s" % type(exc).__name__,
+                charge_account(account, "connection: %s" % exc_detail(exc, 120),
                                unknown=True)
                 # 带上 UID：这一行同时是一次扣分（连续 3 次就把账号熔断 30
                 # 分钟），不写清楚是谁挨的这一下，事后只能看着一串 hiccup 猜
                 # 是哪几个账号被关掉、池子为什么突然空了。
                 log("account %s: upstream connection hiccup for '%s' (%s), "
                     "retrying (degrade=%d)"
-                    % (account.uid[:8], model, type(exc).__name__, account.degrade_count))
+                    % (account.uid[:8], model, exc_detail(exc), account.degrade_count))
                 last_error = exc
                 time.sleep(min(0.6 * transient_hits, 2.0))
                 continue

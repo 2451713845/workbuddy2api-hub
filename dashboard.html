@@ -3887,6 +3887,43 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">日志落库 <em id="setLogDbState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              默认关闭：日志只留在内存（最新 2000 条，重启即失），与上游一致。开启后每条日志追加写入
+              <span class="mono">usage/logs.sqlite3</span>，重启、崩溃后仍能回看，方便事后 debug。
+              三条保留上限各自独立，留空表示该维度不限制；天数默认 7 天。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setLogDbEnabled" type="checkbox" style="width:16px;height:16px">
+              启用日志落库
+            </label>
+            <button onclick="saveLogDb(this)">保存</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div style="flex:1;min-width:150px">
+            <div style="font-size:12px;color:var(--dim);margin-bottom:4px">最多保留条数（留空 = 不限）</div>
+            <input id="setLogDbMaxRows" type="number" min="1" placeholder="不限"
+                   style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+          </div>
+          <div style="flex:1;min-width:150px">
+            <div style="font-size:12px;color:var(--dim);margin-bottom:4px">最多保留天数（留空 = 不限）</div>
+            <input id="setLogDbMaxDays" type="number" min="1" placeholder="7"
+                   style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+          </div>
+          <div style="flex:1;min-width:150px">
+            <div style="font-size:12px;color:var(--dim);margin-bottom:4px">日志库大小上限 MB（留空 = 不限）</div>
+            <input id="setLogDbMaxMB" type="number" min="1" placeholder="不限"
+                   style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">更新 <em id="setUpdateState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               网关匿名查询 GitHub 的公开 Release 列表，与当前运行的版本比较。本版只检查：不下载、不安装、不重启，账号与用量数据不会被碰。
@@ -4007,7 +4044,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
       <div>
         <h2 style="margin:0;font-size:16px;color:var(--fg)">网关运行日志</h2>
-        <div style="font-size:12px;color:var(--dim);margin-top:4px">实时捕获反向代理请求、流式转发、调度巡检、任务打卡与异常告警 (内存保留最新 2000 条)</div>
+        <div id="logPageHint" style="font-size:12px;color:var(--dim);margin-top:4px">实时捕获反向代理请求、流式转发、调度巡检、任务打卡与异常告警 (内存保留最新 2000 条)</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span id="logStatsBadge" style="font-size:12px;color:var(--dim);margin-right:6px">加载中...</span>
@@ -8756,6 +8793,17 @@ async function loadSettings(showToast){
         headerTimeoutState.textContent = headerTimeoutDefault ? '(默认 120 秒)' : '(' + headerTimeout + ' 秒)';
         headerTimeoutState.style.color = headerTimeoutDefault ? 'var(--dim)' : 'var(--accent2)';
       }
+      const logDbEnabled = data.log_db_enabled === true;
+      const logDbEnabledInput = document.getElementById('setLogDbEnabled');
+      if(logDbEnabledInput) logDbEnabledInput.checked = logDbEnabled;
+      const logDbState = document.getElementById('setLogDbState');
+      if(logDbState){
+        logDbState.textContent = logDbEnabled ? '(已启用)' : '(未启用)';
+        logDbState.style.color = logDbEnabled ? 'var(--accent2)' : 'var(--dim)';
+      }
+      fillCapInput('setLogDbMaxRows', data.log_db_max_rows);
+      fillCapInput('setLogDbMaxDays', data.log_db_max_days);
+      fillCapInputMB('setLogDbMaxMB', data.log_db_max_bytes);
     // Rebuild the editable rows, keeping stored values so an untouched field
     // is not accidentally blanked.
     API_KEY_ROWS = (data.api_keys || []).map(k => ({
@@ -9377,6 +9425,52 @@ async function saveHeaderTimeout(btn){
   try {
     await postJSON('/settings/save', {upstream: {header_timeout_seconds: value}});
     toast('已保存：上游响应头超时 ' + value + ' 秒', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+/* ---- 日志落库 ----
+   开关与三条保留上限一次提交；上限框留空就发 null，服务端存成「不限」。
+   大小框以 MB 输入，发出去时换算成字节（服务端一律以字节记）。 */
+function capInputValue(id){
+  const el = document.getElementById(id);
+  if(!el) return null;
+  const raw = String(el.value == null ? '' : el.value).trim();
+  if(raw === '') return null;
+  const n = Number(raw);
+  if(!isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+function fillCapInput(id, value){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.value = (value === null || value === undefined || value === '') ? '' : String(value);
+}
+function fillCapInputMB(id, bytes){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.value = (bytes === null || bytes === undefined || bytes === '' || bytes <= 0)
+    ? '' : String(Math.max(1, Math.round(bytes / 1048576)));
+}
+async function saveLogDb(btn){
+  const enabledEl = document.getElementById('setLogDbEnabled');
+  const rows = capInputValue('setLogDbMaxRows');
+  const days = capInputValue('setLogDbMaxDays');
+  const mb = capInputValue('setLogDbMaxMB');
+  const payload = {
+    log_db_enabled: !!(enabledEl && enabledEl.checked),
+    log_db_max_rows: rows,
+    log_db_max_days: days,
+    log_db_max_bytes: mb === null ? null : mb * 1048576,
+  };
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', payload);
+    toast(payload.log_db_enabled ? '已启用日志落库' : '已关闭日志落库', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
@@ -10502,6 +10596,20 @@ function logMatchesFilter(item){
   return true;
 }
 function logFilterKey(){ return logFilterLevel + '|' + logFilterTag + '|' + logSearchText; }
+/* 顶部文案跟着模式走：落库时报告库里累计多少条历史、并指向设置页的上限；纯内存
+   时保持上游原话。data.mode 由 /logs 带回（后端按当前开关判定）。 */
+function updateLogPageHint(data){
+  const hint = document.getElementById('logPageHint');
+  if(!hint) return;
+  if(data && data.mode === 'db'){
+    const stored = (typeof data.stored === 'number') ? data.stored : null;
+    hint.textContent = '实时捕获反向代理请求、流式转发、调度巡检、任务打卡与异常告警'
+      + ' (已落库' + (stored === null ? '' : '，共 ' + stored + ' 条历史')
+      + '，可在设置页调整保留上限)';
+  } else {
+    hint.textContent = '实时捕获反向代理请求、流式转发、调度巡检、任务打卡与异常告警 (内存保留最新 2000 条)';
+  }
+}
 // 单行 HTML 只有这一处定义，整表渲染和增量 append 都用它。
 function logLineHtml(item){
   const lvlCls = 'lvl-' + (item.level || 'INFO');
@@ -10540,6 +10648,7 @@ async function fetchNewLogs(forceReset){
     const limit = forceReset ? 500 : 200;
     const data = await getJSON('/logs?since_id=' + since + '&limit=' + limit);
     if(data && data.logs){
+      updateLogPageHint(data);
       let fresh = null;     // 本轮真正新增的条目（去重后）
       let dropped = null;   // 因超上限被挤出缓冲的最旧条目
       if(forceReset){
@@ -10787,7 +10896,7 @@ async function exportLogsFile(){
 }
 
 async function clearServerLogs(){
-  if(!confirm('确定要清空网关日志吗？此操作将清空内存中的全部日志缓冲。')) return;
+  if(!confirm('确定要清空网关日志吗？内存缓冲会被清空；若已启用日志落库，数据库里的历史记录也会一并删除。')) return;
   try {
     await postJSON('/logs/clear', {});
     logEntries = [];

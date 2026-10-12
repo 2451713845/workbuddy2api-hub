@@ -63,6 +63,7 @@ import wb_atrest
 import wb_catalog
 import wb_egress
 import wb_ipintel
+import wb_logstore
 import wb_pricing
 import wb_settings
 import wb_upstream_pool
@@ -9719,6 +9720,10 @@ def runtime_settings_view():
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
         "egress_backoff_enabled":
             wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
+        "log_db_enabled": wb_settings.log_db_enabled(ACCOUNTS_DIR),
+        "log_db_max_rows": wb_settings.log_db_max_rows(ACCOUNTS_DIR),
+        "log_db_max_days": wb_settings.log_db_max_days(ACCOUNTS_DIR),
+        "log_db_max_bytes": wb_settings.log_db_max_bytes(ACCOUNTS_DIR),
         "accounts_collapsed": wb_settings.accounts_collapsed(ACCOUNTS_DIR),
         "accounts_separate_tab": wb_settings.accounts_separate_tab(ACCOUNTS_DIR),
         "key_before_hidden": wb_settings.key_before_hidden(ACCOUNTS_DIR),
@@ -9845,6 +9850,17 @@ LOG_BUFFER = deque(maxlen=2000)
 _LOG_LOCK = threading.Lock()
 _LOG_COUNTER = 0
 
+# 可选的 SQLite 落库（默认关闭）。None = 还没初始化（模块 import 期），启动时按
+# settings 建好，之后由面板开关驱动 wb_logstore.LogStore.configure()。关闭时它
+# 要么是 None、要么 enabled=False，整条日志路径与上游一字不差：只写内存环形
+# 缓冲，不建库、不落盘。
+LOG_STORE = None
+
+
+def _log_db_active():
+    return LOG_STORE is not None and LOG_STORE.enabled
+
+
 def add_log_entry(msg, level=None, tag=None):
     global _LOG_COUNTER
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -9852,7 +9868,7 @@ def add_log_entry(msg, level=None, tag=None):
     msg_str = str(msg).rstrip()
     if not level:
         lower = msg_str.lower()
-        if any(k in lower for k in ("error", "exception", "failed", "11128", "11101", "11140", "traceback", "errno", "fatal")):
+        if any(k in lower for k in ("error", "exception", "failed", "11-128", "11101", "11140", "traceback", "errno", "fatal")):
             level = "ERROR"
         elif any(k in lower for k in ("warn", "warning", "retry", "timeout")):
             level = "WARN"
@@ -9887,6 +9903,9 @@ def add_log_entry(msg, level=None, tag=None):
             "msg": msg_str,
         }
         LOG_BUFFER.append(entry)
+    # 落库在锁外：append 只是入队，但没必要把持锁时间拉长到调用 queue.put。
+    if _log_db_active():
+        LOG_STORE.append(entry)
     return entry
 
 def log(msg, level=None, tag=None):
@@ -9898,6 +9917,17 @@ def log(msg, level=None, tag=None):
 wb_webtools.set_logger(log)
 
 def get_logs(limit=200, level="", tag="", search="", since_id=0):
+    # 落库开启时以数据库为准：它是完整历史（受保留上限约束），而内存环形缓冲
+    # 只留最新 2000 条，拿它回答会看不到刚过去的窗口。查询失败或超时就退回内存，
+    # 面板宁可少看历史，也不能因为日志库出问题而整页空白。
+    if _log_db_active():
+        try:
+            stored = LOG_STORE.query(limit=limit, level=level, tag=tag,
+                                     search=search, since_id=since_id)
+        except Exception:
+            stored = None
+        if stored is not None:
+            return stored
     with _LOG_LOCK:
         items = list(LOG_BUFFER)
     if since_id > 0:
@@ -9918,6 +9948,40 @@ def get_logs(limit=200, level="", tag="", search="", since_id=0):
 def clear_logs():
     with _LOG_LOCK:
         LOG_BUFFER.clear()
+    if _log_db_active():
+        try:
+            LOG_STORE.clear()
+        except Exception:
+            pass
+
+
+def apply_log_db_settings():
+    """Read the panel's log-database settings into the live store.
+
+    Called once at startup (after USAGE_DIR is settled) and again on every
+    settings save, so flipping the switch or editing a cap takes effect at once
+    without a restart. Also pulls the id counter up to whatever the database
+    already holds, so ids stay monotonic across a restart and the panel's
+    `since_id` incremental fetch keeps working.
+    """
+    global _LOG_COUNTER
+    if LOG_STORE is None:
+        return False
+    LOG_STORE.configure(
+        wb_settings.log_db_enabled(ACCOUNTS_DIR),
+        max_rows=wb_settings.log_db_max_rows(ACCOUNTS_DIR),
+        max_days=wb_settings.log_db_max_days(ACCOUNTS_DIR),
+        max_bytes=wb_settings.log_db_max_bytes(ACCOUNTS_DIR),
+    )
+    if LOG_STORE.enabled:
+        try:
+            highest = LOG_STORE.max_id()
+        except Exception:
+            highest = 0
+        with _LOG_LOCK:
+            if highest > _LOG_COUNTER:
+                _LOG_COUNTER = highest
+    return LOG_STORE.enabled
 
 # ---------------------------------------------------------------------------
 # upstream helpers
@@ -16260,7 +16324,18 @@ class Handler(BaseHTTPRequestHandler):
             since_id = int(query.get("since_id", ["0"])[0])
         except (ValueError, TypeError):
             since_id = 0
-        return self._json(200, get_logs(limit=limit, level=level, tag=tag, search=search, since_id=since_id))
+        result = get_logs(limit=limit, level=level, tag=tag, search=search, since_id=since_id)
+        # 面板要据 mode 决定顶部文案（内存保留 vs 落库保留）与是否显示库容量，
+        # 所以把模式与库统计一并带回；统计失败不该让整个日志请求失败。
+        result["mode"] = "db" if _log_db_active() else "memory"
+        if _log_db_active():
+            try:
+                stats = LOG_STORE.stats() or {}
+            except Exception:
+                stats = {}
+            result["stored"] = stats.get("rows", 0)
+            result["db_bytes"] = stats.get("bytes", 0)
+        return self._json(200, result)
 
     def _get_logs_export(self):
         if not self._authorized():
@@ -16776,6 +16851,28 @@ class Handler(BaseHTTPRequestHandler):
                 # 由下一个请求照常推（此刻就算推也要先折一次剩余估算，没必要
                 # 为一个开关多付这一趟）。
                 POOL.apply_remaining_weights(None)
+        if "log_db_enabled" in payload or "log_db_max_rows" in payload \
+                or "log_db_max_days" in payload or "log_db_max_bytes" in payload:
+            # 日志落库（默认关闭）：开关与三条保留上限一次提交里可以任选子集，
+            # 没带到的键原样保留。上限留空（null / "" / 0）一律存成「不限」。
+            log_db_touched = False
+            if "log_db_enabled" in payload:
+                raw = payload.get("log_db_enabled")
+                if not isinstance(raw, bool):
+                    return self._error(400, "log_db_enabled must be true or false",
+                                       "invalid_request_error")
+                wb_settings.set_log_db_enabled(ACCOUNTS_DIR, raw)
+                reply["log_db_enabled"] = raw
+                log_db_touched = True
+            for key, setter in (
+                    ("log_db_max_rows", wb_settings.set_log_db_max_rows),
+                    ("log_db_max_days", wb_settings.set_log_db_max_days),
+                    ("log_db_max_bytes", wb_settings.set_log_db_max_bytes)):
+                if key in payload:
+                    reply[key] = setter(ACCOUNTS_DIR, payload.get(key))
+                    log_db_touched = True
+            if log_db_touched:
+                apply_log_db_settings()
         if "accounts_collapsed" in payload:
             # A disclosure state, and the only thing this branch may touch: the
             # submission carries just this key, so the settings it does not name
@@ -18795,12 +18892,17 @@ def _probe_running_instance(args):
 
 def _bootstrap_runtime(args):
     global POOL, ACCOUNTS_DIR, API_KEY, SYSTEM_PROMPT
-    global API_KEY_FILE_SET, SCHEDULER
+    global API_KEY_FILE_SET, SCHEDULER, LOG_STORE
     api_key_generated = False
     API_KEY = args.api_key
     SYSTEM_PROMPT = args.system_prompt
     if args.accounts_dir:
         ACCOUNTS_DIR = os.path.abspath(args.accounts_dir)
+    # 日志落库（默认关闭）：在账号池之前初始化，好让「池加载失败」这类最需要
+    # 事后留档的启动日志也能进库。关闭时这里只造一个 enabled=False 的空壳，
+    # 不建文件、不改日志路径。
+    LOG_STORE = wb_logstore.LogStore(os.path.join(USAGE_DIR, "logs.sqlite3"))
+    apply_log_db_settings()
     # LAN mode must not ship a known key: the gateway spends the account's own
     # upstream quota, so a guessable default lets anyone on the network drain
     # it. Generate one on first use, persist it, and reuse it afterwards.

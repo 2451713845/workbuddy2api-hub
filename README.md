@@ -131,7 +131,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 136 个套件：100 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 137 个套件：101 个 Python + 36 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -356,6 +356,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **未对齐窗口的整段扫描：窗外的行不再 decode（bytes 级预过滤）**：起点不落在本地午夜/整点/分钟格点上的自定义区间走 `_scan_usage_snapshot_window` 一族——整段读日志、逐行 `decode + strip`，再由 `_line_outside_window` 判窗口。窗外的行只是不折，decode 照付；而窄窗口在几万行的日志上把绝大部分行都判在窗外，decode 是这条路径上唯一能整段省掉的开销。现在同一道判定先跑一遍**未解码的行**（新增 `_line_outside_window_bytes`，`_scan_usage_from` 新增 `skip_raw` 参数，六个窗口读取器都传）：能按字节读准、且整行 ASCII（decode 必然成功）的窗外行连 decode 都不再付；读不准的行——非首键 at、重复 at、整数 token、转义引号、坏字节、非 ASCII——一律返回 False，照旧解码后交给文本判定，保守语义一条不改（字节版说"窗外"的行，文本版也必须说"窗外"，反之只许出现在"字节版认不出"那一侧）。本机（11.7MB / 21445 行，与其他任务共享的机器，多轮取最小）：26 分钟未对齐窗口 `_scan_usage_snapshot_window` 91ms → 84ms、端到端 `usage_snapshot(custom)` 86ms → 82ms，10 小时窗口 90ms → 87ms；同窗口 decode 次数 **21445 → 352**（`json.loads` 次数与旧路径完全相同），输出逐字节不变（31 场景冻结时钟跨树对拍 0 差异）。新增测试套件 `tests/_test_usage_bytes_prefilter.py`（25 项：27 条 TRICKY 形状逐条对拍、十三个读取器开/关逐字节对拍、decode 计数桩、坏字节/半行/跨块行/窗口边界）。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.1，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 ## 七、致谢与引用声明 (Credits & References)

@@ -3333,7 +3333,7 @@ def _realm_fold_reproducible(disk):
     return pool == disk
 
 
-def _scan_usage_from(offset, fold, stop_at=None, skip=None, path=None):
+def _scan_usage_from(offset, fold, stop_at=None, skip=None, skip_raw=None, path=None):
     """Fold every row past `offset` into `fold(row)`; returns (offset, error).
 
     The offset handed back is the end of the last row the pass got through.
@@ -3343,7 +3343,12 @@ def _scan_usage_from(offset, fold, stop_at=None, skip=None, path=None):
 
     `skip(line)` drops a line before the parse; the windowed readers pass
     _line_outside_window() here, so a line the range excludes costs a substring
-    search instead of a json.loads.
+    search instead of a json.loads. `skip_raw(raw)` is the same test on the
+    undecoded line, run before the decode: the windowed readers pass
+    _line_outside_window_bytes(), which only answers True for a line the text
+    check above would drop as well, so a line it drops skips the decode too
+    and no other line reads differently. Both are optional and either may be
+    given alone.
 
     `stop_at` caps the read at the offset an all-time fold has already covered,
     so a windowed payload built on top of that fold describes exactly the same
@@ -3354,9 +3359,10 @@ def _scan_usage_from(offset, fold, stop_at=None, skip=None, path=None):
 
     The log is read in binary and the offset advances by the length of each
     line: a tell() per line costs more than the parse it would be tracking,
-    and an offset only has to be a byte count. Each line is decoded to text
-    before it is looked at, which is the order the text-mode readers read in
-    and the one the pre-filter expects.
+    and an offset only has to be a byte count. Every line that reaches the
+    text checks is decoded to text before it is looked at, which is the order
+    the text-mode readers read in and the one the text-mode pre-filter
+    expects; a line `skip_raw` drops never gets that far.
 
     `error` is the exception that stopped the read, or None. A row the fold
     cannot swallow ends the pass exactly where it used to - the readers have
@@ -3385,6 +3391,14 @@ def _scan_usage_from(offset, fold, stop_at=None, skip=None, path=None):
                     # The line straddles the covered bytes, so the all-time
                     # fold never saw it either: leave it out of this pass too.
                     break
+                # The bytes-level pre-filter runs first: a line it can read
+                # exactly and place outside the window never becomes text at
+                # all. It only answers for lines the text filter below would
+                # drop too (see _line_outside_window_bytes), so the rows this
+                # pass folds are exactly the rows it folded before.
+                if skip_raw is not None and skip_raw(raw):
+                    offset = end
+                    continue
                 try:
                     # Decoded before anything else, exactly as the text-mode
                     # readers do: a line no reader can decode stops them where
@@ -3782,8 +3796,9 @@ def _scan_usage_snapshot_window(r, since, until, pricing_on=None):
     """One pass over the log, keeping only the rows inside the window.
 
     Nothing is carried over here - a window moves with the clock - but the
-    pre-filter drops the parse for every line it can prove is outside it,
-    which is what keeps a cold day or week view cheap on a multi-day log.
+    pre-filter drops the parse for every line it can prove is outside it, and
+    its bytes-level half drops the decode of those lines as well, which is
+    what keeps a cold day or week view cheap on a multi-day log.
 
     The bounds reach the pre-filter through `or None` because that is the
     test the fold itself applies (`if since and at < since`): a bound of 0
@@ -3801,7 +3816,9 @@ def _scan_usage_snapshot_window(r, since, until, pricing_on=None):
         lambda row: _fold_usage_snapshot(row, snap, r, since, until, pricing_on,
                                          pricing=pricing),
         skip=lambda line: _line_outside_window(line, since or None,
-                                                 until or None))
+                                                 until or None),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since or None,
+                                                        until or None))
     if error is not None:
         log(f"usage snapshot read failed: {error}")
     return snap
@@ -4113,6 +4130,9 @@ def usage_timeseries_etag(realm=None, range=None, since=None, until=None,
 # and record_error put the timestamp first and json.dumps keeps that order -
 # which is what makes the window pre-filter below possible.
 _AT_PREFIX = '{"at": '
+# The same prefix as bytes: _line_outside_window_bytes() reads the undecoded
+# line, and deriving the bytes from the text keeps the two in step.
+_AT_PREFIX_B = _AT_PREFIX.encode("ascii")
 
 
 def _line_outside_window(line, lo, hi):
@@ -4154,6 +4174,57 @@ def _line_outside_window(line, lo, hi):
     if not ((lo is not None and at < lo) or (hi is not None and at > hi)):
         return False
     return line.find('"at"', end) < 0
+
+
+def _line_outside_window_bytes(raw, lo, hi):
+    """_line_outside_window() on the undecoded line: True only when the text
+    check would answer True too.
+
+    The scan reads bytes and only then decodes, so the same test can run
+    before the decode and a line it drops never becomes text at all - which
+    is the whole point, since a narrow window leaves most of a multi-day log
+    outside it. The rules are the text version's, read off the bytes: same
+    prefix, same first comma, same float-token requirement, same window
+    comparison, same "no later `"at"` key" test (see that docstring for what
+    each one is protecting).
+
+    One extra condition: the line has to be ASCII from end to end. Two things
+    ride on it. It makes the byte read exact - every character the text check
+    would see is the byte the check saw - and it is what keeps a line no
+    reader can decode out of the skip path. On the text path that line stops
+    the pass with UnicodeDecodeError before any filter runs (see
+    _scan_usage_from), so skipping it here would fold in rows the old pass
+    never reached. ASCII is a subset of UTF-8, so an all-ASCII line always
+    decodes, and a line with anything else in it returns False and is decoded
+    and filtered exactly as before.
+
+    False therefore means "decode it and check as before", never "this line
+    is inside the window". Bounds must be the ones handed to
+    _line_outside_window(): this check is only allowed to drop lines that one
+    drops.
+    """
+    if not raw.startswith(_AT_PREFIX_B):
+        return False
+    end = raw.find(b",", len(_AT_PREFIX_B))
+    if end < 0:
+        return False
+    token = raw[len(_AT_PREFIX_B):end]
+    # 46/101/69 are `.`/`e`/`E` as byte values. The test is spelled with int
+    # needles because on bytes an int needle is a plain single-byte scan
+    # (memchr), where `b"." in token` runs the general substring search - about
+    # four times the cost on a token this short, paid once per skipped line.
+    # The answer is the text version's either way.
+    if 46 not in token and 101 not in token and 69 not in token:
+        return False
+    try:
+        at = float(token)
+    except ValueError:
+        return False
+    if not ((lo is not None and at < lo) or (hi is not None and at > hi)):
+        return False
+    if raw.find(b'"at"', end) >= 0:
+        return False
+    return raw.isascii()
 
 
 def _usage_timeseries_scan(realm, lo, hi, step):
@@ -6135,7 +6206,8 @@ def _scan_usage_analytics_window(realm, since, until, stop_at=None, pricing_on=N
 
     _, error = _scan_usage_from(
         0, fold, stop_at=stop_at,
-        skip=lambda line: _line_outside_window(line, since, until))
+        skip=lambda line: _line_outside_window(line, since, until),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since, until))
     if error is not None:
         log("compute_usage_analytics failed: %s" % error)
     return maps
@@ -6842,7 +6914,9 @@ def _scan_usage_snapshot_window_days(r, since, pricing_on=None):
 
     _, error = _scan_usage_from(
         0, fold,
-        skip=lambda line: _line_outside_window(line, since or None, None))
+        skip=lambda line: _line_outside_window(line, since or None, None),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since or None,
+                                                        None))
     if error is not None:
         log(f"usage snapshot read failed: {error}")
     snap = _empty_stats()
@@ -6888,7 +6962,9 @@ def _scan_usage_snapshot_window_hours(r, since, pricing_on=None):
 
     _, error = _scan_usage_from(
         0, fold,
-        skip=lambda line: _line_outside_window(line, since or None, None))
+        skip=lambda line: _line_outside_window(line, since or None, None),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since or None,
+                                                        None))
     if error is not None:
         log(f"usage snapshot read failed: {error}")
     snap = _empty_stats()
@@ -6915,7 +6991,8 @@ def _scan_usage_analytics_window_days(realm, since, stop_at=None, pricing_on=Non
 
     _, error = _scan_usage_from(
         0, fold, stop_at=stop_at,
-        skip=lambda line: _line_outside_window(line, since, None))
+        skip=lambda line: _line_outside_window(line, since, None),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since, None))
     if error is not None:
         log("compute_usage_analytics failed: %s" % error)
     out = _new_analytics_maps()
@@ -6961,7 +7038,8 @@ def _scan_usage_analytics_window_hours(realm, since, until, stop_at=None,
 
     _, error = _scan_usage_from(
         0, fold, stop_at=stop_at,
-        skip=lambda line: _line_outside_window(line, since, until))
+        skip=lambda line: _line_outside_window(line, since, until),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since, until))
     if error is not None:
         log("compute_usage_analytics failed: %s" % error)
     out = _new_analytics_maps()

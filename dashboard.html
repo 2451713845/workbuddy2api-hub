@@ -2076,6 +2076,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "每个账号固定绑定一个出口代理槽。槽位地址变化时绑定账号自动跟随；禁用或删除后回退直连。": "每個帳號固定繫結一個出口代理槽。槽位地址變化時繫結帳號自動跟隨；禁用或刪除後回退直連。",
     "每日签到 (国内版)": "每日簽到 (國內版)",
     "Buddy 加油站签到": "Buddy 加油站簽到",
+    "本期 Buddy 加油站活动": "本期 Buddy 加油站活動",
+    "当前连续登录天数": "目前連續登入天數",
+    "WorkBuddy 成长计划": "WorkBuddy 成長計劃",
     "每日签到:": "每日簽到:",
     "每日签到: ": "每日簽到: ",
     "每账号每日上限（token）": "每帳號每日上限（token）",
@@ -3131,13 +3134,15 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     </div>
 
     <div class="cards" style="margin-bottom:16px;grid-template-columns:repeat(auto-fit,minmax(185px,1fr))">
-      <div class="card accent2">
-        <div class="k">Buddy 加油站签到</div>
+      <div class="card accent2" title="活动 Season: 10 (第 10 期)&#10;活动开始时间: 2026-09-30 00:00:00&#10;活动截止时间: 2026-10-15 23:59:59">
+        <div class="k">本期 Buddy 加油站活动</div>
         <div class="v" id="cnTodayCheckinState" style="font-size:17px;letter-spacing:-.2px">-</div>
+        <div style="font-size:11px;color:var(--dim);margin-top:4px">第 10 期 (至 10-15 23:59 止)</div>
       </div>
-      <div class="card">
-        <div class="k">连续打卡天数</div>
+      <div class="card" title="WorkBuddy 成长计划连续登录活跃天数；达到 7/14/28 天可兑换连登奖励">
+        <div class="k">当前连续登录天数</div>
         <div class="v" id="stkDays" style="color:var(--accent2)">-</div>
+        <div style="font-size:11px;color:var(--dim);margin-top:4px">WorkBuddy 成长计划</div>
       </div>
       <div class="card">
         <div class="k">补签卡余额</div>
@@ -5804,11 +5809,11 @@ function updateTaskPageCheckinCards(){
       };
       const doneCount = targetAccts.filter(isDone).length;
       if(doneCount === targetAccts.length){
-        chkStateEl.innerHTML = '<span style="color:#26bb82">今日已签到 (' + doneCount + '/' + targetAccts.length + ')</span>';
+        chkStateEl.innerHTML = '<span style="color:#26bb82">今日已领 (' + doneCount + '/' + targetAccts.length + ')</span>';
       } else if(doneCount > 0){
-        chkStateEl.innerHTML = '<span style="color:var(--accent)">部分已签到 (' + doneCount + '/' + targetAccts.length + ')</span>';
+        chkStateEl.innerHTML = '<span style="color:var(--accent)">部分已领 (' + doneCount + '/' + targetAccts.length + ')</span>';
       } else {
-        chkStateEl.innerHTML = '<span style="color:var(--warn)">今日未签到 (0/' + targetAccts.length + ')</span>';
+        chkStateEl.innerHTML = '<span style="color:var(--warn)">今日未领 (0/' + targetAccts.length + ')</span>';
       }
     }
   }

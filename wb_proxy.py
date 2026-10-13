@@ -9712,6 +9712,8 @@ def runtime_settings_view():
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
+        "daily_chat_model": wb_settings.daily_chat_model(ACCOUNTS_DIR),
+        "daily_chat_model_default": wb_accounts.DAILY_CHAT_MODEL,
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
         "remaining_priority_enabled":
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
@@ -16669,6 +16671,17 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_daily_chat_web(ACCOUNTS_DIR, raw)
             reply["daily_chat_web"] = raw
+        if "daily_chat_model" in payload:
+            raw = payload.get("daily_chat_model") or ""
+            # Empty clears the override back to the built-in id. Anything else
+            # has to look like a model id; a stray value here would be sent
+            # upstream on every daily run.
+            if not isinstance(raw, str) or len(raw) > 64 or \
+                    (raw and not re.match(r"^[A-Za-z0-9._:-]+$", raw)):
+                return self._error(400, "daily_chat_model must be a model id or empty",
+                                   "invalid_request_error")
+            wb_settings.set_daily_chat_model(ACCOUNTS_DIR, raw)
+            reply["daily_chat_model"] = raw
         if "local_web_tools" in payload:
             raw = payload.get("local_web_tools")
             if not isinstance(raw, bool):

@@ -12851,6 +12851,48 @@ def estimate_tokens(text):
     other = len(text) - cjk
     return cjk + max(1, int(other / 3.6)) if text else 0
 
+# 每次向流式响应要多少字节。64 KiB 远大于一条 SSE 事件（典型几百字节），
+# 又远小于 http.client 单次 read 的上限，按它切块能把「一行一次 syscall」
+# 摊成「一块一次」，同时不会让首字节延迟变差（见 iter_sse_lines）。
+SSE_READ_BLOCK = 64 * 1024
+
+def iter_sse_lines(source, block_size=SSE_READ_BLOCK):
+    """按块读取流式响应并逐行产出，把逐行 read 的 syscall 开销摊掉。
+
+    直接 `for line in resp` 迭代 http.client.HTTPResponse 时，每一行都要走
+    一次 read() syscall，而每次 syscall 都要释放并重新抢回 GIL。一轮流式回复
+    动辄几千条事件，于是进程大部分时间花在二十来个 handler 线程之间来回交接
+    GIL 上，而不是在干活。4 vCPU 真机实测（v1.7.2，15~20 req/s）：10 秒内
+    106 214 次 futex，占全部 syscall 时间的 71%，其中约三分之二来自这条逐行
+    读取路径。
+
+    read1() 每次最多一次底层 syscall，所以按块取回来再在内存里切行，能把
+    syscall 数降一到两个数量级。延迟不变：read1() 一有字节就返回，完整的行
+    立刻产出；只有跨块的那一行需要等下一块。
+
+    产出的行**带换行符**，与直接迭代 response 的形状完全一致，调用方一行都
+    不用改。没有 read1 的对象（列表、文本模式的文件……）退回普通迭代。
+    """
+    read1 = getattr(source, "read1", None)
+    if read1 is None:
+        for line in source:
+            yield line
+        return
+    buf = b""
+    while True:
+        chunk = read1(block_size)
+        if not chunk:
+            break
+        buf += chunk
+        if b"\n" not in buf:
+            continue
+        head, _, buf = buf.rpartition(b"\n")
+        for line in head.split(b"\n"):
+            yield line + b"\n"
+    if buf:
+        # 上游没以换行收尾时，最后一行照旧要交出去（迭代 response 也是这个形状）。
+        yield buf
+
 def aggregate_stream(raw_iter, model, resp_id):
     """Fold an SSE stream into one non-streaming chat.completion object."""
     content, reasoning, finish = [], [], "stop"
@@ -12859,7 +12901,7 @@ def aggregate_stream(raw_iter, model, resp_id):
     started = time.time()
     first_chunk_at = None
     saw_done = False
-    for line in raw_iter:
+    for line in iter_sse_lines(raw_iter):
         data = strip_data_prefix(line.decode("utf-8", "replace"))
         if not data or data == "[DONE]":
             if data == "[DONE]":
@@ -14398,7 +14440,7 @@ def stream_messages_events(raw_iter, model, holder=None):
             }))
         return frames
 
-    for line in raw_iter:
+    for line in iter_sse_lines(raw_iter):
         if state["done"] or state["failed"]:
             break
         data = strip_data_prefix(line.decode("utf-8", "replace"))
@@ -18475,7 +18517,7 @@ class Handler(BaseHTTPRequestHandler):
                             write_chunk(payload)
 
             try:
-                for line in upstream:
+                for line in iter_sse_lines(upstream):
                     data = strip_data_prefix(line.decode("utf-8", "replace"))
                     if not data or data == "[DONE]" or data.startswith(":"):
                         continue

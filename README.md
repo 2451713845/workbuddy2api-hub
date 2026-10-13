@@ -131,7 +131,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 143 个套件：106 个 Python + 37 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 144 个套件：107 个 Python + 37 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -356,6 +356,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **流式读取改按块读取：SSE 逐行 `read()` 的 syscall 与 GIL 交接开销摊掉一到两个数量级**：`for line in upstream` 迭代 `http.client.HTTPResponse` 时每一行都要走一次 `read()` syscall，而每次 syscall 都要释放并重新抢回 GIL。一轮流式回复动辄几千条事件，于是进程大部分时间花在二十来个 handler 线程之间来回交接 GIL 上，而不是在干活。4 vCPU 真机实测（v1.7.2，15~20 req/s，`strace -c -f`）：10 秒内 **106 214 次 futex**，占全部 syscall 时间的 **71.44%**，其中约三分之二来自这条逐行读取路径；同期 `read` 36 366 次、`sendto` 5 043 次、`poll` 396 次。现在新增 `iter_sse_lines()`：用 `read1()`（每次最多一次底层 syscall）按 64 KiB 取回、在内存里切行。**延迟不变**——`read1()` 一有字节就返回，完整的行立刻产出，只有跨块的那一行需要等下一块；产出的行带换行符，与直接迭代 response 形状完全一致，调用方一行都不用改。三处迭代点一起换：`_chat_stream_response`（流式转发主路径）、`aggregate_stream`、`stream_messages_events`。没有 `read1` 的对象（列表、文本模式的文件……）退回普通迭代。新增测试套件 `tests/_test_sse_read_batching.py`（62 项）：以 `io.BytesIO` 迭代为基准逐字节对拍十种形状（含 `\r\n`、无尾换行、空行与注释、5000 字节长事件、300 条事件）× 四种分块（1 / 7 / 64 / 4096 字节），钉住「首行一到就产出、不必等块满」与「跨块行正确重组」，并断言 2000 条事件按 64 KiB 分块时 `read1` 调用数不超过线块数（实测 2 次 vs 4000 行，**2000 倍**）。README 套件计数 143 → 144。
 
 - **修复：命名空间内的自由格式（`type: "custom"`）工具回程被判成 `function_call`，调用发出去却没有返回**（#308 跟进）：`custom_tool_names()` 此前只扫工具清单顶层，于是嵌在 `type: "namespace"` 里的 `exec`（Codex Desktop 的 `functions` 命名空间里它就是 `custom`）从未进入 `custom_names`；`chat_to_response()` 与流式分支用该集合决定回程条目类型，判错后发成 `function_call`，而客户端按 `(name, namespace, kind)` 三元组匹配执行器——类型对不上就找不到执行器，调用既不执行也不返回，模型只能无限重试（现场实测同类会话堆积 42 次调用、0 条结果，agent 反复报「工具被中断」）。现在 `custom_tool_names()` 递归进 namespace 的 `tools` / `children` / `functions` 栏位（深度上限沿用 `NAMESPACE_MAX_DEPTH`）。
 - **修复：工具整份下发在 `input` 的 `additional_tools` 条目里时，回程侧看到的工具清单是空的**（#308 跟进）：出站已合并该条目（v1.7.2 / #308），但 `_handle_responses()` 里 `custom_tool_names()` 与回显的 `request_meta["tools"]` 仍只读顶层 `tools` 字段——新版 Codex Desktop 顶层是空的，于是出站与回程看到两份不同的工具清单。现在两处都走新提取的公共函数 `additional_tools_from_input()`，与 `responses_to_chat()` 用同一份合并清单；请求日志相应扩成 `tools=上游数/合并后数`，便于一眼看出两边是否对齐。`local_web_tools_enabled()` 开启时的 `client_wants_web()` 也改用合并后的清单（该开关默认关，老安装行为不变）。

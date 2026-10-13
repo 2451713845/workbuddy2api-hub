@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.7.2-2496ED?style=flat-square" alt="Version 1.6.20"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.7.3-2496ED?style=flat-square" alt="Version 1.6.20"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -356,21 +356,9 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
-- **修复：便携包内脚本由于 Windows 构建环境被写成 CRLF 换行导致 macOS / Linux 启动失败**（#329）：Release 便携包在构建打包阶段对 *.sh 与 *.command 强制归一化为 LF 换行并赋予 0o755 可执行权限，解决 macOS 双击 start-wb-proxy.command 报 bad interpreter: /bin/bash^M 的问题；*.bat 脚本保持 CRLF；根目录补充 .gitattributes 统一全仓库换行规范。
 
-- **流式链路三处开销一起摊掉：SSE 逐行 `read()` 的 syscall、逐 chunk `sendall` 的 GIL 交还，以及每次建连重建 SSL context**：4 vCPU 真机实测（v1.7.2，15~20 req/s，`strace -c -f`）：10 秒内 **106 214 次 futex**，占全部 syscall 时间的 **71.44%**；同期 `read` 36 366 次（每一行一次）、`sendto` 5 043 次（每一个 chunk 一次）、`poll` 396 次。三处一起改：
-  - **读取按块**：新增 `iter_sse_lines()`，用 `read1()`（每次最多一次底层 syscall）按 64 KiB 取回、在内存里切行，取代 `for line in upstream`。**延迟不变**——`read1()` 一有字节就返回，完整的行立刻产出，只有跨块的那一行需要等下一块；产出的行带换行符，与直接迭代 response 形状完全一致，调用方一行都不用改。三处迭代点一起换：`_chat_stream_response`（流式转发主路径）、`aggregate_stream`、`stream_messages_events`。没有 `read1` 的对象（列表、文本模式的文件……）退回普通迭代。
-  - **写出按块**：`iter_sse_lines` 新增 `before_read` 钩子，在**每个可能阻塞的 `read1` 之前**调一次；`_chat_stream_response` 把事件攒进缓冲、就在这里一次写出。`wfile` 是 `wbufsize=0` 的**无缓冲**文件（`StreamRequestHandler` 默认），此前每个 chunk 直接落成一次 `sendall`——一次 syscall 加一次 GIL 交还。攒到块尾再写**不改变任何延迟**：块边界就是 socket 里当前已经有的全部字节，下一个字节一到就立刻产出；流尾与两条异常路径都补了 `flush_out()`。
-  - **TLS context 共享**：`http.client` 在 `context=None` 时**每建一条连接就调一次** `ssl._create_default_https_context()`，实测 `create_default_context()` 单次 **20.4ms**（解析 121 张 CA 证书）；而 OpenSSL 的客户端会话缓存挂在 `SSLContext` 上，每换一个新 context 就等于放弃 TLS session resumption，每次握手都退化成完整握手。新增 `wb_upstream_pool.shared_ssl_context()`（懒建、进程级唯一），`_new_connection()` 的两条 HTTPS 路径（直连 / 经代理 CONNECT 隧道）都传它。校验设置与 `create_default_context()` 的默认值逐项一致（`check_hostname=True`、`CERT_REQUIRED`、同一套系统 CA），**不放松任何校验**。
-  - 隔离 A/B（16 并发 × 48 请求 × 2000 事件，SSE 服务器与下游 sink 都跑在**独立进程**，只 strace 客户端；五轮取均值）：把「读上游 + 写下游」整条中继链一起量，三档分别是改前 / 只改读取 / 读取与写出都改——每请求 CPU **25.59ms → 19.24ms → 6.12ms**（只改读取 −25%，再加写出批量化 −68%，合计 **−76%**）；48 请求 96 000 事件下 `sendto` **96 048 → 96 048 → 288**、`poll` **97 491 → 96 432 → 672**、`futex` **1 485 946 → 1 257 184 → 12 640**、总 syscall **1 683 857 → 1 453 044 → 17 022**（**−99%**）。输出逐字节不变：48/48 请求的字节总数与上游宣告值完全一致。
-  - 测试：`tests/_test_sse_read_batching.py`（**72 项**）以 `io.BytesIO` 迭代为基准逐字节对拍十种形状（含 `\r\n`、无尾换行、空行与注释、5000 字节长事件、300 条事件）× 四种分块（1 / 7 / 64 / 4096 字节），钉住「首行一到就产出、不必等块满」「跨块行正确重组」「每次阻塞读之前写出缓冲必已排空」，并断言 2000 条事件按 64 KiB 分块时 `read1` 调用数与写出次数都降一个数量级以上（实测 2 次 / 1 次 vs 4000 行）；`tests/_test_shared_ssl_context.py`（**25 项**）钉住 context 只建一次、两条 HTTPS 路径都拿到同一个对象、CONNECT 隧道目标与端口不变、纯 http 不带 context，`check_hostname` / `verify_mode` / `minimum_version` / CA 集合与新建的默认 context 逐项相同，以及**默认 context 工厂被换掉时缓存自动作废**（`ssl._create_default_https_context` / `http.client._create_https_context` 这条 stdlib 接缝仍然有效）。README 套件计数 143 → 145。
+已发布版本的完整记录（v1.4.5 ~ v1.7.3，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
-- **修复：命名空间内的自由格式（`type: "custom"`）工具回程被判成 `function_call`，调用发出去却没有返回**（#308 跟进）：`custom_tool_names()` 此前只扫工具清单顶层，于是嵌在 `type: "namespace"` 里的 `exec`（Codex Desktop 的 `functions` 命名空间里它就是 `custom`）从未进入 `custom_names`；`chat_to_response()` 与流式分支用该集合决定回程条目类型，判错后发成 `function_call`，而客户端按 `(name, namespace, kind)` 三元组匹配执行器——类型对不上就找不到执行器，调用既不执行也不返回，模型只能无限重试（现场实测同类会话堆积 42 次调用、0 条结果，agent 反复报「工具被中断」）。现在 `custom_tool_names()` 递归进 namespace 的 `tools` / `children` / `functions` 栏位（深度上限沿用 `NAMESPACE_MAX_DEPTH`）。
-- **修复：工具整份下发在 `input` 的 `additional_tools` 条目里时，回程侧看到的工具清单是空的**（#308 跟进）：出站已合并该条目（v1.7.2 / #308），但 `_handle_responses()` 里 `custom_tool_names()` 与回显的 `request_meta["tools"]` 仍只读顶层 `tools` 字段——新版 Codex Desktop 顶层是空的，于是出站与回程看到两份不同的工具清单。现在两处都走新提取的公共函数 `additional_tools_from_input()`，与 `responses_to_chat()` 用同一份合并清单；请求日志相应扩成 `tools=上游数/合并后数`，便于一眼看出两边是否对齐。`local_web_tools_enabled()` 开启时的 `client_wants_web()` 也改用合并后的清单（该开关默认关，老安装行为不变）。
-- 回归测试：`tests/_test_custom_tools.py` 新增 `[13]`/`[14]`/`[15]` 三节（15 项，套件总数不变）：钉住嵌套 custom 的收集（含 `children` / `functions` 栏位）、嵌套 custom 往返成 `custom_tool_call` 且 `namespace` 正确、同命名空间内的普通 function 仍走 `function_call` 作反面对照，以及工具整份来自 `additional_tools` 时出站合并与回程取值一致。
-- **面板窗口限高：所有窗口（区块 + 日志终端）超高时在窗口内部滚动、标题行吸顶，高度在设置页可调**：面板里最长的区块（真机「签到与活跃记录」6801px）会把整页拉得很长，翻过它要滑很久。现在每个窗口超过限高时改为**窗口内部滚动**：区块挂 `max-height:var(--win-max-h)` + `overflow-y:auto`，标题行吸顶——区块自带的 `padding-top` 归零、挪给吸顶首行（否则吸顶后顶部漏出 18px 滚动内容），首行 `margin` 折成 `padding`（下方那条缝同理），窄屏（≤860px）两处一起缩到 14px；日志终端（自带 620px 高度）也在同一变量之下，限高调得比它小时同样生效。三条规则全部挂在 `body.win-capped` 之下，限高关掉时整条不生效、版式与从前逐像素一致。限高存在服务端 `accounts/settings.json` 的 `section_max_height`（与页签显示、账号折叠同一套通道，不用 localStorage），默认 **640px**、**0 = 不限**、上限 4000，设置页新增「面板窗口限高」区块（输入框 + 保存，附英文/正体词条）。边界口径：字段缺失或存坏回落默认 640px（与页签显示、账号折叠的坏值口径一致）；`true` 是 `int` 子类、显式挡掉——否则存成 1px 把窗口压成一条缝；`1e400` 读成 `inf` 时 `int()` 抛的 `OverflowError` 一并挡掉（否则 `/settings` 直接 500）；负的分数像素（`int(-0.5)` = 0）拒绝而不是静默关掉限高；面板侧空输入框同样拦下（`Number('')` 是 0，放过去就是「清空即关闭」）。新增测试套件 `tests/_test_section_max_height.py` + `tests/_test_section_max_height.js`；README 套件计数 141 → 143。
-
-已发布版本的完整记录（v1.4.5 ~ v1.7.2，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 ## 七、致谢与引用声明 (Credits & References)
 
 协议兼容、风控规避与任务链路设计过程中，参考并吸纳了以下开源项目的经验与逆向成果：

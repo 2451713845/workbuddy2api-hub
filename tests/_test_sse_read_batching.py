@@ -159,5 +159,90 @@ check("prefix stripping works on the yielded lines",
       == ['{"a": 1}', "", "[DONE]", ""],
       repr(got))
 
+print("-- before_read: the hook that lets a caller batch its writes --")
+
+calls = [0]
+src = FakeStream([b"a\n", b"b\n", b"c\n"])
+got = list(P.iter_sse_lines(src, before_read=lambda: calls.__setitem__(0, calls[0] + 1)))
+check("lines still come out intact with a hook attached",
+      got == [b"a\n", b"b\n", b"c\n"], repr(got))
+check("the hook fires exactly once per read1",
+      calls[0] == src.read1_calls,
+      "%d hook calls vs %d read1 calls" % (calls[0], src.read1_calls))
+
+src = FakeStream([b"a\n", b"b\n"])
+list(P.iter_sse_lines(src))
+check("read1_calls is 3 for 2 chunks (the last one returns b'')",
+      src.read1_calls == 3, src.read1_calls)
+
+# The invariant that makes batching latency-free: whenever the generator is
+# about to block on the socket, the caller's buffer has already been drained.
+# Nothing sits in memory waiting for data that has not arrived.
+drained = []
+written = []
+src = FakeStream([b"data: a\n", b"data: b\n", b"data: c\n"])
+buf = []
+
+
+def flush_out():
+    if buf:
+        written.append(b"".join(buf))
+        del buf[:]
+
+
+def before_read():
+    # The hook runs immediately before read1(). Draining here is exactly what
+    # makes batching latency-free, so record the size *after* the drain.
+    flush_out()
+    drained.append(len(buf))
+
+
+for line in P.iter_sse_lines(src, before_read=before_read):
+    buf.append(line)
+flush_out()
+check("the write buffer is empty whenever a blocking read begins",
+      drained and all(n == 0 for n in drained), drained)
+check("every event still reached the wire",
+      b"".join(written) == b"data: a\ndata: b\ndata: c\n", written)
+
+
+def batched(data, chunk_size):
+    """Mimic _chat_stream_response: buffer events, flush on before_read."""
+    wire = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)] or [b""]
+    src = FakeStream(wire)
+    writes = []
+    pending = []
+
+    def flush():
+        if pending:
+            writes.append(b"".join(pending))
+            del pending[:]
+
+    for line in P.iter_sse_lines(src, before_read=flush):
+        pending.append(b"data: " + line)
+    flush()
+    return writes, len(wire)
+
+
+print("-- batching: one write per read block, not one per event --")
+
+events = b"".join(b"data: {\"i\":%d}\n\n" % i for i in range(2000))
+expected = b"".join(b"data: " + l for l in io.BytesIO(events))
+for chunk_size in (8192, 65536):
+    writes, wire = batched(events, chunk_size)
+    check("%d-byte blocks: batched output is byte-identical" % chunk_size,
+          b"".join(writes) == expected)
+    check("%d-byte blocks: at most one write per block" % chunk_size,
+          len(writes) <= wire + 1,
+          "%d writes over %d blocks" % (len(writes), wire))
+
+writes, wire = batched(events, 65536)
+n_events = len(list(io.BytesIO(events)))
+print("    4000 SSE lines / 64 KiB blocks: %d writes vs %d unbuffered writes (%.0fx fewer)"
+      % (len(writes), n_events, float(n_events) / max(1, len(writes))))
+check("batching removes at least an order of magnitude of writes",
+      n_events >= 10 * len(writes),
+      "%d lines, %d writes" % (n_events, len(writes)))
+
 print("PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

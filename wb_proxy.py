@@ -12856,7 +12856,7 @@ def estimate_tokens(text):
 # 摊成「一块一次」，同时不会让首字节延迟变差（见 iter_sse_lines）。
 SSE_READ_BLOCK = 64 * 1024
 
-def iter_sse_lines(source, block_size=SSE_READ_BLOCK):
+def iter_sse_lines(source, block_size=SSE_READ_BLOCK, before_read=None):
     """按块读取流式响应并逐行产出，把逐行 read 的 syscall 开销摊掉。
 
     直接 `for line in resp` 迭代 http.client.HTTPResponse 时，每一行都要走
@@ -12872,14 +12872,22 @@ def iter_sse_lines(source, block_size=SSE_READ_BLOCK):
 
     产出的行**带换行符**，与直接迭代 response 的形状完全一致，调用方一行都
     不用改。没有 read1 的对象（列表、文本模式的文件……）退回普通迭代。
+
+    `before_read` 在每个**可能阻塞的 read1 之前**调一次，调用方可以在这里把
+    攒下的写出掉：一个读取块里的事件因此合成一次 write，而下一个字节一到就
+    立刻产出——延迟与逐块写完全一样，只是不再一个 chunk 一次 sendall。
     """
     read1 = getattr(source, "read1", None)
     if read1 is None:
         for line in source:
+            if before_read is not None:
+                before_read()
             yield line
         return
     buf = b""
     while True:
+        if before_read is not None:
+            before_read()
         chunk = read1(block_size)
         if not chunk:
             break
@@ -18496,14 +18504,26 @@ class Handler(BaseHTTPRequestHandler):
             leak_filter = LeakedToolCallStreamFilter()
             synthesized_calls = False
             pending_finish = None
+            # 写出缓冲：一个读取块里的事件合成一次 write。
+            # wfile 是 wbufsize=0 的**无缓冲**文件（StreamRequestHandler 默认），
+            # 每个 chunk 直接落成一次 sendall —— 一次 syscall 加一次 GIL 交还。
+            # 真机 10 秒 5043 次 sendto，对应约一万次 futex，占全部 futex 的一成。
+            # 攒到「下一个可能阻塞的读之前」再写，不改变任何延迟：块边界就是
+            # socket 里当前已经有的全部字节（见 iter_sse_lines 的 before_read）。
+            out_buf = []
+
+            def flush_out():
+                if out_buf:
+                    self.wfile.write(b"".join(out_buf))
+                    self.wfile.flush()
+                    del out_buf[:]
 
             def write_chunk(payload):
                 nonlocal emitted, first_ms
                 if first_ms is None:
                     first_ms = int((time.time() - t_start) * 1000)
                 emitted = True
-                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                self.wfile.flush()
+                out_buf.append(f"data: {payload}\n\n".encode("utf-8"))
 
             def release(actions):
                 nonlocal synthesized_calls
@@ -18517,7 +18537,7 @@ class Handler(BaseHTTPRequestHandler):
                             write_chunk(payload)
 
             try:
-                for line in iter_sse_lines(upstream):
+                for line in iter_sse_lines(upstream, before_read=flush_out):
                     data = strip_data_prefix(line.decode("utf-8", "replace"))
                     if not data or data == "[DONE]" or data.startswith(":"):
                         continue
@@ -18580,11 +18600,13 @@ class Handler(BaseHTTPRequestHandler):
                             gen_ms=(wall - first_ms) if first_ms is not None else None,
                              fp=fp, outcome="upstream_aborted", key=self._key_id())
                 try:
+                    flush_out()
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
                 except Exception:
                     pass
                 return
+            flush_out()
             if not emitted:
                 err = json.dumps({"error": {"message": "empty upstream stream", "type": "server_error"}})
                 self.wfile.write(f"data: {err}\n\n".encode("utf-8"))

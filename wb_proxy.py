@@ -12869,6 +12869,56 @@ def estimate_tokens(text):
     other = len(text) - cjk
     return cjk + max(1, int(other / 3.6)) if text else 0
 
+# 每次向流式响应要多少字节。64 KiB 远大于一条 SSE 事件（典型几百字节），
+# 又远小于 http.client 单次 read 的上限，按它切块能把「一行一次 syscall」
+# 摊成「一块一次」，同时不会让首字节延迟变差（见 iter_sse_lines）。
+SSE_READ_BLOCK = 64 * 1024
+
+def iter_sse_lines(source, block_size=SSE_READ_BLOCK, before_read=None):
+    """按块读取流式响应并逐行产出，把逐行 read 的 syscall 开销摊掉。
+
+    直接 `for line in resp` 迭代 http.client.HTTPResponse 时，每一行都要走
+    一次 read() syscall，而每次 syscall 都要释放并重新抢回 GIL。一轮流式回复
+    动辄几千条事件，于是进程大部分时间花在二十来个 handler 线程之间来回交接
+    GIL 上，而不是在干活。4 vCPU 真机实测（v1.7.2，15~20 req/s）：10 秒内
+    106 214 次 futex，占全部 syscall 时间的 71%，其中约三分之二来自这条逐行
+    读取路径。
+
+    read1() 每次最多一次底层 syscall，所以按块取回来再在内存里切行，能把
+    syscall 数降一到两个数量级。延迟不变：read1() 一有字节就返回，完整的行
+    立刻产出；只有跨块的那一行需要等下一块。
+
+    产出的行**带换行符**，与直接迭代 response 的形状完全一致，调用方一行都
+    不用改。没有 read1 的对象（列表、文本模式的文件……）退回普通迭代。
+
+    `before_read` 在每个**可能阻塞的 read1 之前**调一次，调用方可以在这里把
+    攒下的写出掉：一个读取块里的事件因此合成一次 write，而下一个字节一到就
+    立刻产出——延迟与逐块写完全一样，只是不再一个 chunk 一次 sendall。
+    """
+    read1 = getattr(source, "read1", None)
+    if read1 is None:
+        for line in source:
+            if before_read is not None:
+                before_read()
+            yield line
+        return
+    buf = b""
+    while True:
+        if before_read is not None:
+            before_read()
+        chunk = read1(block_size)
+        if not chunk:
+            break
+        buf += chunk
+        if b"\n" not in buf:
+            continue
+        head, _, buf = buf.rpartition(b"\n")
+        for line in head.split(b"\n"):
+            yield line + b"\n"
+    if buf:
+        # 上游没以换行收尾时，最后一行照旧要交出去（迭代 response 也是这个形状）。
+        yield buf
+
 def aggregate_stream(raw_iter, model, resp_id):
     """Fold an SSE stream into one non-streaming chat.completion object."""
     content, reasoning, finish = [], [], "stop"
@@ -12877,7 +12927,7 @@ def aggregate_stream(raw_iter, model, resp_id):
     started = time.time()
     first_chunk_at = None
     saw_done = False
-    for line in raw_iter:
+    for line in iter_sse_lines(raw_iter):
         data = strip_data_prefix(line.decode("utf-8", "replace"))
         if not data or data == "[DONE]":
             if data == "[DONE]":
@@ -14416,7 +14466,7 @@ def stream_messages_events(raw_iter, model, holder=None):
             }))
         return frames
 
-    for line in raw_iter:
+    for line in iter_sse_lines(raw_iter):
         if state["done"] or state["failed"]:
             break
         data = strip_data_prefix(line.decode("utf-8", "replace"))
@@ -18483,14 +18533,26 @@ class Handler(BaseHTTPRequestHandler):
             leak_filter = LeakedToolCallStreamFilter()
             synthesized_calls = False
             pending_finish = None
+            # 写出缓冲：一个读取块里的事件合成一次 write。
+            # wfile 是 wbufsize=0 的**无缓冲**文件（StreamRequestHandler 默认），
+            # 每个 chunk 直接落成一次 sendall —— 一次 syscall 加一次 GIL 交还。
+            # 真机 10 秒 5043 次 sendto，对应约一万次 futex，占全部 futex 的一成。
+            # 攒到「下一个可能阻塞的读之前」再写，不改变任何延迟：块边界就是
+            # socket 里当前已经有的全部字节（见 iter_sse_lines 的 before_read）。
+            out_buf = []
+
+            def flush_out():
+                if out_buf:
+                    self.wfile.write(b"".join(out_buf))
+                    self.wfile.flush()
+                    del out_buf[:]
 
             def write_chunk(payload):
                 nonlocal emitted, first_ms
                 if first_ms is None:
                     first_ms = int((time.time() - t_start) * 1000)
                 emitted = True
-                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                self.wfile.flush()
+                out_buf.append(f"data: {payload}\n\n".encode("utf-8"))
 
             def release(actions):
                 nonlocal synthesized_calls
@@ -18504,7 +18566,7 @@ class Handler(BaseHTTPRequestHandler):
                             write_chunk(payload)
 
             try:
-                for line in upstream:
+                for line in iter_sse_lines(upstream, before_read=flush_out):
                     data = strip_data_prefix(line.decode("utf-8", "replace"))
                     if not data or data == "[DONE]" or data.startswith(":"):
                         continue
@@ -18567,11 +18629,13 @@ class Handler(BaseHTTPRequestHandler):
                             gen_ms=(wall - first_ms) if first_ms is not None else None,
                              fp=fp, outcome="upstream_aborted", key=self._key_id())
                 try:
+                    flush_out()
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
                 except Exception:
                     pass
                 return
+            flush_out()
             if not emitted:
                 err = json.dumps({"error": {"message": "empty upstream stream", "type": "server_error"}})
                 self.wfile.write(f"data: {err}\n\n".encode("utf-8"))

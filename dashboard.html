@@ -1044,7 +1044,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '导出失败:': 'Export failed:',
     '导出日志失败:': 'Exporting logs failed:',
     '导出账号': 'Export accounts',
-    '将为每个已启用的国际版账号各建一个网页端会话。 这会真的起一次任务并消耗该账号少量积分，用于计入官方「每日活跃」。继续？': 'One web-side session will be created for every enabled Global account. This really runs a task and spends a few credits from that account, to count toward the official daily activity. Continue?',
+    '将为每个已启用的国际版账号各建一个网页端会话。 这会真的起一次任务，用于计入官方「每日活跃」；活跃走免费模型（0.00x）。继续？': 'One web-side session will be created for every enabled Global account. This really runs a task, to count toward the official daily activity; the activity now runs on a free model (0.00x). Continue?',
     '将新增': 'Will add',
     '将覆盖': 'Will overwrite',
     '将覆盖同 UID 的现有账号（含其凭证），确定继续？': 'Existing accounts with the same UID, including their credentials, will be overwritten. Continue?',
@@ -1968,8 +1968,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "导出日志失败:": "匯出日誌失敗:",
     "导出日志失败: ": "匯出日誌失敗: ",
     "导出账号": "匯出帳號",
-    "将为每个已启用的国际版账号各建一个网页端会话。 这会真的起一次任务并消耗该账号少量积分，用于计入官方「每日活跃」。继续？": "將為每個已啟用的國際版帳號各建一個網頁端會話。 這會真的起一次任務並消耗該帳號少量積分，用於計入官方「每日活躍」。繼續？",
-    "将为每个已启用的国际版账号各建一个网页端会话。\\n\\n这会真的起一次任务并消耗该账号少量积分，用于计入官方「每日活跃」。继续？": "將為每個已啟用的國際版帳號各建一個網頁端會話。\\n\\n這會真的起一次任務並消耗該帳號少量積分，用於計入官方「每日活躍」。繼續？",
+    "将为每个已启用的国际版账号各建一个网页端会话。 这会真的起一次任务，用于计入官方「每日活跃」；活跃走免费模型（0.00x）。继续？": "將為每個已啟用的國際版帳號各建一個網頁端會話。 這會真的起一次任務，用於計入官方「每日活躍」；活躍預設走免費模型（0.00x）。繼續？",
+    "将为每个已启用的国际版账号各建一个网页端会话。\\n\\n这会真的起一次任务，用于计入官方「每日活跃」；活跃走免费模型（0.00x）。继续？": "將為每個已啟用的國際版帳號各建一個網頁端會話。\\n\\n這會真的起一次任務，用於計入官方「每日活躍」；活躍走免費模型（0.00x）。繼續？",
     "将覆盖同 UID 的现有账号（含其凭证），确定继续？": "將覆蓋同 UID 的現有帳號（含其憑證），確定繼續？",
     "将该账号的出站身份切换为": "將該帳號的出站身份切換為",
     "将该账号的出站身份切换为 ": "將該帳號的出站身份切換為 ",
@@ -4970,9 +4970,9 @@ async function doDailyChat(btn){
 }
 
 /* 网页通道打卡：只建网页端会话（官方每日活跃只认网页端对话）。
- * 会真的起一次任务、消耗该账号少量积分，所以先确认一次。 */
+ * 会真的起一次任务，所以先确认一次。 */
 async function doDailyChatWeb(btn){
-  if(!confirm('将为每个已启用的国际版账号各建一个网页端会话。\n\n这会真的起一次任务并消耗该账号少量积分，用于计入官方「每日活跃」。继续？')) return;
+  if(!confirm('将为每个已启用的国际版账号各建一个网页端会话。\n\n这会真的起一次任务，用于计入官方「每日活跃」；活跃走免费模型（0.00x）。继续？')) return;
   btn.disabled = true; const ot = btn.textContent; btn.textContent = "打卡中...";
   try {
     const r = await postJSON("/accounts/daily-chat-web", {});

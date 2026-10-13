@@ -4933,8 +4933,8 @@ def _recent_index_enabled():
 
     与 WB_USAGE_CACHE 同款：每次调用读环境变量，不在导入时定死。
     """
-    return os.environ.get("WB_RECENT_INDEX", "1").strip().lower() not in (
-        "0", "false", "no", "off")
+    return os.environ.get("WB_RECENT_INDEX", "0").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 def _recent_index_min_bytes():

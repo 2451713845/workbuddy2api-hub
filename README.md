@@ -11,7 +11,7 @@
 
 把腾讯 **[www.workbuddy.ai](https://www.workbuddy.ai)**（国际版）与 **[codebuddy.cn](https://www.codebuddy.cn)**（国内版）的原生服务封装成标准 OpenAI 兼容接口（Chat Completions / Responses）与原生 Anthropic Messages 接口，并补齐多账号调度与运维能力：
 
-- **开箱即用**：绿色包自带精简 Python，双击脚本即启；
+- **开箱即用**：绿色包自带精简 Python（Windows），双击脚本即启；
 - **双区域独立路由**：国际版 / 国内版各自配置与调度，看板一键切换，状态落盘；
 - **三协议**：Chat Completions、Responses API（Codex）、原生 Anthropic Messages（Claude Code / Anthropic SDK）；
 - **模型目录对齐官方桌面端**：剔除补全通道与专线变体，能力与规格按桌面端宣告，上游新模型无需发版即进 `/v1/models`；
@@ -356,6 +356,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+- **修复：便携包内脚本由于 Windows 构建环境被写成 CRLF 换行导致 macOS / Linux 启动失败**（#329）：Release 便携包在构建打包阶段对 *.sh 与 *.command 强制归一化为 LF 换行并赋予 0o755 可执行权限，解决 macOS 双击 start-wb-proxy.command 报 bad interpreter: /bin/bash^M 的问题；*.bat 脚本保持 CRLF；根目录补充 .gitattributes 统一全仓库换行规范。
 
 - **流式链路三处开销一起摊掉：SSE 逐行 `read()` 的 syscall、逐 chunk `sendall` 的 GIL 交还，以及每次建连重建 SSL context**：4 vCPU 真机实测（v1.7.2，15~20 req/s，`strace -c -f`）：10 秒内 **106 214 次 futex**，占全部 syscall 时间的 **71.44%**；同期 `read` 36 366 次（每一行一次）、`sendto` 5 043 次（每一个 chunk 一次）、`poll` 396 次。三处一起改：
   - **读取按块**：新增 `iter_sse_lines()`，用 `read1()`（每次最多一次底层 syscall）按 64 KiB 取回、在内存里切行，取代 `for line in upstream`。**延迟不变**——`read1()` 一有字节就返回，完整的行立刻产出，只有跨块的那一行需要等下一块；产出的行带换行符，与直接迭代 response 形状完全一致，调用方一行都不用改。三处迭代点一起换：`_chat_stream_response`（流式转发主路径）、`aggregate_stream`、`stream_messages_events`。没有 `read1` 的对象（列表、文本模式的文件……）退回普通迭代。

@@ -1310,6 +1310,19 @@ class Account(object):
             "User-Agent": WEB_USER_AGENT,
         }
 
+    def daily_chat_model(self):
+        """Which model this account's daily activity runs on.
+
+        The panel's setting wins when set; otherwise the built-in free id. Both
+        legs (the desktop-identity completion and the web conversation) read
+        this, so one setting moves the whole activity.
+        """
+        if self.path:
+            picked = wb_settings.daily_chat_model(os.path.dirname(self.path))
+            if picked:
+                return picked
+        return DAILY_CHAT_MODEL
+
     def daily_chat_web(self, prompt=None, trigger="unknown"):
         """网页通道的每日活跃会话（issue #75 / #59 / #90）。
 
@@ -1332,9 +1345,10 @@ class Account(object):
 
     def _daily_chat_web_upstream(self, prompt=None):
         """网页通道的实际流程；返回形状见 daily_chat_web。"""
+        model = self.daily_chat_model()
         body = {
             "prompt": prompt or DAILY_CHAT_WEB_PROMPT,
-            "model": DAILY_CHAT_MODEL,
+            "model": model,
             # 网页端建会话时固定带上这两项（抓包所得），保持请求形态一致。
             "conversationOrigin": "workbuddy-app",
             "plugins": [{"name": "weixinpay", "marketplace": "codebuddy-builtin"}],
@@ -1379,7 +1393,8 @@ class Account(object):
             link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
             WEB_USER_AGENT,
             poll_status=lambda: self._web_conversation_status(conversation),
-            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy)
+            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy,
+            model=model)
         result["conversation"] = conversation
         if result.get("ok"):
             result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
@@ -1425,7 +1440,7 @@ class Account(object):
         url = self.chat_base_url() + wb_proxy.CHAT_PATH
         headers = self.headers("chat")
         body = {
-            "model": DAILY_CHAT_MODEL,
+            "model": self.daily_chat_model(),
             "messages": [{"role": "user", "content": "Hi"}],
             "stream": True,
             "max_tokens": 10,

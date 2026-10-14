@@ -10427,6 +10427,9 @@ def curate_remote_catalog(realm, ids, meta=None):
                 continue
         elif (mid + "-f") in known and free(mid + "-f") and not free(mid):
             continue
+        # 无倍率模型隐藏：未配置有效 credits（内置表无、远程 meta 也无）不进入对外目录
+        if not credits.get(mid):
+            continue
         out.append(mid)
     return out
 

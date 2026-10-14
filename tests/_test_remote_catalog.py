@@ -292,8 +292,9 @@ class RemoteCatalogTests(unittest.TestCase):
     def test_cached_desktop_file_drives_the_list_without_the_endpoint(self):
         P.fetch_remote_product_config = lambda realm: None
         payload = {"agents": [{"name": "cli",
-                               "models": CN_IDS + ["new-model-9"]}],
-                   "models": [{"id": "hy3", "credits": "x0.00"}]}
+                               "models": CN_IDS + ["new-model-9", "uncredited-model"]}],
+                   "models": [{"id": "hy3", "credits": "x0.00"},
+                              {"id": "new-model-9", "credits": "x1.50"}]}
         path = os.path.join(_TMP, "acc-product-config-v3.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh)
@@ -302,7 +303,8 @@ class RemoteCatalogTests(unittest.TestCase):
         ids = [m for m, _ in P.fetch_models("cn")]
         self.assertEqual(ids[0], "hy4-preview-f")
         self.assertNotIn("auto", ids)
-        self.assertIn("new-model-9", ids)   # live-only name ships, no release
+        self.assertIn("new-model-9", ids)   # live-only name with credits ships, no release
+        self.assertNotIn("uncredited-model", ids)  # unpriced model is hidden until credits configured
 
 
 if __name__ == "__main__":

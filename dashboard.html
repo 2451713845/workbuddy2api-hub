@@ -283,6 +283,13 @@ a:hover{text-decoration:underline}
 .realm-filter{display:inline-flex;gap:6px;margin-left:8px}
 .realm-filter button{background:var(--panel2);border:1px solid var(--line);color:var(--dim);padding:3px 9px;font-size:11px}
 .realm-filter button.active{border-color:var(--accent);color:var(--accent);background:var(--panel)}
+/* 账号页页头的版本视图切换：与顶部主菜单同一套胶囊外观，只是按版本着色——
+   国际版走强调色、国内版走红色，与网关页那两张卡片一眼能对上。 */
+.realm-switch{display:inline-flex;gap:4px;background:var(--panel2);padding:4px;border-radius:10px;border:1px solid var(--line);flex:0 0 auto}
+.realm-switch button{background:transparent;border:1px solid transparent;color:var(--dim);padding:5px 13px;border-radius:7px;font-size:12px;font-weight:500;cursor:pointer;transition:all .15s ease}
+.realm-switch button:hover{color:var(--fg);background:var(--panel)}
+.realm-switch button.active{background:var(--panel);color:var(--accent);border-color:var(--accent);box-shadow:var(--shadow-sm);font-weight:600}
+.realm-switch button.active#accountsRealmCn{color:#dc2626;border-color:#ef4444}
 
 .realm-card{
   background:var(--panel);border:1px solid var(--line);border-radius:12px;
@@ -381,6 +388,7 @@ a:hover{text-decoration:underline}
 [data-theme="dark"] .cool-pill{color:#fbbf24;background:rgba(245,158,11,.18);border-color:rgba(245,158,11,.38)}
 [data-theme="dark"] .realm-badge-intl{color:#38bdf8;background:rgba(2,132,199,.2);border-color:rgba(2,132,199,.4)}
 [data-theme="dark"] .realm-badge-cn{color:#f87171;background:rgba(220,38,38,.2);border-color:rgba(220,38,38,.4)}
+[data-theme="dark"] .realm-switch button.active#accountsRealmCn{color:#f87171;border-color:#f87171}
 [data-theme="dark"] .modal-mask{background:rgba(0,0,0,.65)}
 /* The page sections are toggled by a class so the inline head script can
    choose one before the body is parsed, avoiding a flash of the wrong
@@ -1156,6 +1164,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '当前生效': 'In effect',
     '当前系统（': 'Current OS (',
     '当前视图': 'Current view',
+    '版本视图': 'Realm view',
     '当前账号正常': 'The current accounts are healthy',
     '待解码的凭证（加密存储）': 'Credentials to decrypt (stored encrypted)',
     '待领奖': 'Reward pending',
@@ -2045,6 +2054,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "当前范围内最近消耗积分（credit &gt; 0）的请求。": "目前範圍內最近消耗積分（credit &gt; 0）的請求。",
     "当前范围没有请求数据": "目前範圍沒有請求資料",
     "当前视图": "目前檢視",
+    "版本视图": "版本檢視",
     "当前账号正常": "目前帳號正常",
     "待解码的凭证（加密存储）": "待解碼的憑證（加密儲存）",
     "所有已启用账号都已绑定代理出口": "所有已啟用帳號都已繫結代理出口",
@@ -3034,10 +3044,22 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   </div><!-- /pageGateway -->
   
   <div id="pageAccounts" class="main-page">
-  <!-- 页面头部：标题 + 一行说明，与其它页面的头部结构保持一致 -->
-  <div style="margin-bottom:16px">
-    <h2 style="margin:0;font-size:16px;color:var(--fg)">账号</h2>
-    <div style="font-size:12px;color:var(--dim);margin-top:4px">管理账号池：添加/导入/导出、启用停用、凭证与积分刷新、代理出口绑定，以及签到与每日活跃记录。</div>
+  <!-- 页面头部：标题 + 一行说明，与其它页面的头部结构保持一致；右侧是本页的
+       版本视图切换（与网关页那两张出口卡片同一份状态，见 updateUI）。 -->
+  <div id="accountsHeader" style="margin-bottom:16px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0;font-size:16px;color:var(--fg)">账号</h2>
+      <div style="font-size:12px;color:var(--dim);margin-top:4px">管理账号池：添加/导入/导出、启用停用、凭证与积分刷新、代理出口绑定，以及签到与每日活跃记录。</div>
+    </div>
+    <!-- 版本视图切换：账号列表、「当前禁用」与签到记录都按当前视图区域取，所以
+         这一页自己得有个入口，不必为了换版本跑回网关页。它切的是视图
+         （window.VIEW_REALM），与网关页两张卡片的点击完全等价；改网关默认出口
+         仍然是网关页那张卡片上的按钮，两者是不同的事。合并模式下账号区块搬到
+         网关页，这个开关跟着搬（见 applyAccountsTabLayout），两种布局都在。 -->
+    <div id="accountsRealmSwitch" class="realm-switch" role="group" aria-label="版本视图">
+      <button type="button" id="accountsRealmIntl" onclick="switchViewRealm('intl')" aria-pressed="false">国际版</button>
+      <button type="button" id="accountsRealmCn" onclick="switchViewRealm('cn')" aria-pressed="false">国内版</button>
+    </div>
   </div>
   <!-- 拆分模式下三个区块的落点（页头之后、原顺序）；合并模式搬走之后这里就空着 -->
   <span id="accountsHomeAnchor" hidden></span>
@@ -4405,6 +4427,19 @@ function updateUI(){
   if(vbIntl) vbIntl.style.display = isIntlView ? "inline-block" : "none";
   const vbCn = document.getElementById("tabCnViewBadge");
   if(vbCn) vbCn.style.display = !isIntlView ? "inline-block" : "none";
+
+  // 账号页页头的版本切换与上面两张卡片同一份状态（VIEW_REALM），所以两边永远
+  // 一起亮：在账号页切过去，回网关页看到的就是刚切的那一版，反之亦然。
+  const rsIntl = document.getElementById("accountsRealmIntl");
+  if(rsIntl){
+    rsIntl.classList.toggle("active", isIntlView);
+    rsIntl.setAttribute("aria-pressed", isIntlView ? "true" : "false");
+  }
+  const rsCn = document.getElementById("accountsRealmCn");
+  if(rsCn){
+    rsCn.classList.toggle("active", !isIntlView);
+    rsCn.setAttribute("aria-pressed", !isIntlView ? "true" : "false");
+  }
 
   // 区块标题上的出口标签：这几个区块的内容都按当前视图区域取（账号、禁用汇总、
   // 最近请求、模型清单），标出来免得把国际版的数字看成全局的。用 <em> 承载：
@@ -8539,6 +8574,20 @@ function applyAccountsTabLayout(separate){
   if(!pageGateway || !pageAccounts) return _accountsSeparateTab;
 
   const sections = accountsPageSections();
+  // 版本切换跟着账号区块走：拆分时回到账号页页头右侧，合并时搬到网关页的账号
+  // 区块正上方。合并模式下网关页最上面那两张出口卡片也能切版本，但账号区在页面
+  // 中段，要换一版得先滚回页首——跟着搬一次就不必了。
+  // 先摆它再摆区块：两者都是「插到锚点前面」，谁先插谁在前，顺序才是控件 → 区块。
+  const realmSwitch = document.getElementById('accountsRealmSwitch');
+  if(realmSwitch){
+    if(_accountsSeparateTab){
+      const home = document.getElementById('accountsHeader');
+      if(home && realmSwitch.parentNode !== home) home.appendChild(realmSwitch);
+    } else {
+      insertBeforeAnchor([realmSwitch], document.getElementById('accountsSectionsAnchor'));
+    }
+  }
+
   if(_accountsSeparateTab){
     // 两个页签：区块回账号页的页头之后，按原顺序。
     insertBeforeAnchor(sections, document.getElementById('accountsHomeAnchor'));

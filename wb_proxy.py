@@ -17276,6 +17276,7 @@ class Handler(BaseHTTPRequestHandler):
         failure message is appended to `warnings` only for the soft-fallback
         case; hard failures raise via the caller's 400 mapping.
         """
+        wb_agents = agents_module()
         key_id = str(payload.get("key_id") or "").strip()
         if key_id == "__global":
             return API_KEY or None

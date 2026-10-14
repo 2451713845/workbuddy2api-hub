@@ -919,5 +919,16 @@ for d in (home, accounts, home2, acct2, home3, acct3, home4, acct4,
     shutil.rmtree(d, ignore_errors=True)
 
 print()
+print()
+print("[30] _agents_resolve_key raises AgentConfigError on non-existent key (issue #352)")
+import wb_proxy as P
+handler = P.Handler.__new__(P.Handler)
+wb_agents = P.agents_module()
+try:
+    handler._agents_resolve_key({"key_id": "definitely-not-a-key"}, [])
+    check("should have raised AgentConfigError", False)
+except Exception as exc:
+    check("raised AgentConfigError not NameError", isinstance(exc, wb_agents.AgentConfigError), type(exc))
+
 print("PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

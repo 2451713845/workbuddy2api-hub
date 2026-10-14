@@ -1122,6 +1122,56 @@ def set_upstream_config(accounts_dir, cfg):
     return clean
 
 
+USAGE_DEFAULTS = {
+    "hour_keep_hours": 48,
+    "day_keep_days": 32,
+}
+
+# 上限只是防手滑：面板输入框贴错位数会把 checkpoint 撑到几百 MB，而它每推进
+# 一点就要整份重写——路由器上 flash 写入慢且费寿命。两周的小时层、一年的日桶
+# 已经远超任何窗口够得到的范围。
+USAGE_LIMITS = {
+    "hour_keep_hours": 24 * 14,
+    "day_keep_days": 366,
+}
+
+def validate_usage_patch(raw):
+    """Strict validation for a panel-saved aggregate-retention patch."""
+    out = {}
+    for key, value in (raw or {}).items():
+        if key not in USAGE_DEFAULTS:
+            raise ValueError("unknown usage setting %r" % key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("%s must be a whole number" % key)
+        if value < 1:
+            raise ValueError("%s cannot be less than 1" % key)
+        if value > USAGE_LIMITS[key]:
+            raise ValueError("%s cannot be more than %d" % (key, USAGE_LIMITS[key]))
+        out[key] = value
+    return out
+
+def usage_config(accounts_dir):
+    """聚合保留窗口（小时层 / 日桶）。面板没设过就是内置默认值。"""
+    stored = load(accounts_dir).get("usage")
+    stored = stored if isinstance(stored, dict) else {}
+    out = {}
+    for key, default in USAGE_DEFAULTS.items():
+        value = stored.get(key, default)
+        if (isinstance(value, bool) or not isinstance(value, int)
+                or value < 1 or value > USAGE_LIMITS[key]):
+            value = default
+        out[key] = value
+    return out
+
+def set_usage_config(accounts_dir, patch):
+    """Persist a validated aggregate-retention patch."""
+    clean = validate_usage_patch(patch)
+    with _lock:
+        data = load(accounts_dir)
+        data["usage"] = deep_merge(data.get("usage"), clean)
+        save(accounts_dir, data)
+    return clean
+
 PROMPT_DEFAULTS = {
     "mode": "passthrough",
     "file": "",

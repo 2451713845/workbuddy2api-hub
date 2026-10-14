@@ -3866,6 +3866,33 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">用量聚合保留窗口 <em id="setUsageKeepState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              用量看板把请求日志按「日桶 + 日桶里的小时子表」预先聚合、落盘成 checkpoint，重启后只读新增的字节。
+              保留窗口决定这些预聚合能覆盖多久：窗口内的自定义区间直接从桶求和（毫秒级），超出的部分退回整段扫日志（结果一样，只是慢）。
+            </div>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              这是「空间换时间」：调大 = checkpoint 变大、写盘更频繁（路由器上 flash 写入慢且费寿命），换更宽的区间走快路径。默认小时层 48 小时、日桶 32 天。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              小时层
+              <input id="setUsageHourKeep" type="number" min="1" step="1" style="width:90px">
+              小时
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              日桶
+              <input id="setUsageDayKeep" type="number" min="1" step="1" style="width:90px">
+              天
+            </label>
+            <button onclick="saveUsageKeep(this)">保存</button>
+          </div>
+        </div>
+      </section>
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">上游响应头超时 <em id="setHeaderTimeoutState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               单次尝试等上游返回响应头的上限（秒）。拿到响应头之前网关不会向客户端发出任何字节，所以这个值就是客户端要空等的时长：设得比客户端的首字节预算还大时，客户端会先断开（表现为 499 / 首字节迟迟不返回），而网关仍会按这个上限继续换账号重试。默认 120。
@@ -8791,6 +8818,30 @@ async function loadSettings(showToast){
     // 更新状态来自 /updates 而不是 /settings，单独拉一次；它自带兜底，
     // 失败只写在自己的状态行里，不会把上面这些区块一起带走。
     loadUpdateStatus();
+      // 用量聚合保留窗口：没改过时后端给的就是内置默认（小时层 48 / 日桶 32），
+      // 所以「等于默认」按默认态显示，只有被调过才标出实际值。
+      const usageKeep = data.usage || {};
+      const usageHourKeep = usageKeep.hour_keep_hours;
+      const usageDayKeep = usageKeep.day_keep_days;
+      const usageHourInput = document.getElementById('setUsageHourKeep');
+      if(usageHourInput){
+        usageHourInput.value = (typeof usageHourKeep === 'number') ? usageHourKeep : 48;
+      }
+      const usageDayInput = document.getElementById('setUsageDayKeep');
+      if(usageDayInput){
+        usageDayInput.value = (typeof usageDayKeep === 'number') ? usageDayKeep : 32;
+      }
+      const usageKeepState = document.getElementById('setUsageKeepState');
+      if(usageKeepState){
+        const hourDefault = (typeof usageHourKeep !== 'number') || usageHourKeep === 48;
+        const dayDefault = (typeof usageDayKeep !== 'number') || usageDayKeep === 32;
+        const isDefault = hourDefault && dayDefault;
+        usageKeepState.textContent = isDefault
+          ? '(默认 48 小时 / 32 天)'
+          : '(' + (typeof usageHourKeep === 'number' ? usageHourKeep : 48) + ' 小时 / '
+              + (typeof usageDayKeep === 'number' ? usageDayKeep : 32) + ' 天)';
+        usageKeepState.style.color = isDefault ? 'var(--dim)' : 'var(--accent2)';
+      }
     if(showToast) toast('设置已刷新', 'ok');
   } catch(e) {
     if(showToast) toast('读取设置失败: ' + e.message, 'bad');
@@ -9364,6 +9415,28 @@ async function saveEgressBackoff(btn){
   }
 }
 
+/* 用量聚合保留窗口（空间换时间）。后端只接受 >=1 的整数，且各有上限，所以
+   先把输入收成整数再发；空值/小数/非数字就地拦下，不送上去换 400。 */
+async function saveUsageKeep(btn){
+  const hourEl = document.getElementById('setUsageHourKeep');
+  const dayEl = document.getElementById('setUsageDayKeep');
+  const hours = Math.floor(Number(hourEl && hourEl.value));
+  const days = Math.floor(Number(dayEl && dayEl.value));
+  if(!isFinite(hours) || hours < 1 || !isFinite(days) || days < 1){
+    toast('请输入不小于 1 的整数', 'bad');
+    return;
+  }
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {usage: {hour_keep_hours: hours, day_keep_days: days}});
+    toast('已保存：小时层 ' + hours + ' 小时 / 日桶 ' + days + ' 天', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
 /* 上游响应头超时。后端只接受 >=1 的整数秒，所以先把输入收成整数再发：空值、
    小数、非数字就地拦下，而不是送上去换一个 400 回来。 */
 async function saveHeaderTimeout(btn){

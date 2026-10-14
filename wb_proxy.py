@@ -6888,29 +6888,55 @@ _USAGE_DAY_SNAPSHOT_FIELDS = tuple(
     if isinstance(v, (int, float)) and not isinstance(v, bool) and k != "started")
 
 
+def _usage_keep_setting(key):
+    """面板设的聚合保留值（没设过 / 读不出来返回 None）。
+
+    环境变量始终优先（现场调、测试里来回切），面板设置只在没有环境变量时
+    生效——与 upstream_timeouts() 读 header_timeout_seconds 同一条路子。
+    """
+    try:
+        cfg = wb_settings.usage_config(ACCOUNTS_DIR)
+    except Exception:
+        return None
+    value = cfg.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
 def _usage_day_keep_days():
-    """日桶保留天数，默认 32；WB_USAGE_DAY_KEEP_DAYS 可调。
+    """日桶保留天数，默认 32；WB_USAGE_DAY_KEEP_DAYS 优先，其次面板设置。
 
     每次调用都读环境变量，理由与 WB_USAGE_CACHE 相同（现场调、测试里来回切）。
     """
-    try:
-        return max(1, int(os.environ.get("WB_USAGE_DAY_KEEP_DAYS",
-                                         _USAGE_DAY_KEEP_DAYS)))
-    except (TypeError, ValueError):
-        return _USAGE_DAY_KEEP_DAYS
+    raw = os.environ.get("WB_USAGE_DAY_KEEP_DAYS")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return _USAGE_DAY_KEEP_DAYS
+    return _usage_keep_setting("day_keep_days") or _USAGE_DAY_KEEP_DAYS
 
 
 def _usage_hour_keep_days():
-    """小时桶保留天数，默认 2；WB_USAGE_HOUR_KEEP_DAYS 可调。
+    """小时桶保留天数，默认 2；WB_USAGE_HOUR_KEEP_DAYS 优先，其次由面板的
+    「小时层保留」折算（向上取整到整天）。
 
-    同 _usage_day_keep_days：每次调用都读环境变量。取值再小也保留一天
-    （max(1, ...)）：小时层至少要能服务「今天的整点窗口」，否则等于没建。
+    两个状态各有一条小时层保留线（snapshot 按天，analytics 按小时），面板只
+    暴露一个「小时层保留（小时）」，所以这里跟着它走，免得调了一个另一个不动。
+    取值再小也保留一天（max(1, ...)）：小时层至少要能服务「今天的整点窗口」，
+    否则等于没建。
     """
-    try:
-        return max(1, int(os.environ.get("WB_USAGE_HOUR_KEEP_DAYS",
-                                         _USAGE_HOUR_KEEP_DAYS)))
-    except (TypeError, ValueError):
-        return _USAGE_HOUR_KEEP_DAYS
+    raw = os.environ.get("WB_USAGE_HOUR_KEEP_DAYS")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return _USAGE_HOUR_KEEP_DAYS
+    hours = _usage_keep_setting("hour_keep_hours")
+    if hours:
+        return max(1, (hours + 23) // 24)
+    return _USAGE_HOUR_KEEP_DAYS
 
 
 def _usage_day_buckets_enabled():
@@ -6935,16 +6961,18 @@ _USAGE_HOUR_KEEP_HOURS = 48
 
 
 def _usage_hour_keep_hours():
-    """小时子表保留小时数，默认 48；WB_USAGE_HOUR_KEEP_HOURS 可调。
+    """小时子表保留小时数，默认 48；WB_USAGE_HOUR_KEEP_HOURS 优先，其次面板设置。
 
     每次调用都读环境变量，理由与 WB_USAGE_DAY_KEEP_DAYS 相同（现场调、测试
     里来回切）。
     """
-    try:
-        return max(1, int(os.environ.get("WB_USAGE_HOUR_KEEP_HOURS",
-                                         _USAGE_HOUR_KEEP_HOURS)))
-    except (TypeError, ValueError):
-        return _USAGE_HOUR_KEEP_HOURS
+    raw = os.environ.get("WB_USAGE_HOUR_KEEP_HOURS")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return _USAGE_HOUR_KEEP_HOURS
+    return _usage_keep_setting("hour_keep_hours") or _USAGE_HOUR_KEEP_HOURS
 
 
 def _local_day_key(ts):
@@ -9725,6 +9753,7 @@ def runtime_settings_view():
         "hidden_pages": wb_settings.hidden_pages(ACCOUNTS_DIR),
         "update_check_enabled": wb_settings.update_check_enabled(ACCOUNTS_DIR),
         "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
+        "usage": wb_settings.usage_config(ACCOUNTS_DIR),
         "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
@@ -16842,6 +16871,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, str(exc), "invalid_request_error")
             wb_settings.set_upstream_config(ACCOUNTS_DIR, patch)
             reply["upstream"] = wb_settings.upstream_config(ACCOUNTS_DIR)
+        if "usage" in payload:
+            raw = payload.get("usage")
+            if not isinstance(raw, dict):
+                return self._error(400, "usage must be an object",
+                                   "invalid_request_error")
+            try:
+                patch = wb_settings.validate_usage_patch(raw)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            wb_settings.set_usage_config(ACCOUNTS_DIR, patch)
+            reply["usage"] = wb_settings.usage_config(ACCOUNTS_DIR)
         if "prompt" in payload:
             raw = payload.get("prompt")
             if not isinstance(raw, dict):

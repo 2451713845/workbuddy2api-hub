@@ -10183,8 +10183,12 @@ def merge_catalog(primary, realm=None, extras=False):
         # not enough: it also carries legacy entries the picker may not show.
         for mid, _meta in primary or []:
             if mid in merged and mid not in seen:
+                item = merged[mid]
+                # 无倍率模型隐藏：未配置有效 credits（内置表无、远程 meta 也无）不进入对外目录
+                if not item.get("credits"):
+                    continue
                 seen.add(mid)
-                out.append((mid, merged[mid]))
+                out.append((mid, item))
     return out
 _catalog_lock = threading.Lock()
 
@@ -10565,9 +10569,6 @@ def curate_remote_catalog(realm, ids, meta=None):
             if base in known and free(base) and not free(mid):
                 continue
         elif (mid + "-f") in known and free(mid + "-f") and not free(mid):
-            continue
-        # 无倍率模型隐藏：未配置有效 credits（内置表无、远程 meta 也无）不进入对外目录
-        if not credits.get(mid):
             continue
         out.append(mid)
     return out

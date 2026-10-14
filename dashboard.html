@@ -481,6 +481,16 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 .log-tag.tag-accounts{background:rgba(14,165,233,.18);color:#38bdf8}
 .log-tag.tag-auth{background:rgba(244,63,94,.18);color:#fb7185}
 .log-tag.tag-system{background:rgba(100,116,139,.18);color:#94a3b8}
+/* 细分出来的模块标签各有配色；catalog/auth 早先就被推断出来，只是一直没有
+   自己的颜色，和 system 的灰底混在一起。 */
+.log-tag.tag-catalog{background:rgba(45,212,191,.18);color:#2dd4bf}
+.log-tag.tag-agents{background:rgba(129,140,248,.18);color:#818cf8}
+.log-tag.tag-pricing{background:rgba(251,146,60,.18);color:#fb923c}
+.log-tag.tag-egress{background:rgba(34,211,238,.18);color:#22d3ee}
+.log-tag.tag-upstream{background:rgba(244,114,182,.18);color:#f472b6}
+.log-tag.tag-update{background:rgba(147,197,253,.18);color:#93c5fd}
+.log-tag.tag-usage{background:rgba(94,234,212,.18);color:#5eead4}
+.log-tag.tag-webtools{background:rgba(163,230,53,.18);color:#a3e635}
 .log-msg{color:#cbd5e1;flex:1;word-break:break-all;white-space:pre-wrap}
 .log-empty{padding:48px 24px;text-align:center;color:#64748b;font-size:13px;font-family:inherit}
 /* ===== Phone: ≤640px ===== */
@@ -3887,6 +3897,43 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">日志落库 <em id="setLogDbState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              默认关闭：日志只留在内存（最新 2000 条，重启即失），与上游一致。开启后每条日志追加写入
+              <span class="mono">usage/logs.sqlite3</span>，重启、崩溃后仍能回看，方便事后 debug。
+              三条保留上限各自独立，留空表示该维度不限制；天数默认 7 天。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setLogDbEnabled" type="checkbox" style="width:16px;height:16px">
+              启用日志落库
+            </label>
+            <button onclick="saveLogDb(this)">保存</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div style="flex:1;min-width:150px">
+            <div style="font-size:12px;color:var(--dim);margin-bottom:4px">最多保留条数（留空 = 不限）</div>
+            <input id="setLogDbMaxRows" type="number" min="1" placeholder="不限"
+                   style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+          </div>
+          <div style="flex:1;min-width:150px">
+            <div style="font-size:12px;color:var(--dim);margin-bottom:4px">最多保留天数（留空 = 不限）</div>
+            <input id="setLogDbMaxDays" type="number" min="1" placeholder="7"
+                   style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+          </div>
+          <div style="flex:1;min-width:150px">
+            <div style="font-size:12px;color:var(--dim);margin-bottom:4px">日志库大小上限 MB（留空 = 不限）</div>
+            <input id="setLogDbMaxMB" type="number" min="1" placeholder="不限"
+                   style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">更新 <em id="setUpdateState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               网关匿名查询 GitHub 的公开 Release 列表，与当前运行的版本比较。本版只检查：不下载、不安装、不重启，账号与用量数据不会被碰。
@@ -4007,7 +4054,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
       <div>
         <h2 style="margin:0;font-size:16px;color:var(--fg)">网关运行日志</h2>
-        <div style="font-size:12px;color:var(--dim);margin-top:4px">实时捕获反向代理请求、流式转发、调度巡检、任务打卡与异常告警 (内存保留最新 2000 条)</div>
+        <div id="logPageHint" style="font-size:12px;color:var(--dim);margin-top:4px">实时捕获反向代理请求、流式转发、调度巡检、任务打卡与异常告警 (内存保留最新 2000 条)</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span id="logStatsBadge" style="font-size:12px;color:var(--dim);margin-right:6px">加载中...</span>
@@ -4029,13 +4076,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         <button class="range-btn" id="btnLogLvlError" onclick="setLogFilterLevel('ERROR')">ERROR</button>
       </div>
 
-      <div style="display:inline-flex;gap:3px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
-        <button class="range-btn active" id="btnLogTagAll" onclick="setLogFilterTag('')">全部模块</button>
-        <button class="range-btn" id="btnLogTagChat" onclick="setLogFilterTag('chat')">对话</button>
-        <button class="range-btn" id="btnLogTagTasks" onclick="setLogFilterTag('tasks')">任务福利</button>
-        <button class="range-btn" id="btnLogTagSched" onclick="setLogFilterTag('scheduler')">调度器</button>
-        <button class="range-btn" id="btnLogTagAcct" onclick="setLogFilterTag('accounts')">账号</button>
-        <button class="range-btn" id="btnLogTagSys" onclick="setLogFilterTag('system')">系统</button>
+      <!-- 模块筛选按钮由 renderLogTagFilters() 按当前日志里真正出现过的 tag
+           动态生成：后端细分出新的 tag 时这里自动多一个按钮，不必同步改。 -->
+      <div id="logTagBar" style="display:inline-flex;gap:3px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line);flex-wrap:wrap">
+        <button class="range-btn active" data-tag="" onclick="setLogFilterTag('')">全部模块</button>
       </div>
 
       <div style="flex:1;min-width:180px;position:relative">
@@ -8759,6 +8803,17 @@ async function loadSettings(showToast){
         headerTimeoutState.textContent = headerTimeoutDefault ? '(默认 120 秒)' : '(' + headerTimeout + ' 秒)';
         headerTimeoutState.style.color = headerTimeoutDefault ? 'var(--dim)' : 'var(--accent2)';
       }
+      const logDbEnabled = data.log_db_enabled === true;
+      const logDbEnabledInput = document.getElementById('setLogDbEnabled');
+      if(logDbEnabledInput) logDbEnabledInput.checked = logDbEnabled;
+      const logDbState = document.getElementById('setLogDbState');
+      if(logDbState){
+        logDbState.textContent = logDbEnabled ? '(已启用)' : '(未启用)';
+        logDbState.style.color = logDbEnabled ? 'var(--accent2)' : 'var(--dim)';
+      }
+      fillCapInput('setLogDbMaxRows', data.log_db_max_rows);
+      fillCapInput('setLogDbMaxDays', data.log_db_max_days);
+      fillCapInputMB('setLogDbMaxMB', data.log_db_max_bytes);
     // Rebuild the editable rows, keeping stored values so an untouched field
     // is not accidentally blanked.
     API_KEY_ROWS = (data.api_keys || []).map(k => ({
@@ -9380,6 +9435,52 @@ async function saveHeaderTimeout(btn){
   try {
     await postJSON('/settings/save', {upstream: {header_timeout_seconds: value}});
     toast('已保存：上游响应头超时 ' + value + ' 秒', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+/* ---- 日志落库 ----
+   开关与三条保留上限一次提交；上限框留空就发 null，服务端存成「不限」。
+   大小框以 MB 输入，发出去时换算成字节（服务端一律以字节记）。 */
+function capInputValue(id){
+  const el = document.getElementById(id);
+  if(!el) return null;
+  const raw = String(el.value == null ? '' : el.value).trim();
+  if(raw === '') return null;
+  const n = Number(raw);
+  if(!isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+function fillCapInput(id, value){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.value = (value === null || value === undefined || value === '') ? '' : String(value);
+}
+function fillCapInputMB(id, bytes){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.value = (bytes === null || bytes === undefined || bytes === '' || bytes <= 0)
+    ? '' : String(Math.max(1, Math.round(bytes / 1048576)));
+}
+async function saveLogDb(btn){
+  const enabledEl = document.getElementById('setLogDbEnabled');
+  const rows = capInputValue('setLogDbMaxRows');
+  const days = capInputValue('setLogDbMaxDays');
+  const mb = capInputValue('setLogDbMaxMB');
+  const payload = {
+    log_db_enabled: !!(enabledEl && enabledEl.checked),
+    log_db_max_rows: rows,
+    log_db_max_days: days,
+    log_db_max_bytes: mb === null ? null : mb * 1048576,
+  };
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', payload);
+    toast(payload.log_db_enabled ? '已启用日志落库' : '已关闭日志落库', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
@@ -10505,6 +10606,20 @@ function logMatchesFilter(item){
   return true;
 }
 function logFilterKey(){ return logFilterLevel + '|' + logFilterTag + '|' + logSearchText; }
+/* 顶部文案跟着模式走：落库时报告库里累计多少条历史、并指向设置页的上限；纯内存
+   时保持上游原话。data.mode 由 /logs 带回（后端按当前开关判定）。 */
+function updateLogPageHint(data){
+  const hint = document.getElementById('logPageHint');
+  if(!hint) return;
+  if(data && data.mode === 'db'){
+    const stored = (typeof data.stored === 'number') ? data.stored : null;
+    hint.textContent = '实时捕获反向代理请求、流式转发、调度巡检、任务打卡与异常告警'
+      + ' (已落库' + (stored === null ? '' : '，共 ' + stored + ' 条历史')
+      + '，可在设置页调整保留上限)';
+  } else {
+    hint.textContent = '实时捕获反向代理请求、流式转发、调度巡检、任务打卡与异常告警 (内存保留最新 2000 条)';
+  }
+}
 // 单行 HTML 只有这一处定义，整表渲染和增量 append 都用它。
 function logLineHtml(item){
   const lvlCls = 'lvl-' + (item.level || 'INFO');
@@ -10543,6 +10658,7 @@ async function fetchNewLogs(forceReset){
     const limit = forceReset ? 500 : 200;
     const data = await getJSON('/logs?since_id=' + since + '&limit=' + limit);
     if(data && data.logs){
+      updateLogPageHint(data);
       let fresh = null;     // 本轮真正新增的条目（去重后）
       let dropped = null;   // 因超上限被挤出缓冲的最旧条目
       if(forceReset){
@@ -10612,22 +10728,53 @@ function setLogFilterLevel(lvl){
   renderLogs();
 }
 
+/* 模块筛选按钮的固定顺序与中文名。顺序按「排查时最常先看哪个模块」排，未列出
+   的 tag 排到最后并按字母序补上——后端新增 tag 时这里不改也能用。 */
+const LOG_TAG_ORDER = ['chat', 'tasks', 'scheduler', 'accounts', 'agents', 'pricing',
+                       'egress', 'upstream', 'webtools', 'catalog', 'auth', 'settings',
+                       'update', 'usage', 'system'];
+const LOG_TAG_LABELS = {
+  chat: '对话', tasks: '任务福利', scheduler: '调度器', accounts: '账号',
+  agents: '智能体', pricing: '定价', egress: '出口', upstream: '上游',
+  webtools: '网络工具', catalog: '模型', auth: '鉴权', settings: '设置',
+  update: '更新', usage: '用量', system: '系统'
+};
+let logTagBtnKey = null;
+/* 按当前缓冲里真正出现过的 tag 重建按钮组。集合没变就不动 DOM——这个函数每
+   次渲染都会调，重建本身会让正在点的按钮闪一下。 */
+function renderLogTagFilters(){
+  const bar = document.getElementById('logTagBar');
+  if(!bar) return;
+  const seen = new Set();
+  logEntries.forEach(x => { if(x.tag) seen.add(x.tag); });
+  // 当前筛选的 tag 即使暂时没有日志也留在栏里，否则按钮一消失就不知道自己在
+  // 筛什么，也没法一眼切回去。
+  if(logFilterTag) seen.add(logFilterTag);
+  const ordered = LOG_TAG_ORDER.filter(t => seen.has(t))
+    .concat(Array.from(seen).filter(t => LOG_TAG_ORDER.indexOf(t) < 0).sort());
+  const key = ordered.join(',');
+  if(key !== logTagBtnKey){
+    logTagBtnKey = key;
+    bar.innerHTML = '';
+    [{tag: '', label: '全部模块'}]
+      .concat(ordered.map(t => ({tag: t, label: LOG_TAG_LABELS[t] || t})))
+      .forEach(item => {
+        const btn = document.createElement('button');
+        btn.className = 'range-btn';
+        btn.dataset.tag = item.tag;
+        btn.textContent = item.label;
+        btn.onclick = () => setLogFilterTag(item.tag);
+        bar.appendChild(btn);
+      });
+  }
+  bar.querySelectorAll('button').forEach(b => {
+    b.classList.toggle('active', (b.dataset.tag || '') === logFilterTag);
+  });
+}
+
 function setLogFilterTag(tag){
   logFilterTag = tag;
-  const tagMap = {
-    '': 'All',
-    'chat': 'Chat',
-    'tasks': 'Tasks',
-    'scheduler': 'Sched',
-    'accounts': 'Acct',
-    'system': 'Sys'
-  };
-  Object.keys(tagMap).forEach(k => {
-    const btn = document.getElementById('btnLogTag' + tagMap[k]);
-    if(btn){
-      btn.classList.toggle('active', logFilterTag === k);
-    }
-  });
+  renderLogTagFilters();
   renderLogs();
 }
 
@@ -10688,6 +10835,7 @@ function renderLogs(){
   const body = document.getElementById('logTerminalBody');
   if(!body) return;
 
+  renderLogTagFilters();
   const filtered = logEntries.filter(logMatchesFilter);
 
   if(filtered.length === 0){
@@ -10790,7 +10938,7 @@ async function exportLogsFile(){
 }
 
 async function clearServerLogs(){
-  if(!confirm('确定要清空网关日志吗？此操作将清空内存中的全部日志缓冲。')) return;
+  if(!confirm('确定要清空网关日志吗？内存缓冲会被清空；若已启用日志落库，数据库里的历史记录也会一并删除。')) return;
   try {
     await postJSON('/logs/clear', {});
     logEntries = [];

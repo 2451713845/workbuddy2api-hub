@@ -10133,6 +10133,10 @@ def model_entry(mid, meta):
     # ---- modality / capability ----
     # disabledMultimodal explicitly turns image input off; absent means allowed.
     vision = bool(meta.get("supportsImages")) and not meta.get("disabledMultimodal")
+    if mid == "glm-5.3-flash":
+        # 强制修正：上游元数据虽宣告支持多模态，但后端实际未接入视觉通道（见 issue #315）
+        vision = False
+        item["vision_note"] = "上游宣告多模态但实际通道不支持读图，已修正为纯文本" 
     tools = bool(meta.get("supportsToolCall"))
     thinks = bool(meta.get("supportsReasoning"))
     inputs = ["text"] + (["image"] if vision else [])

@@ -4613,6 +4613,9 @@ function renderAvailableModels(){
     const hasVis = m.supports_vision || m.vision || m.multimodal || (m.input_modalities && m.input_modalities.includes('image'));
     if(hasVis){
       caps.push('<span class="badge ok" style="font-size:11px">视觉</span>');
+    } else if(m.id === 'glm-5.3-flash' || m.vision_note){
+      const tip = m.vision_note || '上游配置宣告支持多模态，但实际后端未接入视觉通道，已强制修正为纯文本';
+      caps.push('<span class="badge warn" style="font-size:11px;background:rgba(234,179,8,.15);color:#d97706;border-color:rgba(234,179,8,.3)" title="' + esc(tip) + '">文本 (实测无视觉)</span>');
     } else {
       caps.push('<span class="badge" style="color:var(--dim);font-size:11px">文本</span>');
     }

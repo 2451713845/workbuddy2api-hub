@@ -16,7 +16,7 @@
 - **三协议**：Chat Completions、Responses API（Codex）、原生 Anthropic Messages（Claude Code / Anthropic SDK）；
 - **模型目录对齐官方桌面端**：剔除补全通道与专线变体，能力与规格按桌面端宣告，上游新模型无需发版即进 `/v1/models`；
 - **设备指纹隔离 (`derive_id`)**：以账号 UID 稳定派生机器码与会话标识，同一账号不漂移、不同账号互不关联；
-- **账号接入**：看板点链接走浏览器 OAuth；Windows 上还能直接从运行中的桌面客户端导入（加密 token 就地解密）；
+- **账号接入**：看板点链接走浏览器 OAuth；Windows 上还能直接从运行中的桌面客户端导入（加密 token 就地解密），macOS / Linux 可手动粘贴解码密钥后导入；
 - **每日自动化**：国内版签到 / 成长与积分任务 / 猫猫旅行；国际版每日活跃打卡（真跑完网页会话）；后台调度器按 09:00 & 21:00、22:00、01:00 排程；
 - **限额护栏**：保留积分 · 每日 Token · 每日积分 · 按模型 Token 四条账号级护栏，单账号独立计数，本地 0 点解封（默认全部关闭）；
 - **OpenRouter 价估算**：把 token 折算成等价花费（人民币 / 美元可切），逐条请求可悬停查看定价来源；
@@ -34,6 +34,8 @@
 **Windows** 双击 **`start-wb-proxy.bat`**，保持窗口运行；**macOS** 双击 **`start-wb-proxy.command`**（首次被 Gatekeeper 拦截时右键 →「打开」确认一次），或在终端执行 `./start-wb-proxy.sh [端口]`（默认 8788）。
 
 启动后：**API 地址** `http://127.0.0.1:8788/v1`，**Web 看板** `http://127.0.0.1:8788/`。首次启动还没有账号，打开看板点「+ 添加账号 (OAuth)」完成授权即自动入库。
+
+> 绿色包自带的精简 Python 运行时只覆盖 Windows；macOS / Linux 直接使用系统 Python，需要 **3.9+**（启动脚本找不到内置运行时会明确打印所用的解释器与版本）。Docker 部署自带基础镜像，不受影响。
 
 > zip 解压后若提示权限不足，先执行一次：`chmod +x start-wb-proxy.sh start-wb-proxy.command start-wb-proxy-lan.sh start-wb-proxy-lan.command allow-firewall.command`
 
@@ -280,13 +282,17 @@ python wb_agents.py restore --client codex                 # 随时字节级还�
 2. 选择要登录的区域（国际版 / 国内版），点弹出的官方授权链接并在浏览器完成登录；
 3. 程序自动检测回调，账号自动加入账号池，无需手动复制凭证。
 
-### 方式二：从本机桌面客户端导入（仅 Windows）
+### 方式二：从本机桌面客户端导入
 
-1. 让 **WorkBuddy 桌面客户端保持运行并已登录**（网关要从它的进程内存里取解码密钥，这一步不能省）；
+1. 让 **WorkBuddy 桌面客户端保持运行并已登录**（Windows 上网关要从它的进程内存里取解码密钥，这一步不能省）；
 2. 看板点「扫描桌面客户端账号」，弹窗列出本机已登录的国际版 / 国内版账号；
-3. 若提示凭据已加密，先点弹窗里的「回收密钥」（只读，实测 1 秒内完成），再点账号行的「导入」。
+3. 若提示凭据已加密，先把解码密钥交给网关，再点账号行的「导入」：
+   - **Windows**：点弹窗里的「回收密钥」（只读，实测 1 秒内完成）；
+   - **macOS / Linux**：进程内存回收只在 Windows 上实现，弹窗里会直接给出输入框，粘贴密钥即可（见下）。
 
-关于加密凭据：桌面客户端从 2026-09-24 起把 `accessToken` / `refreshToken` 存成 `$wbEncrypted` 信封，网关按客户端 `packages/at-rest-crypto` 的同一套方案（AES-256-GCM + `WB-AAD` 帧头）就地解密，导入的仍是可直接使用的 token；解码密钥编译在客户端原生模块里、磁盘上没有明文，只能从**正在运行的**桌面端进程内存里找回（只读 `OpenProcess(PROCESS_VM_READ)` + `ReadProcessMemory`，不向客户端写任何东西），密钥只留在网关进程内存、不落盘不写日志。提示权限不足时，以管理员身份启动网关再试一次。Docker / Linux / macOS 下请用方式一。
+关于加密凭据：桌面客户端从 2026-09-24 起把 `accessToken` / `refreshToken` 存成 `$wbEncrypted` 信封，网关按客户端 `packages/at-rest-crypto` 的同一套方案（AES-256-GCM + `WB-AAD` 帧头）就地解密，导入的仍是可直接使用的 token；解码密钥编译在客户端原生模块里、磁盘上没有明文。Windows 上可以从**正在运行的**桌面端进程内存里找回（只读 `OpenProcess(PROCESS_VM_READ)` + `ReadProcessMemory`，不向客户端写任何东西）；macOS / Linux 上没有这条路，看板会显示输入框让用户**手动粘贴**一次——两种方式拿到的密钥都只留在网关进程内存、不落盘不写日志，且都要先过 keyblob 自检（protectorKeyId 对得上、能解出 32 字节主密钥）才生效。
+
+手动粘贴接受两种写法（都不用自己换算）：64 位 hex 的保护密钥，或 44 字符 base64 的 `atRestSecretKey`。拿不到密钥时，macOS / Linux 上请直接用方式一走浏览器登录。提示权限不足时，以管理员身份启动网关再试一次。
 
 ---
 
@@ -358,6 +364,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 ### Unreleased
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.3，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
+- **macOS / Linux 也能导入桌面客户端已登录的账号：解码密钥支持手工导入**（#344）：桌面客户端自 2026-09-24 起把 token 存成 `$wbEncrypted` 信封，而静态密钥的回收只实现了 Windows 一条路（读客户端进程内存），macOS / Linux 用户点「回收密钥」必然失败、账号数恒为 0。现在「扫描桌面客户端账号」弹窗在各平台都给出密钥输入框，可粘贴 64 位 hex 保护密钥或 44 字符 base64 的 `atRestSecretKey`（`POST /accounts/import/desktop` 新增 `keyText` 字段）；落进内存前必须过 keyblob 自检，贴错只报错，既不留下坏密钥也不顶掉已有的好密钥。非 Windows 的提示文案不再引导用户去点一个必然失败的按钮，密钥来路（回收 / 手动导入）也会显示出来。绿色包自带的精简 Python 仍只覆盖 Windows，macOS / Linux 走系统 Python（需 3.9+），启动脚本回退时会明确打印解释器路径与版本。
 
 ## 七、致谢与引用声明 (Credits & References)
 

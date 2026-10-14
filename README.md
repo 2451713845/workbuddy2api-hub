@@ -359,6 +359,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.3，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
+- **一键配置写出的客户端配置与凭据文件改为 owner-only（0600）**（#345）：此前经 `open()` 默认权限落盘（umask 022 下为 0644），macOS/Linux 上 DSH 桌面端会因 `.credentials.yaml` 可被属主之外读取而拒绝启动，且用户手动 `chmod 600` 后再点一次配置就被打回；现在新建文件一律 0600，已存在文件只在更宽时收紧（用户自行加固的更严权限原样保留），备份文件与 `restore` 写回同样如此。Windows 无 POSIX 权限位，行为不变。
+
 ## 七、致谢与引用声明 (Credits & References)
 
 协议兼容、风控规避与任务链路设计过程中，参考并吸纳了以下开源项目的经验与逆向成果：

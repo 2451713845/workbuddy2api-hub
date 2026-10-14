@@ -17864,6 +17864,22 @@ class Handler(BaseHTTPRequestHandler):
                 "msg": "已从桌面客户端进程回收密钥（只留在内存里）",
                 "atrest": wb_atrest.status(),
             })
+        if payload.get("keyText") is not None:
+            # 手工导入解码密钥：macOS / Linux 上无法回收进程内存，只能让用户贴一次。
+            # 与回收同一道闸——过不了 keyblob 自检就原样报错，不落内存。
+            try:
+                key = wb_atrest.adopt_key(payload.get("keyText"),
+                                          log=lambda m: log(m, tag="accounts"))
+            except Exception as exc:
+                log("at-rest key import rejected: %s" % exc, level="WARN", tag="accounts")
+                return self._json(200, {"ok": False, "msg": str(exc),
+                                        "atrest": wb_atrest.status()})
+            return self._json(200, {
+                "ok": True,
+                "keyId": wb_atrest.derive_key_id(key),
+                "msg": "已导入解码密钥（只留在内存里）",
+                "atrest": wb_atrest.status(),
+            })
         if payload.get("forgetKey"):
             wb_atrest.forget_key()
             return self._json(200, {"ok": True, "atrest": wb_atrest.status()})

@@ -985,6 +985,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '回收失败:': 'Recovery failed:',
     '回收失败：': 'Recovery failed:',
     '回收密钥': 'Recover key',
+    '导入密钥': 'Import key',
     '固定国内版出口': 'China exit only',
     '固定国际版出口': 'Global exit only',
     '国内版': 'China',
@@ -1327,7 +1328,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '查看 GitHub 项目仓库': 'View the GitHub repository',
     '查询': 'Check',
     '格式。': 'format.',
-    '桌面客户端把 token 加密存储了，需要从正在运行的 WorkBuddy.exe 进程内存里回收静态密钥': 'The desktop client now stores tokens encrypted, so the static key has to be recovered from the memory of a running WorkBuddy.exe process',
+    '桌面客户端把 token 加密存储了，需要从正在运行的客户端进程内存里回收静态密钥': 'The desktop client now stores tokens encrypted, so the static key has to be recovered from the memory of a running client process',
     '档': 'tier',
     '检测到加密凭据': 'Encrypted credentials detected',
     '槽位还没有填写代理地址': 'The slot has no proxy address yet',
@@ -1702,6 +1703,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '随时可出发旅行': 'Ready to travel any time',
     '随机生成': 'Random',
     '需要先回收密钥': 'recover the key first',
+    '需要先导入密钥': 'import the key first',
+    '请先粘贴密钥': 'Paste the key first',
+    '校验中…': 'Checking…',
     '非流式': 'Non-streaming',
     '面板 Key': 'Panel key',
     '面板密码': 'Panel password',
@@ -1751,7 +1755,14 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '（策略早于该字段，按当前映射表推断）': '(the policy predates this field; inferred from the current mapping table)',
     '（继承自': '(inherited from',
     '）· 只读': ') · read-only',
-    '）不支持进程内存回收，请改用「+ 添加账号 (OAuth)」。': ') does not support process-memory recovery; use + Add account (OAuth) instead.',
+    '，手动导入': ', imported manually',
+    '，进程内存回收': ', recovered from process memory',
+    '回收不到时，也可以在下面手动粘贴密钥。': 'If recovery fails, you can also paste the key below.',
+    '可以在下面手动粘贴解码密钥，或改用「+ 添加账号 (OAuth)」走浏览器登录。': 'You can paste the decryption key below, or sign in through the browser with + Add account (OAuth).',
+    '手工导入的密钥只留在网关内存里，不落盘、不写日志；导入时会先用 keyblob 校验，贴错会直接报错。': 'A manually imported key stays in the gateway process memory only - never written to disk or to the logs; it is validated against the keyblob first, so a wrong paste fails immediately.',
+    '密钥必须与桌面客户端 keyblob 里的 protectorKeyId 对得上；贴错或客户端已换钥都会走到这里。': 'The key must match the protectorKeyId in the desktop client keyblob; a wrong paste, or a key rotation on the client, lands here.',
+    '密钥已导入，正在重新扫描': 'Key imported, rescanning',
+    '粘贴解码密钥：64 位 hex，或 44 字符 base64': 'Paste the decryption key: 64-hex, or 44-char base64',
     '）的模型默认按': ') are, by default,',
     '），加密凭据可直接导入。': '); encrypted credentials can be imported directly.',
     '，OpenRouter 原始价，未折算）': ', OpenRouter raw price, unconverted)',
@@ -1945,6 +1956,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "启用自动切换": "啟用自動切換",
     "启用调度": "啟用排程",
     "回收密钥": "回收金鑰",
+    "导入密钥": "匯入金鑰",
     "国际版账号每日打卡时，除桌面端身分的轻量对话外，再走一次网页通道的会话。默认开启。": "國際版帳號每日打卡時，除桌面端身分的輕量對話外，再走一次網頁通道的會話。預設開啟。",
     "在浏览器里打开下方链接并完成登录授权": "在瀏覽器裡開啟下方連結並完成登入授權",
     "备注名称": "備註名稱",
@@ -2096,7 +2108,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "权限不足时可以管理员身份运行网关再试一次。": "權限不足時可以管理員身份執行閘道再試一次。",
     "某账号在某模型上被上游限流（429）时，自动在 WB / VSC / CLI 之间换身分重试，每轮最多 4 次。三条身分走不同的配额通道，开启后 429 会少一些。默认关闭。": "某帳號在某模型上被上游限流（429）時，自動在 WB / VSC / CLI 之間換身分重試，每輪最多 4 次。三條身分走不同的配額通道，開啟後 429 會少一些。預設關閉。",
     "查看 GitHub 项目仓库": "檢視 GitHub 專案倉庫",
-    "桌面客户端把 token 加密存储了，需要从正在运行的 WorkBuddy.exe 进程内存里回收静态密钥": "桌面客戶端把 token 加密儲存了，需要從正在執行的 WorkBuddy.exe 程序記憶體裡回收靜態金鑰",
+    "桌面客户端把 token 加密存储了，需要从正在运行的客户端进程内存里回收静态密钥": "桌面客戶端把 token 加密儲存了，需要從正在執行的客戶端程序記憶體裡回收靜態金鑰",
     "模型性能指标与用量一览": "模型效能指標與用量一覽",
     "次日 00:00 刷新": "次日 00:00 重新整理",
     "正在打开文件…": "正在開啟檔案…",
@@ -2274,6 +2286,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "重新生成链接": "重新生成連結",
     "限额已保存": "限額已儲存",
     "需要先回收密钥": "需要先回收金鑰",
+    "需要先导入密钥": "需要先匯入金鑰",
+    "请先粘贴密钥": "請先貼上金鑰",
+    "校验中…": "校驗中…",
     "面板手动停用，该账号不参与轮询": "面板手動停用，該帳號不參與輪詢",
     "顶部页签显示": "頂部頁籤顯示",
     "面板窗口限高": "面板視窗限高",
@@ -2288,7 +2303,14 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "（只读，密钥只留在网关内存里）。通常几秒钟，内存大时要十几秒。": "（只讀，金鑰只留在閘道記憶體裡）。通常幾秒鐘，記憶體大時要十幾秒。",
     "（已导入）": "（已匯入）",
     "（策略早于该字段，按当前映射表推断）": "（策略早於該欄位，按目前對映表推斷）",
-    "）不支持进程内存回收，请改用「+ 添加账号 (OAuth)」。": "）不支援程序記憶體回收，請改用「+ 新增帳號 (OAuth)」。",
+    "，手动导入": "，手動匯入",
+    "，进程内存回收": "，程序記憶體回收",
+    "回收不到时，也可以在下面手动粘贴密钥。": "回收不到時，也可以在下面手動貼上金鑰。",
+    "可以在下面手动粘贴解码密钥，或改用「+ 添加账号 (OAuth)」走浏览器登录。": "可以在下面手動貼上解碼金鑰，或改用「+ 新增帳號 (OAuth)」走瀏覽器登入。",
+    "手工导入的密钥只留在网关内存里，不落盘、不写日志；导入时会先用 keyblob 校验，贴错会直接报错。": "手動匯入的金鑰只留在閘道記憶體裡，不落盤、不寫日誌；匯入時會先用 keyblob 校驗，貼錯會直接報錯。",
+    "密钥必须与桌面客户端 keyblob 里的 protectorKeyId 对得上；贴错或客户端已换钥都会走到这里。": "金鑰必須與桌面客戶端 keyblob 裡的 protectorKeyId 對得上；貼錯或客戶端已換金鑰都會走到這裡。",
+    "密钥已导入，正在重新扫描": "金鑰已匯入，正在重新掃描",
+    "粘贴解码密钥：64 位 hex，或 44 字符 base64": "貼上解碼金鑰：64 位 hex，或 44 字元 base64",
     "）的模型默认按": "）的模型預設按",
     "），加密凭据可直接导入。": "），加密憑據可直接匯入。",
     "，登录后请在「设置」中修改。": "，登入後請在「設定」中修改。",
@@ -7398,24 +7420,66 @@ async function recoverAtrestKey(btn){
   }
 }
 
+/* 手工导入解码密钥：macOS / Linux 上回收不了客户端进程内存（huntSupported
+   为 false），用户可以把保护密钥贴进来。后端会用 keyblob 自检，贴错直接报错。 */
+async function adoptAtrestKey(btn){
+  const input = document.getElementById('adoptKeyInput');
+  const value = (input && input.value || '').trim();
+  if(!value){ toast('请先粘贴密钥', 'err'); return; }
+  const idle = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '校验中…';
+  try{
+    const r = await postJSON('/accounts/import/desktop', {keyText: value});
+    if(!r.ok){ throw new Error(r.msg || '导入失败'); }
+    if(input) input.value = '';
+    toast('密钥已导入，正在重新扫描');
+    await refreshDesktopScan();
+  }catch(e){
+    toast('导入失败: ' + e.message, 'err');
+    btn.disabled = false;
+    btn.textContent = idle;
+    const tip = document.getElementById('atrestTip');
+    if(tip){
+      tip.innerHTML = '导入失败：' + esc(e.message)
+        + '<br><span style="color:var(--dim)">密钥必须与桌面客户端 keyblob 里的 '
+        + 'protectorKeyId 对得上；贴错或客户端已换钥都会走到这里。</span>';
+    }
+  }
+}
+
 function renderAtrestBar(atrest, list){
   if(!atrest) return '';
   if(atrest.keyCached){
+    // 手工导入的密钥会随客户端换钥失效，所以把来路也写出来，便于用户对照。
+    const how = atrest.keySource === 'manual' ? '手动导入' : '进程内存回收';
     return '<div class="hint" style="margin:0 0 12px;color:var(--accent2)">解码密钥已就绪（keyId '
-      + esc(atrest.keyId || '-') + '），加密凭据可直接导入。</div>';
+      + esc(atrest.keyId || '-') + '，' + how + '），加密凭据可直接导入。</div>';
   }
   if(!list.some(d => d.needsKey)) return '';
   let html = '<div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;'
     + 'padding:12px 14px;margin-bottom:14px;font-size:13px">'
-    + '<b>检测到加密凭据</b><div class="hint" style="margin:6px 0 8px" id="atrestTip">'
-    + '桌面客户端把 token 加密存储了，需要从正在运行的 WorkBuddy.exe 进程内存里回收静态密钥'
-    + '（只读，密钥只留在网关内存里）。通常几秒钟，内存大时要十几秒。</div>';
+    + '<b>检测到加密凭据</b><div class="hint" style="margin:6px 0 8px" id="atrestTip">';
+  if(atrest.huntSupported){
+    html += '桌面客户端把 token 加密存储了，需要从正在运行的客户端进程内存里回收静态密钥'
+      + '（只读，密钥只留在网关内存里）。通常几秒钟，内存大时要十几秒。'
+      + '<br>回收不到时，也可以在下面手动粘贴密钥。';
+  }else{
+    html += esc(atrest.huntHint || '当前系统不支持从进程内存回收密钥。')
+      + '<br>可以在下面手动粘贴解码密钥，或改用「+ 添加账号 (OAuth)」走浏览器登录。';
+  }
+  html += '</div>';
   if(atrest.huntSupported){
     html += '<button class="primary mini" onclick="recoverAtrestKey(this)">回收密钥</button>';
-  }else{
-    html += '<div class="hint" style="color:var(--warn)">当前系统（' + esc(atrest.platform)
-      + '）不支持进程内存回收，请改用「+ 添加账号 (OAuth)」。</div>';
   }
+  html += '<div style="display:flex;gap:8px;align-items:center;margin-top:10px">'
+    + '<input id="adoptKeyInput" class="slot-input" type="password" autocomplete="off"'
+    + ' spellcheck="false" placeholder="粘贴解码密钥：64 位 hex，或 44 字符 base64"'
+    + ' style="flex:1;max-width:460px">'
+    + '<button class="mini" onclick="adoptAtrestKey(this)">导入密钥</button>'
+    + '</div>'
+    + '<div class="hint" style="margin-top:6px">手工导入的密钥只留在网关内存里，'
+    + '不落盘、不写日志；导入时会先用 keyblob 校验，贴错会直接报错。</div>';
   return html + '</div>';
 }
 
@@ -7426,6 +7490,8 @@ function renderDesktopScan(list, atrest){
   const bad = list.filter(d => !d.valid);
   const needKey = bad.filter(d => d.needsKey);
   const broken = bad.filter(d => !d.needsKey);
+  // 回收只在 Windows 上有；其他平台这一列改成「导入」（手工粘贴）。
+  const keyAction = (atrest && atrest.huntSupported) ? '需要先回收密钥' : '需要先导入密钥';
   // Use every account across both realms: the visible list is filtered by the
   // current view, so an earlier import could otherwise look "not imported".
   const already = window.SCAN_POOL && window.SCAN_POOL.size
@@ -7481,7 +7547,7 @@ function renderDesktopScan(list, atrest){
     html += '<table><tbody>';
     needKey.forEach(d => {
       html += '<tr><td class="mono" style="font-size:11px">' + esc(d.file) + '</td>'
-        + '<td style="color:var(--dim);font-size:12px;text-align:right">需要先回收密钥</td></tr>';
+        + '<td style="color:var(--dim);font-size:12px;text-align:right">' + esc(keyAction) + '</td></tr>';
     });
     html += '</tbody></table>';
   }

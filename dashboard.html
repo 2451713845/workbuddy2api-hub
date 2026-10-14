@@ -7973,7 +7973,12 @@ async function startDashboard(){
   // 别让国内版那条约 2 秒的成长任务接口把首屏的用量卡片拖在后面。
   await loadSettings();
   await initRealm();
-  await Promise.all([loadAccounts(), loadModels(), loadGrowthTasks(),
+  // 成长任务那条走上游、约 2 秒，只服务「任务与福利」页，而且它自己渲染。原来
+  // 它在这一批 Promise.all 里，switchMainTab 因此被押到它后面——落在数据看板
+  // 页签时，KPI 要等这两秒过去才开始发 /usage/analytics。这里只把它摘出来让它
+  // 并行跑，其余照旧等待；异常自己收，别变成未处理的拒绝。
+  loadGrowthTasks().catch(() => {});
+  await Promise.all([loadAccounts(), loadModels(),
                      loadSchedulerStatus(), refresh(), loadAgentsAvailability()]);
   updateRecentLimitButtons();
   // The head script already resolved this before first paint; re-apply it

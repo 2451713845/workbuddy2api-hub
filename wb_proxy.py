@@ -8729,18 +8729,27 @@ def _usage_cache_analytics_hours_ok(hours):
 
 
 def _usage_cache_analytics_day_ok(bucket):
-    """analytics 的日桶：窗口形状 maps + at（本地午夜）+ hours 子表。
+    """analytics 的日桶：窗口形状 maps + at（本地午夜）+ 可选的 hours 子表。
 
-    小时层要靠 at 与小时子表回答自定义窗口，两者缺一这份状态就只能服务
-    按日对齐的窗口——旧版本写下的日桶（没有这两个键）因此在这里被拒，
-    升级后 analytics 整体重折一次（一次性代价），小时层立刻就有历史可借；
-    snapshot/series 等其余四份状态照旧采用，不受影响。
+    hours 缺席是合法状态，不是损坏：剪枝线（_prune_day_buckets 的 hours_keep
+    一段）会把保留窗口之外的旧天的小时表摘掉，本地午夜落在不存在的小时里那天
+    也会被摘掉；只折窗口半的日桶在「这天没有小时表」时照旧回答按日对齐的窗口，
+    而整点窗口本来就由求和侧按 hours is None 退回整段扫描
+    （_analytics_window_from_hours），所以采纳仍然正确。与
+    _usage_cache_snapshot_ok / _usage_cache_series_bucket_ok 对 hours 的容忍
+    同一套规矩。
+
+    at 则必须留着：旧版本写下的日桶没有这个键（也就没有小时层），在这里被拒，
+    升级后 analytics 整体重折一次、小时层立刻就有历史可借。只放任 hours 缺席，
+    这次一次性代价就不会被剪枝线反复引燃——否则只要还在折新行，剪枝线天天把旧天
+    的小时表摘掉，整份状态就天天被判废、每次进程启动都要付一次全量重折。
     """
     if not isinstance(bucket, dict):
         return False
     if not _usage_cache_number(bucket.get("at")):
         return False
-    if not _usage_cache_analytics_hours_ok(bucket.get("hours")):
+    hours = bucket.get("hours")
+    if hours is not None and not _usage_cache_analytics_hours_ok(hours):
         return False
     return _usage_cache_analytics_window_ok(bucket)
 

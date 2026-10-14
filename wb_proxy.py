@@ -10149,10 +10149,11 @@ def merge_catalog(primary, realm=None, extras=False):
         source_static = list(wb_catalog.STATIC_INTL_MODELS) + list(wb_catalog.STATIC_CN_MODELS)
     else:
         source_static = getattr(wb_catalog, "STATIC_CN_MODELS" if r == "cn" else "STATIC_INTL_MODELS", wb_catalog.STATIC_MODELS)
+    primary_ids = set(m for m, _ in (primary or []))
     for item in source_static:
         mid = item.get("id")
-        # First catalog wins for a shared id, so the intl entry is not
-        # overwritten by its cn counterpart when both are merged.
+        if mid == "hy4-preview-f" and "hy4-preview" in primary_ids and "hy4-preview-f" not in primary_ids:
+            continue
         if mid and is_chat_model(mid) and mid not in merged:
             merged[mid] = dict(item)
     for mid, meta in primary or []:
@@ -10168,9 +10169,11 @@ def merge_catalog(primary, realm=None, extras=False):
         elif mid not in merged:
             merged[mid] = {}
     order = CN_UI_ORDER if r == "cn" else INTL_UI_ORDER
-    out = []
     if r == "all":
         order = list(INTL_UI_ORDER) + [m for m in CN_UI_ORDER if m not in INTL_UI_ORDER]
+    if primary_ids:
+        order = [("hy4-preview" if (m == "hy4-preview-f" and "hy4-preview" in primary_ids and "hy4-preview-f" not in primary_ids) else m) for m in order]
+    out = []
     seen = set()
     for mid in order:
         if mid in merged and mid not in seen:
@@ -10566,9 +10569,9 @@ def curate_remote_catalog(realm, ids, meta=None):
             continue
         if mid.endswith("-f"):
             base = mid[:-2]
-            if base in known and free(base) and not free(mid):
+            if base in ids and free(base) and not free(mid):
                 continue
-        elif (mid + "-f") in known and free(mid + "-f") and not free(mid):
+        elif (mid + "-f") in ids and free(mid + "-f") and not free(mid):
             continue
         out.append(mid)
     return out

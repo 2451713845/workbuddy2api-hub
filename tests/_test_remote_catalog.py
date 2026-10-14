@@ -172,12 +172,13 @@ class RemoteCatalogTests(unittest.TestCase):
             "glm-5.3", "glm-5.2", "kimi-k3", "kimi-k2.6", "kimi-k2.8-preview"])
 
     def test_cn_keeps_the_pinned_free_variant(self):
+        # 实时 meta 为准：上游已下线 hy4-preview-f 且 hy4-preview 为收费 (0.29x) 时，如实对外宣告 hy4-preview
         P.fetch_remote_product_config = (
             lambda realm: (CN_IDS, CN_META) if realm == "cn" else None)
         ids = [m for m, _ in P.fetch_models("cn")]
-        self.assertEqual(ids[0], "hy4-preview-f")
-        self.assertIn("hy4-preview-f", ids)    # pin: free, remote no longer lists it
-        self.assertNotIn("hy4-preview", ids)   # paid sibling of the free one
+        self.assertEqual(ids[0], "hy4-preview")
+        self.assertIn("hy4-preview", ids)
+        self.assertNotIn("hy4-preview-f", ids)
         self.assertNotIn("hy3-x", ids)         # -x variant
         self.assertNotIn("auto", ids)          # auto-router alias
 
@@ -301,7 +302,7 @@ class RemoteCatalogTests(unittest.TestCase):
         P.product_config_path = lambda realm: path
         P._models_cache["cn"] = {"at": 0.0, "data": None}
         ids = [m for m, _ in P.fetch_models("cn")]
-        self.assertEqual(ids[0], "hy4-preview-f")
+        self.assertEqual(ids[0], "hy4-preview")
         self.assertNotIn("auto", ids)
         self.assertIn("new-model-9", ids)   # live-only name with credits ships, no release
         self.assertNotIn("uncredited-model", ids)  # unpriced model is hidden until credits configured

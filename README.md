@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.7.3-2496ED?style=flat-square" alt="Version 1.6.20"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.7.4-2496ED?style=flat-square" alt="Version 1.6.20"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -363,12 +363,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
-- **账号页自己就能换版本**：账号列表、「当前禁用」与签到记录都按当前视图（国际版 / 国内版）取数，可切换的入口原本只在网关页那两张出口卡片上——账号独立成页签之后，换一版得先跳回网关页再跳回来。现在账号页页头右侧也有一个版本切换，与那两张卡片是同一份状态（`VIEW_REALM`），任一处切换另一处立刻跟上；它切的是**视图**，网关默认出口仍只由网关页那张卡片上的按钮改。合并模式（「账号独立成一个页签」关闭，默认）下账号区块搬去网关页时，这个切换跟着搬到账号区块正上方。
-
-已发布版本的完整记录（v1.4.5 ~ v1.7.3，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
-- **macOS / Linux 也能导入桌面客户端已登录的账号：解码密钥支持手工导入**（#344）：桌面客户端自 2026-09-24 起把 token 存成 `$wbEncrypted` 信封，而静态密钥的回收只实现了 Windows 一条路（读客户端进程内存），macOS / Linux 用户点「回收密钥」必然失败、账号数恒为 0。现在「扫描桌面客户端账号」弹窗在各平台都给出密钥输入框，可粘贴 64 位 hex 保护密钥或 44 字符 base64 的 `atRestSecretKey`（`POST /accounts/import/desktop` 新增 `keyText` 字段）；落进内存前必须过 keyblob 自检，贴错只报错，既不留下坏密钥也不顶掉已有的好密钥。非 Windows 的提示文案不再引导用户去点一个必然失败的按钮，密钥来路（回收 / 手动导入）也会显示出来。绿色包自带的精简 Python 仍只覆盖 Windows，macOS / Linux 走系统 Python（需 3.9+），启动脚本回退时会明确打印解释器路径与版本。
-
-- **一键配置写出的客户端配置与凭据文件改为 owner-only（0600）**（#345）：此前经 `open()` 默认权限落盘（umask 022 下为 0644），macOS/Linux 上 DSH 桌面端会因 `.credentials.yaml` 可被属主之外读取而拒绝启动，且用户手动 `chmod 600` 后再点一次配置就被打回；现在新建文件一律 0600，已存在文件只在更宽时收紧（用户自行加固的更严权限原样保留），备份文件与 `restore` 写回同样如此。Windows 无 POSIX 权限位，行为不变。
+已发布版本的完整记录（v1.4.5 ~ v1.7.4，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
 ## 七、致谢与引用声明 (Credits & References)
 

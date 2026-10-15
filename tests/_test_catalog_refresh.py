@@ -23,9 +23,16 @@ What that function must guarantee, and what this suite pins:
 成功）的 realm 由后台循环补一次；成功打点、失败不打点（随循环的每小时节奏
 继续补）；没有可用账号的 realm 静默跳过。
 
-No network: fetch_remote_product_config is stubbed in every test.
+目录落盘存档（CatalogDiskDumpTests）：成功拉取后把 /v3/config 响应体原样
+落盘一份（catalog/，gitignored、运行时产生），纯存档不参与读取路径；写盘
+失败静默，不影响取数。
+
+No network: fetch_remote_product_config is stubbed in every test; the dump
+test exercises the real fetch with wb_accounts.urlopen stubbed instead.
 """
+import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -359,6 +366,88 @@ class CatalogDailyTests(unittest.TestCase):
         self.assertEqual(P.catalog_daily_due(), ["intl", "cn"])
         P.note_remote_catalog("cn")
         self.assertNotIn("cn", P.catalog_daily_due())
+
+
+def config_payload(ids):
+    """A /v3/config response in the shape the endpoint answers with."""
+    return {"code": 0,
+            "data": {"agents": [{"name": "cli", "models": list(ids)}]}}
+
+
+class _FakeResponse(object):
+    def __init__(self, payload):
+        self._data = json.dumps(payload).encode("utf-8")
+
+    def read(self):
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _Account(object):
+    access_token = "tok"
+    uid = "u-1"
+    proxy = None
+
+
+class _FakePool(object):
+    def representative(self, realm=None):
+        return _Account()
+
+
+class CatalogDiskDumpTests(unittest.TestCase):
+    """成功拉取后把 /v3/config 响应体原样落盘一份，纯存档。
+
+    文件落在 CATALOG_CACHE_DIR（默认 <script>/catalog，gitignored、运行时
+    产生、更新不覆盖）。网关自己不读它，所以这里只钉两件事：成功一次就有
+    一份最新副本（内容与响应体一致、无 .tmp 残留）、写盘失败静默不伤取数。
+    """
+
+    def setUp(self):
+        self._dir = tempfile.mkdtemp(prefix="wb-catalog-dump-")
+        self._orig = (P.CATALOG_CACHE_DIR, P.POOL, P.wb_accounts.urlopen)
+        P.CATALOG_CACHE_DIR = self._dir
+        P.POOL = _FakePool()
+
+    def tearDown(self):
+        P.CATALOG_CACHE_DIR, P.POOL, P.wb_accounts.urlopen = self._orig
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def test_a_successful_fetch_dumps_the_payload(self):
+        payload = config_payload(["glm-5.3", "hy3"])
+
+        def fake_urlopen(req, timeout=10, proxy=None):
+            return _FakeResponse(payload)
+
+        P.wb_accounts.urlopen = fake_urlopen
+        parsed = P.fetch_remote_product_config("cn")
+        self.assertIsNotNone(parsed)
+        path = P.catalog_cache_path("cn")
+        self.assertTrue(os.path.exists(path), path)
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), payload)
+        # 原子写不残留 .tmp；目录里只有这一份存档。
+        self.assertEqual(os.listdir(self._dir), ["product-config-cn.json"])
+
+    def test_a_failed_fetch_dumps_nothing(self):
+        def fake_urlopen(req, timeout=10, proxy=None):
+            raise OSError("boom")
+
+        P.wb_accounts.urlopen = fake_urlopen
+        self.assertIsNone(P.fetch_remote_product_config("cn"))
+        self.assertEqual(os.listdir(self._dir), [])
+
+    def test_persist_failure_is_silent(self):
+        """写盘失败不是取数失败：不抛异常、不影响调用方。"""
+        blocker = os.path.join(self._dir, "blocker")
+        with open(blocker, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        P.CATALOG_CACHE_DIR = blocker      # makedirs 必败（父路径是文件）
+        P.persist_remote_catalog("cn", config_payload(["glm-5.3"]))   # 不抛
 
 
 if __name__ == "__main__":

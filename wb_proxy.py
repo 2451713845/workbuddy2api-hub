@@ -402,6 +402,11 @@ _models_cache = {"intl": {"at": 0.0, "data": None}, "cn": {"at": 0.0, "data": No
 #: file_mtime 是桌面缓存文件自己的写入时刻（仅配置文件来源，可能远早于
 #: fetched_at——那正是「清单是不是新鲜」的证据）。与 _models_cache 同批更新。
 _catalog_meta = {}
+#: 目录落盘存档：每次成功从上游 /v3/config 拉到清单就写一份响应体副本，纯留档
+#: （网关自己不读它）。与 usage 一样运行时产生、在 .gitignore 里，不参与提交
+#: 与更新；覆盖目录用 WB_PROXY_CATALOG_DIR。
+CATALOG_CACHE_DIR = os.environ.get("WB_PROXY_CATALOG_DIR") \
+    or os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalog")
 # Usage accounting: every upstream response carries a usage block, and the
 # proxy also records one JSONL line per request. Defaults to a folder next to
 # this script; override with --usage-dir or WB_PROXY_USAGE_DIR.
@@ -10646,6 +10651,8 @@ def fetch_remote_product_config(realm):
             continue
         parsed = parse_remote_catalog(payload)
         if parsed:
+            # 成功副本落盘留档（catalog/，纯存档；见 persist_remote_catalog）。
+            persist_remote_catalog(realm, payload)
             return parsed
         last = "empty catalogue"
     log("remote catalog: %s fetch failed (%s)" % (realm, last))
@@ -10776,6 +10783,28 @@ def product_config_path(realm):
     home = os.path.expanduser("~")
     cache_dir = ".workbuddy-ai" if realm == "intl" else ".workbuddy"
     return os.path.join(home, cache_dir, "cache", "acc-product-config-v3.json")
+
+
+def catalog_cache_path(realm):
+    """网关自己的落盘副本：最近一次成功拉取的 /v3/config 响应体。"""
+    return os.path.join(CATALOG_CACHE_DIR, "product-config-%s.json" % realm)
+
+
+def persist_remote_catalog(realm, payload):
+    """把刚成功拉取的 /v3/config 响应体原样落盘一份（原子写；失败静默）。
+
+    纯存档：网关自己不读它，只为留一份「最近一次 API 拿到的原始目录」——
+    重启或排查时可直接查看文件。写盘失败不是取数失败，绝不能影响本次结果。
+    """
+    try:
+        os.makedirs(CATALOG_CACHE_DIR, exist_ok=True)
+        path = catalog_cache_path(realm)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception as exc:
+        log("catalog cache: %s persist failed (%s)" % (realm, exc))
 
 
 def read_cached_remote_catalog(realm):

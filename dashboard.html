@@ -1729,6 +1729,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '每日 Token 限额': 'Daily token limit',
     '每日活跃:': 'Daily activity:',
     '每日活跃打卡 (国际版)': 'Daily activity check-in (Global)',
+    '未活跃打卡一键打卡': 'Check in the not-yet-active accounts',
+    '未活跃打卡:': 'Inactive check-in:',
+    '未活跃打卡失败:': 'Inactive check-in failed: ',
+    '未发现待打卡的国际版账号': 'No Global account is waiting for a check-in',
+    '国际版账号今天都已打卡': 'Every Global account has checked in today',
+    '今日未打卡账号': 'Accounts not checked in today',
     '每日积分限额': 'Daily credit limit',
     '临期积分优先': 'Expiring credits first',
     '读取签到记录失败:': 'Failed to read the activity log:',
@@ -2692,7 +2698,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "），加密凭据可直接导入。": "），加密憑據可直接匯入。",
     "，登录后请在「设置」中修改。": "，登入後請在「設定」中修改。",
     "；关闭后不再向 OpenRouter 取价，也不再折算任何金额，相关列、卡片与取价控件一并隐藏（只留这个开关）。": "；關閉後不再向 OpenRouter 取價，也不再折算任何金額，相關列、卡片與取價控制元件一併隱藏（只留這個開關）。",
-    "；变体继承当前已关闭": "；變體繼承目前已關閉"
+    "；变体继承当前已关闭": "；變體繼承目前已關閉",
+    "未活跃打卡一键打卡": "未活躍打卡一鍵打卡",
+    "今日未打卡账号": "今日未打卡帳號",
+    "国际版账号今天都已打卡": "國際版帳號今天都已打卡"
   };
   var HANT_TERMS = {"下拉菜单":"下拉選單","任务":"任務","会话":"會話","余额":"餘額","保存":"儲存","信息":"資訊","内存":"記憶體","凭证":"憑證","删除":"刪除","刷新":"重新整理","加载":"載入","启用":"啟用","响应":"回應","在线":"線上","复制":"複製","失败":"失敗","导入":"匯入","导出":"匯出","当前":"目前","按钮":"按鈕","搜索":"搜尋","支持":"支援","数据":"資料","文件":"檔案","日志":"日誌","权限":"權限","添加":"新增","用户":"使用者","登录":"登入","禁用":"停用","积分":"積分","端口":"埠","筛选":"篩選","粘贴":"貼上","统计":"統計","缓存":"快取","编辑":"編輯","网关":"閘道","网络":"網路","视频":"影片","计划":"計畫","设置":"設定","请求":"請求","账号":"帳號","账户":"帳戶","质量":"品質","软件":"軟體","输入框":"輸入框","运行":"執行","链接":"連結","错误":"錯誤","队列":"佇列","页面":"頁面","默认":"預設"};
   Object.keys(HANT_TERMS).forEach(function(k){ HANT_PHRASES[k] = HANT_TERMS[k]; });
@@ -3578,10 +3587,14 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="primary" id="btnPageDailyChat" onclick="doDailyChat(this)">每日活跃打卡 (国际版)</button>
+        <!-- 未活跃打卡一键打卡：只补跑今天还没有活跃打卡记录的国际版账号。
+             要打的那批与左边「今日活跃打卡状态」卡片悬停时列出的名单完全同源，
+             所以不会把已经打过的账号再打一遍、白烧它的额度。 -->
+        <button class="primary" id="btnPageDailyChatPending" onclick="doDailyChatPending(this)">未活跃打卡一键打卡</button>
       </div>
     </div>
     <div class="cards" style="margin-bottom:16px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
-      <div class="card accent2">
+      <div class="card accent2" id="cardIntlTodayActive">
         <div class="k">今日活跃打卡状态</div>
         <div class="v" id="intlTodayActiveState" style="font-size:20px">-</div>
       </div>
@@ -5647,6 +5660,43 @@ async function doDailyChat(btn){
   finally { btn.disabled = false; btn.textContent = ot; }
 }
 
+/* 今天还没有活跃打卡记录的国际版账号。判定口径与「今日活跃打卡状态」卡片完全一致
+ * （都用 activityStatusOf()），所以卡片上悬停看到的未打卡名单，就是下面按钮要打的那批。 */
+function pendingDailyChatAccounts(){
+  const all = window.ACCOUNTS || [];
+  return all.filter(a => a.realm === 'intl' && a.enabled).filter(a => {
+    const s = activityStatusOf(a);
+    return !(s.kind === 'ok' || s.kind === 'done');
+  });
+}
+
+// 卡片悬停提示：把未打卡账号逐个列出来，省得去账号页一个个比对。
+function pendingDailyChatTip(pending){
+  const MAX = 30;
+  const lines = pending.slice(0, MAX).map(a => '· ' + (a.nickname || String(a.uid || '').slice(0, 8)));
+  if(pending.length > MAX) lines.push('· …');
+  return '今日未打卡账号 (' + pending.length + ')：\n' + lines.join('\n');
+}
+
+/* 未活跃打卡一键打卡：只对今天还没打过卡的国际版账号补跑，名单交给服务端精确执行。
+ * 全部已打卡时直接提示，不发请求——重复打卡不会多给积分，只会白烧账号额度。 */
+async function doDailyChatPending(btn){
+  const pending = pendingDailyChatAccounts();
+  if(!pending.length){ toast("国际版账号今天都已打卡", "ok"); return; }
+  btn.disabled = true; const ot = btn.textContent; btn.textContent = "打卡中...";
+  try {
+    const r = await postJSON("/accounts/daily-chat", {uids: pending.map(a => String(a.uid))});
+    const res = r.results || [];
+    if(!res.length) toast("未发现待打卡的国际版账号", "warn");
+    else {
+      const summary = res.map(x => (x.nickname||x.uid.slice(0,6)) + ": " + (x.ok ? "活跃打卡成功" : (x.error||x.msg))).join("；");
+      toast("未活跃打卡: " + summary, res.some(x => x.ok) ? "ok" : "warn");
+    }
+    await refreshActiveRealm(); window.updateUI(); loadAccounts(); loadModels();
+  }catch(e){ toast("未活跃打卡失败: " + e.message, "bad"); }
+  finally { btn.disabled = false; btn.textContent = ot; }
+}
+
 /* 网页通道打卡：只建网页端会话（官方每日活跃只认网页端对话）。
  * 会真的起一次任务，所以先确认一次。 */
 async function doDailyChatWeb(btn){
@@ -6561,16 +6611,24 @@ async function loadActivityToday(){
 function updateTaskPageCheckinCards(){
   const allList = window.ACCOUNTS || [];
   const stateEl = document.getElementById("intlTodayActiveState");
+  const intlCard = document.getElementById("cardIntlTodayActive");
   if(stateEl){
+    // 卡片（与卡片里的数值）都挂上同一个 title，鼠标落在卡片任何位置都能看到名单。
+    const setCardTip = tip => {
+      stateEl.title = tip;
+      if(intlCard) intlCard.title = tip;
+    };
     const intlAccts = allList.filter(a => a.realm === 'intl' && a.enabled);
     if(!intlAccts.length){
       stateEl.textContent = '无国际账号';
+      setCardTip('');
     } else {
       const isDone = a => {
         const s = activityStatusOf(a);
         return s.kind === 'ok' || s.kind === 'done';
       };
-      const doneCount = intlAccts.filter(isDone).length;
+      const pending = intlAccts.filter(a => !isDone(a));
+      const doneCount = intlAccts.length - pending.length;
       if(doneCount === intlAccts.length){
         stateEl.innerHTML = '<span style="color:var(--accent2)">今日已打卡 (' + doneCount + '/' + intlAccts.length + ')</span>';
       } else if(doneCount > 0){
@@ -6578,6 +6636,8 @@ function updateTaskPageCheckinCards(){
       } else {
         stateEl.innerHTML = '<span style="color:var(--warn)">今日未打卡 (0/' + intlAccts.length + ')</span>';
       }
+      // 悬停看未打卡名单：与「未活跃打卡一键打卡」按钮要打的那批同源，看到什么就打什么。
+      setCardTip(pending.length ? pendingDailyChatTip(pending) : '国际版账号今天都已打卡');
     }
   }
 

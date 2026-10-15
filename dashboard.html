@@ -1293,6 +1293,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '到期时间': 'Expires at',
     '刷新': 'Refresh',
     '刷新中...': 'Refreshing...',
+    '刷新模型清单': 'Refresh catalog',
+    '立即从上游 API 重新拉取当前视图版本的模型清单（不走缓存；同一版本 30 秒内只能刷一次）': 'Refetch the model catalog of the current view from the upstream API (bypassing cache; limited to one refresh per version every 30s)',
     '刷新凭证': 'Refresh token',
     '一键刷新凭证': 'Refresh all tokens',
     '刷新失败:': 'Refresh failed:',
@@ -1426,7 +1428,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '展开本页导航': 'Expand section navigation',
     '展开查看每个模型当前生效的策略': 'Expand to see the policy currently in effect for each model',
     '展开逐条查看 / 手填 OpenRouter id': 'Expand to inspect entry by entry / enter an OpenRouter id by hand',
-    '展示当前视图下官方对话大模型、上下文容量、推理/视觉能力及在售倍率': 'Official chat models in the current view, with their context size, reasoning/vision abilities and current rate',
+    '展示当前视图下官方对话大模型、上下文容量、推理/视觉能力、思考控制、默认采样参数及在售倍率': 'Official chat models in the current view, with their context size, reasoning/vision abilities, thinking controls, default sampling parameters and current rate',
     '巡检中...': 'Checking...',
     '工具': 'Tools',
     '已为': 'Set to',
@@ -1939,6 +1941,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '未检测到': 'Not Detected',
     '网关地址': 'Gateway URL',
     '默认模型': 'Default Model',
+    '默认采样参数': 'Default sampling',
     '检测本机已安装的 AI 编程客户端，一键把它们的配置指向本网关；原始文件会先备份，随时可一键还原。': 'Detect AI coding clients installed on this machine and point them at this gateway with one click; original files are backed up first and can be restored anytime.',
     '写入各客户端配置时使用的网关地址、鉴权 Key 与默认模型。': 'The gateway URL, auth key and default model written into each client config.',
     '重新检测本机客户端': 'Re-detect local clients',
@@ -2236,6 +2239,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "」的全局默认请填 0 或正整数": "」的全域性預設請填 0 或正整數",
     "一键刷新凭证": "一鍵重新整理憑證",
     "上下文窗口": "上下文視窗",
+    "默认采样参数": "預設取樣參數",
     "上下文缓存命中率": "上下文快取命中率",
     "上游 429": "上游 429",
     "上游": "上游",
@@ -2297,6 +2301,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "删除时密钥已被抹掉，无法恢复、也无法再用于请求。保留这条记录是为了让「按 API Key 的消耗归属」里这些 Key 的历史用量仍然显示名字。": "刪除時金鑰已被抹掉，無法恢復、也無法再用於請求。保留這條記錄是為了讓「按 API Key 的消耗歸屬」裡這些 Key 的歷史用量仍然顯示名字。",
     "刷新": "重新整理",
     "刷新中...": "重新整理中...",
+    "刷新模型清单": "重新整理模型清單",
+    "立即从上游 API 重新拉取当前视图版本的模型清单（不走缓存；同一版本 30 秒内只能刷一次）": "立即從上游 API 重新拉取目前檢視版本的模型清單（不走快取；同一版本 30 秒內只能重新整理一次）",
     "刷新凭证": "重新整理憑證",
     "刷新失败:": "重新整理失敗:",
     "刷新失败: ": "重新整理失敗: ",
@@ -2366,7 +2372,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "尚未选择文件。": "尚未選擇檔案。",
     "展开查看每个模型当前生效的策略": "展開檢視每個模型目前生效的策略",
     "展开逐条查看 / 手填 OpenRouter id": "展開逐條檢視 / 手填 OpenRouter id",
-    "展示当前视图下官方对话大模型、上下文容量、推理/视觉能力及在售倍率": "展示目前檢視下官方對話大模型、上下文容量、推理/視覺能力及在售倍率",
+    "展示当前视图下官方对话大模型、上下文容量、推理/视觉能力、思考控制、默认采样参数及在售倍率": "展示目前檢視下官方對話大模型、上下文容量、推理/視覺能力、思考控制、預設取樣參數及在售倍率",
     "已为": "已為",
     "已为 ": "已為 ",
     "已从桌面客户端进程回收密钥（只留在内存里）": "已從桌面客戶端程序回收金鑰（只留在記憶體裡）",
@@ -3405,20 +3411,32 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 
   <!-- 版本模型库与能力清单 -->
   <section>
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
       <h2 style="margin:0">网关模型清单<em id="modelsRealmTag" style="color:var(--dim);font-weight:500"></em><em id="availModelCount"></em></h2>
-      <div style="font-size:12px;color:var(--dim)">展示当前视图下官方对话大模型、上下文容量、推理/视觉能力及在售倍率</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="font-size:12px;color:var(--dim)">展示当前视图下官方对话大模型、上下文容量、推理/视觉能力、思考控制、默认采样参数及在售倍率</div>
+        <!-- 手动刷新：强制走一次上游 /v3/config（只在当前视图的版本上，用该
+             版本的账号），成功后本表立即重载。服务端同一版本 30s 冷却。 -->
+        <button class="sec mini" id="btnRefreshModels" onclick="refreshModelCatalog(this)"
+                title="立即从上游 API 重新拉取当前视图版本的模型清单（不走缓存；同一版本 30 秒内只能刷一次）">刷新模型清单</button>
+      </div>
     </div>
+    <!-- 清单来源横幅：API 获取 → 绿色状态条（附刷新时间）；非 API（项目默认
+         信息/缓存文件）→ 黄色警示「模型、倍率数据可能不一致」。内容由
+         /v1/models 的 catalog 字段驱动，见 renderModelsSourceLine。 -->
+    <div id="modelsSourceLine" style="font-size:12px;color:var(--dim);margin:0 0 12px;min-height:16px"></div>
     <div style="overflow-x:auto">
       <table id="modelsTable" class="data-cards">
         <thead>
           <tr>
-            <th style="text-align:left;width:220px">模型 ID</th>
-            <th style="text-align:center;width:140px">消费倍率 / 优惠</th>
-            <th style="text-align:center;width:160px">模型能力</th>
-            <th style="text-align:center;width:110px">上下文窗口</th>
+            <th style="text-align:left;width:200px">模型 ID</th>
+            <th style="text-align:left;width:100px">名称</th>
+            <th style="text-align:center;width:150px">消费倍率 / 优惠</th>
+            <th style="text-align:center;width:170px">模型能力</th>
+            <th style="text-align:center;width:100px">上下文窗口</th>
             <th style="text-align:center;width:100px">最大输出</th>
-            <th style="text-align:left">思考档位</th>
+            <th style="text-align:left;width:170px">思考档位</th>
+            <th style="text-align:left">默认采样参数</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -5052,14 +5070,104 @@ async function initRealm(){
   window.updateUI();
 }
 
+async function refreshModelCatalog(btn){
+  // 手动刷新模型清单：强制走一次上游 /v3/config（服务端执行，绕过 300s 缓存），
+  // 只刷当前视图版本——这张表显示的是哪个版本，刷新按钮就只拉哪个版本，绝
+  // 不跨区（服务端会挑该版本自己的账号发请求）。完成后立即重载表格。
+  const realm = window.VIEW_REALM === 'cn' ? 'cn' : 'intl';
+  const label = realm === 'cn' ? '国内版' : '国际版';
+  if(btn) btn.disabled = true;
+  const prevText = btn ? btn.textContent : '';
+  if(btn) btn.textContent = '刷新中...';
+  try{
+    const r = await postJSON('/catalog/refresh', {realm: realm});
+    if(r && r.ok){
+      toast(label + '模型清单：' + (r.msg || '已更新'), 'ok');
+      await loadModels();
+    } else if(r && r.cooldown){
+      // 冷却不是失败：清单还在、只是这次没到窗口，按提示语气说。
+      toast(label + '模型清单：' + (r.msg || '刷新太频繁'), 'warn');
+    } else {
+      toast(label + '模型清单刷新失败：' + ((r && r.msg) || '未知原因'), 'warn');
+    }
+  }catch(e){
+    toast(label + '模型清单刷新失败：' + e.message, 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = prevText; }
+  }
+}
+
 async function loadModels(){
   try{
     const r = await getJSON('/v1/models?realm=' + encodeURIComponent(window.VIEW_REALM));
     MODELS_DATA = r.data || [];
+    renderModelsSourceLine(r.catalog || null);
     renderAvailableModels();
   }catch(e){
     console.error('loadModels error:', e);
   }
+}
+
+// 清单来源横幅：把「通过 API 获取的最新数据」和「项目默认/缓存文件数据」在
+// 视觉上分清楚——非 API 来源给黄色警示（模型、倍率数据可能不一致），API 来源
+// 给绿色状态条并附刷新时间。数据由 /v1/models 响应的 catalog 字段驱动（见
+// wb_proxy.catalog_meta）；旧版服务端没有该字段时如实提示。
+const CATALOG_SOURCE_ORIGIN = {
+  remote:   '上游 API · /v3/config',
+  endpoint: '上游 API · /v1/models 端点',
+  cache:    '本地配置文件（桌面客户端缓存）',
+  legacy:   '本地配置文件（桌面客户端缓存）',
+  bundled:  '内置快照'
+};
+const CATALOG_BANNER_BASE = 'font-size:12px;margin:0 0 12px;padding:7px 10px;border-radius:6px;'
+  + 'display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;line-height:1.5;';
+
+function fmtCatalogStamp(sec){
+  const n = Number(sec);
+  if(!n || n <= 0) return '';
+  const d = new Date(n * 1000);
+  if(isNaN(d.getTime())) return '';
+  const p = v => String(v).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+    + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+function renderModelsSourceLine(meta){
+  const el = document.getElementById('modelsSourceLine');
+  if(!el) return;
+  const tip = '清单构建顺序：先请求上游 API（/v3/config，用当前视图版本的账号）→ 失败则读取本机桌面客户端缓存文件 → 都拿不到才用内置快照。'
+    + '清单在 5 分钟缓存期内复用，过期自动重取；网关后台每天也会兜底获取一次；点「刷新模型清单」可立即从上游更新。';
+  if(!meta || !meta.source){
+    el.style.cssText = CATALOG_BANNER_BASE + 'background:transparent;border:1px dashed var(--line);color:var(--dim)';
+    el.title = tip;
+    el.innerHTML = '数据来源：未知（当前网关进程版本较旧未提供来源信息，重启网关后可见）';
+    return;
+  }
+  const isApi = (meta.source === 'remote' || meta.source === 'endpoint');
+  const at = fmtCatalogStamp(meta.fetched_at);
+  el.title = tip;
+  if(isApi){
+    el.style.cssText = CATALOG_BANNER_BASE
+      + 'background:var(--accent2-soft);border:1px solid rgba(94,140,79,.28);color:var(--accent2)';
+    el.innerHTML = '<b>✓ 当前为通过 API 获取的最新数据</b>'
+      + '<span style="color:var(--dim)">刷新时间 ' + esc(at || '—')
+      + ' · 来源 ' + esc(CATALOG_SOURCE_ORIGIN[meta.source] || meta.source) + '</span>';
+    return;
+  }
+  // 非 API（缓存文件 / 内置快照）：警示横幅 + 真实出处做小字。
+  let origin = CATALOG_SOURCE_ORIGIN[meta.source] || meta.source;
+  if(meta.source === 'cache' || meta.source === 'legacy'){
+    const fm = fmtCatalogStamp(meta.file_mtime);
+    if(fm) origin += ' · 文件写入于 ' + fm;
+    if(at) origin += ' · 网关读取于 ' + at;
+  } else if(at){
+    origin += ' · 生成于 ' + at;
+  }
+  el.style.cssText = CATALOG_BANNER_BASE
+    + 'background:var(--warn-soft);border:1px solid rgba(183,121,31,.35);color:var(--warn)';
+  el.innerHTML = '<b>⚠ 当前为项目默认模型信息（未经 API 刷新）：模型、倍率数据可能不一致</b>'
+    + '<span style="color:var(--dim)">数据出处：' + esc(origin)
+    + ' · 建议点击「刷新模型清单」获取最新数据</span>';
 }
 
 function renderAvailableModels(){
@@ -5068,7 +5176,7 @@ function renderAvailableModels(){
   const countEm = document.getElementById('availModelCount');
   if(countEm) countEm.textContent = '(共 ' + MODELS_DATA.length + ' 个)';
   if(!MODELS_DATA.length){
-    tb.innerHTML = '<tr><td colspan="6" class="empty">暂无可用模型</td></tr>';
+    tb.innerHTML = '<tr><td colspan="8" class="empty">暂无可用模型</td></tr>';
     return;
   }
   tb.innerHTML = MODELS_DATA.map(m => {
@@ -5144,7 +5252,7 @@ function renderAvailableModels(){
       }
     }
 
-    // 5. 思考档位
+    // 5. 思考档位（档位徽章 + 默认档位 / 能否关闭思考两行注记）
     let effort = '<span style="color:var(--dim)">—</span>';
     const renderEffortBadge = e => {
       const lvl = String(e || '').toLowerCase();
@@ -5159,14 +5267,48 @@ function renderAvailableModels(){
     } else if(m.supports_reasoning){
       effort = '<span class="badge-effort">原生</span>';
     }
+    const effortNotes = [];
+    if(m.reasoning_default_effort){
+      effortNotes.push('默认 ' + esc(String(m.reasoning_default_effort)));
+    }
+    if(m.reasoning_can_disable === true){
+      effortNotes.push('可关闭思考');
+    } else if(m.reasoning_can_disable === false){
+      effortNotes.push('不可关闭思考');
+    }
+    if(effortNotes.length){
+      effort += '<div style="font-size:11px;color:var(--dim);margin-top:2px">' + effortNotes.join(' · ') + '</div>';
+    }
+
+    // 6. 名称（默认模型带星标；描述挂在名称的悬浮提示上）
+    const nm = String(m.name || '').trim();
+    const nmDesc = String(m.description || '').trim();
+    const nameCell = '<td style="text-align:left" data-label="名称">'
+      + (m.is_default ? '<span title="默认模型" style="color:var(--accent)">★</span> ' : '')
+      + (nm
+          ? '<span' + (nmDesc ? ' title="' + esc(nmDesc) + '"' : '') + '>' + esc(nm) + '</span>'
+          : '<span style="color:var(--dim)">—</span>')
+      + '</td>';
+
+    // 7. 默认采样参数（上游对缺省请求生效的采样值；有的模型只给部分字段）
+    const samples = [];
+    if(m.temperature != null) samples.push('温度 ' + esc(String(m.temperature)));
+    if(m.top_p != null) samples.push('top_p ' + esc(String(m.top_p)));
+    const sampleCell = '<td style="text-align:left" data-label="默认采样参数">'
+      + (samples.length
+          ? '<span style="font-size:12px">' + samples.join(' · ') + '</span>'
+          : '<span style="color:var(--dim)">—</span>')
+      + '</td>';
 
     return '<tr>'
       + '<td style="text-align:left" class="mono" data-label="模型 ID"><b>' + esc(m.id) + '</b></td>'
+      + nameCell
       + '<td style="text-align:center" data-label="消费倍率">' + credBadge + '</td>'
       + '<td style="text-align:center" data-label="能力">' + capHtml + '</td>'
       + '<td style="text-align:center" data-label="上下文">' + ctx + '</td>'
       + '<td style="text-align:center" data-label="最大输出">' + maxOut + '</td>'
       + '<td style="text-align:left" data-label="思考档位">' + effort + '</td>'
+      + sampleCell
       + '</tr>';
   }).join('');
   applyTableSort('modelsTable');
@@ -5594,7 +5736,7 @@ const SORT_DENY_TABLES = new Set(['recent', 'desktopScanBody', 'creditsModalCont
    下标 = 表头列序号。'num' 取单元格里的数字，'text' 按文本比，null = 该列不排
    （下拉框、按钮、拼给人看的标签串）。 */
 const SORT_COL_KINDS = {
-  modelsTable:      ['text', 'num', 'text', 'num', 'num', 'text'],
+  modelsTable:      ['text', 'text', 'num', 'text', 'num', 'num', 'text', 'text'],
   growthTable:      ['text', 'text', 'num', 'num', 'text'],
   // 时间列是 ISO 串，字典序就是时间序，不必另给排序值。
   creditHistoryTable: ['text', 'text', 'text', 'num', 'num'],

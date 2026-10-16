@@ -505,6 +505,45 @@ def identify_key(supplied):
     """
     extra = () if configured_keys() else (API_KEY,)
     return wb_settings.match_api_key(ACCOUNTS_DIR, supplied, extra_keys=extra)
+# ---------------------------------------------------------------------------
+# API Key 的日志显示名（issue #397）
+# ---------------------------------------------------------------------------
+# 请求日志原本只到账号粒度（`acct=`）。多人共用一个网关时，看到异常流量分不清
+# 「是哪个人发起的」——只能事后去用量页倒推。这里把 key 的 name（没填 name 就
+# 回退 id）拼进日志行。
+#
+# 只做「id -> 显示名」的只读查表：key 本身仍由调用方显式传入（理由见
+# record_usage 的说明），不引入线程局部的隐式通道。名单带短 TTL 缓存，
+# 避免每条请求都读一次 settings.json。
+_KEY_LABEL_TTL = 5.0
+_KEY_LABEL_FALLBACK = "(切换前)"
+_key_label_cache = {"at": 0.0, "map": {}}
+_key_label_lock = threading.Lock()
+
+
+def key_label(key_id):
+    """key 的 settings id -> 日志里显示的名字；name 为空就回退 id。
+
+    空 id（未带 key / 面板会话 / 未配置 key 的部署）返回空串 —— 调用方据此
+    决定要不要拼这一段；未知 id 原样返回，日志里仍能对上一个具体的 key。
+    """
+    if not key_id:
+        return ""
+    now = time.time()
+    with _key_label_lock:
+        if (now - _key_label_cache["at"]) > _KEY_LABEL_TTL:
+            try:
+                _key_label_cache["map"] = {
+                    str(entry.get("id")): (str(entry.get("name") or "").strip()
+                                           or str(entry.get("id")))
+                    for entry in configured_keys()
+                }
+            except Exception:
+                _key_label_cache["map"] = {}
+            _key_label_cache["at"] = now
+        return _key_label_cache["map"].get(str(key_id)) or str(key_id)
+
+
 def _empty_stats():
     return {"requests": 0, "errors": 0, "prompt_tokens": 0, "completion_tokens": 0,
             "reasoning_tokens": 0, "cached_tokens": 0, "total_tokens": 0,
@@ -814,9 +853,10 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         t_tokens = fields.get("total_tokens", 0)
         dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
         acc_tag = f" acct={account[:8]}" if account else ""
+        key_tag = f" key={key_label(key)}" if key else ""
         speed_tag = f" {row.get('tokens_per_sec', 0)}t/s" if row.get("tokens_per_sec") else ""
         miss_tag = " usage=missing" if usage_missing else ""
-        log(f"chat done: model={model}{acc_tag}{dur} tokens={t_tokens} (in={fields.get('prompt_tokens',0)} out={fields.get('completion_tokens',0)}){speed_tag}{miss_tag}", tag="chat")
+        log(f"chat done: model={model}{acc_tag}{key_tag}{dur} tokens={t_tokens} (in={fields.get('prompt_tokens',0)} out={fields.get('completion_tokens',0)}){speed_tag}{miss_tag}", tag="chat")
     except Exception:
         pass
     return row
@@ -18840,11 +18880,11 @@ class Handler(BaseHTTPRequestHandler):
         t_start = time.time()
         fp = prompt_fingerprint(chat_req.get("messages"))
         log(
-            "responses: model=%s stream=%s msgs=%d effort=%r tools=%d/%d custom_tools=%s"
+            "responses: model=%s stream=%s msgs=%d effort=%r tools=%d/%d custom_tools=%s key=%s"
             % (model, want_stream, len(chat_req.get("messages") or []),
                chat_req.get("reasoning_effort"),
                len(chat_req.get("tools") or []), len(all_tools),
-               sorted(custom_names) or "-")
+               sorted(custom_names) or "-", key_label(self._key_id()) or "-")
         )
         try:
             req_realm = self._request_realm() or CURRENT_REALM
@@ -19064,9 +19104,10 @@ class Handler(BaseHTTPRequestHandler):
             client_ip = self.client_address[0] if self.client_address else ""
         except Exception:
             client_ip = ""
-        log("messages: model=%s stream=%s msgs=%d effort=%r tools=%d"
+        log("messages: model=%s stream=%s msgs=%d effort=%r tools=%d key=%s"
             % (model, want_stream, len(chat_req.get("messages") or []),
-               chat_req.get("reasoning_effort"), len(chat_req.get("tools") or [])))
+               chat_req.get("reasoning_effort"), len(chat_req.get("tools") or []),
+               key_label(self._key_id()) or "-"))
         try:
             req_realm = self._request_realm() or CURRENT_REALM
             blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
@@ -19380,13 +19421,14 @@ class Handler(BaseHTTPRequestHandler):
         given = client_effort_of(payload) or payload.get("reasoning") \
             or payload.get("thinking") or payload.get("enable_thinking")
         log(
-            "chat: model=%s client_effort=%r -> upstream_effort=%r stream=%s msgs=%d"
+            "chat: model=%s client_effort=%r -> upstream_effort=%r stream=%s msgs=%d key=%s"
             % (
                 payload.get("model"),
                 given,
                 upstream_effort_of(forwarded, payload.get("model")),
                 bool(payload.get("stream")),
                 len(forwarded.get("messages") or []),
+                key_label(self._key_id()) or "-",
             )
         )
         session_key = extract_session_key(self.headers, payload)

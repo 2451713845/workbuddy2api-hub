@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from wb_fingerprint import derive_id, generate_request_id
+from wb_fingerprint import derive_id, generate_request_id, session_id
 import wb_activity
 import wb_atrest
 import wb_identity
@@ -779,7 +779,7 @@ class Account(object):
             "canDailyChat": self.realm == "intl",
             "canReportActivity": self.realm == "cn" and not self.is_enterprise(),
             "machineId": derive_id(self.uid, "machine"),
-            "sessionId": derive_id(self.uid, "session"),
+            "sessionId": session_id(self.uid),
         }
 
     def save(self, directory):
@@ -1144,6 +1144,15 @@ class Account(object):
 
         chat 用途走 wb_identity（CLI 头 / WorkBuddy 头，可切换）；
         billing 用途维持原本的轻量标头，计费端点不吃那套身分。
+
+        chat 标头按 5.8.4 抓包对齐：官方对话请求不带 X-Machine-ID /
+        X-Session-ID（那两个只用于反馈上报），所以这里也不再发——之前发的
+        是每个账号恒定的派生值，反而是一处「网关特征」。
+
+        billing 标头仍带 X-Machine-ID / X-Session-ID，但两个都必须按账号派生：
+        网关是一个进程冒充几十台设备，一旦取进程级的值，全部账号就会共用同一个
+        session id，那是一条把它们串起来的关联键（与每账号一台设备的隔离口径
+        相悖）。见 wb_fingerprint.session_id。
         """
         cfg = get_realm_config(self.realm)
 
@@ -1162,7 +1171,7 @@ class Account(object):
                 "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
                 "X-Request-ID": generate_request_id(self.uid),
                 "X-Machine-ID": derive_id(self.uid, "machine"),
-                "X-Session-ID": derive_id(self.uid, "session"),
+                "X-Session-ID": session_id(self.uid),
             }
             if self.enterprise_id:
                 headers["X-Enterprise-Id"] = self.enterprise_id
@@ -1181,7 +1190,6 @@ class Account(object):
             realm=self.realm,
             uid=self.uid,
             token=self.access_token,
-            conversation_id=getattr(self, "conversation_id", None),
             enterprise_id=self.enterprise_id,
             tenant_id=self.enterprise_id,
         )
@@ -1193,8 +1201,6 @@ class Account(object):
             "Referer": cfg["origin"] + "/",
             "X-CodeBuddy-Request": "1",
             "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
-            "X-Machine-ID": derive_id(self.uid, "machine"),
-            "X-Session-ID": derive_id(self.uid, "session"),
         }
         headers.update(identity)
         device_token = self._device_token()

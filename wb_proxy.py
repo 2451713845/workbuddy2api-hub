@@ -13017,6 +13017,9 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         else:
             attempt_body = upstream_body
         attempt_data = json.dumps(attempt_body, ensure_ascii=False).encode("utf-8")
+        # 会话头族（X-Conversation-ID 等）由身分构造里每次请求现生成：上游不拿
+        # 这个 id 存历史，不需要按会话复用；缺了它上游的渠道校验会回 400 /
+        # code 11-128（`conversation id missing`），补的是「有」而不是「稳定」。
         req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
                                      headers=account.headers(purpose="chat"))
         try:

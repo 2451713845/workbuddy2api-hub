@@ -543,6 +543,12 @@ def normalize_usage_cache_aliases(usage):
     prompt_details = dict(usage.get("prompt_tokens_details") or {})
     prompt_details["cached_tokens"] = best
     usage["prompt_tokens_details"] = prompt_details
+    # Also ensure input_tokens_details carries it when present
+    if isinstance(usage.get("input_tokens_details"), dict):
+        input_details = dict(usage["input_tokens_details"])
+        input_details["cached_tokens"] = best
+        usage["input_tokens_details"] = input_details
+    return usage
     if isinstance(usage.get("input_tokens_details"), dict):
         input_details = dict(usage["input_tokens_details"])
         input_details["cached_tokens"] = best

@@ -13,6 +13,7 @@ credential); 401/403/429 already have their own paths.
 No network: accounts are built from dicts, the upstream call is stubbed, and
 time.sleep is recorded instead of slept.
 """
+import io
 import json
 import os
 import sys
@@ -201,7 +202,9 @@ class _OpenUpstreamHarness(unittest.TestCase):
             def apply_remaining_weights(self, weights=None):
                 return weights or {}
 
-        return Pool()
+        pool = Pool()
+        pool.accounts = accounts
+        return pool
 
     def run_request(self, urlopen, egress_backoff=None):
         """Call open_upstream once; return (raised, payload) or (None, result)."""
@@ -263,6 +266,44 @@ class SwitchOnTests(_OpenUpstreamHarness):
         key = wb_upstream_pool.egress_key(
             account.chat_base_url() + wb_proxy.CHAT_PATH, account.proxy)
         self.assertEqual(wb_egress.streak(key), 1)
+
+    def test_free_model_retries_paid_sibling_only_after_6004_when_opted_in(self):
+        account = self.add_account("u-credit-fallback")
+        reset = time.time() + 600
+        detail = ('{"code":6004,"msg":"usage exceeds frequency limit, '
+                  'reset at 2026-10-16 23:00:00 UTC+8"}')
+        error = urllib.error.HTTPError("https://upstream.invalid", 429,
+                                       "rate limit", {}, io.BytesIO(detail.encode()))
+        sent_models = []
+
+        def urlopen(req, timeout=30, proxy=""):
+            sent_models.append(json.loads(req.data.decode())["model"])
+            if len(sent_models) == 1:
+                raise error
+            return _Response(_Sock())
+
+        with mock.patch.dict(os.environ, {"WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK": "1"}), \
+                mock.patch.object(wb_proxy, "parse_rate_limit_reset", return_value=reset), \
+                mock.patch.object(wb_proxy, "apply_daily_guards", return_value=0), \
+                mock.patch.object(wb_proxy, "remaining_priority_enabled", return_value=False), \
+                mock.patch.object(wb_proxy, "upstream_timeouts", return_value=(2, 2)):
+            raised, result = self.run_request(urlopen)
+
+        self.assertIsNone(raised)
+        self.assertEqual(sent_models, ["deepseek-v4.1-flash",
+                                       "deepseek-v4.1-flash-sg"])
+        self.assertEqual(result[0]._wb_billed_model, "deepseek-v4.1-flash-sg")
+        self.assertGreater(account.cap_until("deepseek-v4.1-flash"), time.time())
+        saved = []
+        with mock.patch.object(wb_proxy, "_persist_usage",
+                               side_effect=lambda row, _label: saved.append(dict(row))):
+            wb_proxy.record_upstream_usage(
+                result[0], "deepseek-v4.1-flash",
+                {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3})
+        self.assertEqual(saved[0]["model"], "deepseek-v4.1-flash-sg")
+        self.assertEqual(saved[0]["requested_model"], "deepseek-v4.1-flash")
+        result[0].close()
+        error.close()
 
     def test_two_accounts_on_one_egress_share_the_counter(self):
         # The point of the whole change: N accounts behind one path must not

@@ -12941,7 +12941,7 @@ def _free_model_credit_fallback_enabled():
 
 
 def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None,
-                  allow_credit_fallback=True):
+                  allow_credit_fallback=True, allow_product_switch=True):
     # Refresh the daily guards before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
@@ -13005,7 +13005,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     local_net_hits = 0
     # Read once per request, not per attempt: this is a panel setting, and a
     # settings read on every retry would be pure overhead.
-    auto_switch = auto_switch_product_enabled()
+    auto_switch = (auto_switch_product_enabled()
+                   if allow_product_switch else False)
     # Panel parity: header/idle timeouts are read once per request, not
     # once per retry, so a settings read never lands in the retry loop.
     header_timeout, idle_timeout = upstream_timeouts()
@@ -13289,7 +13290,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             % (model, len(eligible), realm, paid_model))
         response, account, effort = open_upstream(
             paid_payload, session_key=session_key, target_realm=realm,
-            allow_credit_fallback=False)
+            allow_credit_fallback=False, allow_product_switch=False)
         try:
             response._wb_billed_model = paid_model
         except Exception:

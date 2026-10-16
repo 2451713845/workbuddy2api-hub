@@ -17733,6 +17733,12 @@ class Handler(BaseHTTPRequestHandler):
                 name = meta.get("name")
                 if name:
                     entry["name"] = name
+                # Vision support flag (DSH and clients use this)
+                vision = bool(meta.get("supportsImages")) and not meta.get("disabledMultimodal")
+                if mid == "glm-5.3-flash":
+                    vision = False
+                if vision:
+                    entry["supports_vision"] = True
                 # 可选的思考档位交给客户端（DSH 用它生成会话里的档位选择器）。
                 # 只宣告目录明确列出档位的模型：固定档位的模型（只有
                 # reasoning.effort、没有 supportedEfforts）不列，选了也不会改变
@@ -19463,10 +19469,18 @@ class Handler(BaseHTTPRequestHandler):
                         "completion_tokens_details": {"reasoning_tokens": 0},
                         "prompt_tokens_details": {"cached_tokens": 0},
                     }
-            record_usage(model, last_usage, stream=True,
-                         elapsed_ms=wall, ttft_ms=first_ms,
-                         gen_ms=(wall - first_ms) if first_ms is not None else None,
-                         fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+            outcome = "failed" if pending_finish == "error" else "completed"
+            if outcome == "failed":
+                record_error(model, 502, "upstream stream finished with error",
+                             elapsed_ms=wall, account=account.uid,
+                             usage=last_usage, stream=True, ttft_ms=first_ms,
+                             gen_ms=(wall - first_ms) if first_ms is not None else None,
+                             fp=fp, outcome="failed", key=self._key_id())
+            else:
+                record_usage(model, last_usage, stream=True,
+                             elapsed_ms=wall, ttft_ms=first_ms,
+                             gen_ms=(wall - first_ms) if first_ms is not None else None,
+                             fp=fp, account=account.uid, key=self._key_id(), effort=effort)
             return
 
     def _chat_nonstream_response(self, upstream, model, fp, account, t_start, effort=None):

@@ -19215,29 +19215,86 @@ class Handler(BaseHTTPRequestHandler):
         if is_account_route:
             return self._handle_accounts(path, payload)
         _apply_background_model_alias(payload)
-        if is_messages_route:
-            if path.endswith("/count_tokens"):
-                return self._handle_messages_count_tokens(payload)
+        # Check per-key concurrency limit (#359)
+        key_ok, cur_key_conc, max_key_conc = _acquire_key_slot(self.key_entry)
+        if not key_ok:
+            key_name = (self.key_entry or {}).get("name") or self._key_id() or "当前 Key"
+            message = ("Rate limit reached: API key '%s' reached its concurrency limit (%d in flight); retry shortly"
+                       % (key_name, max_key_conc))
+            record_error(payload.get("model") or "unknown", 429, message,
+                         stream=payload.get("stream"), key=self._key_id())
+            if is_messages_route:
+                return self._anthropic_error(429, message, "rate_limit_error")
+            return self._error(429, message, "rate_limit_error")
+
+        try:
+            if is_messages_route:
+                if path.endswith("/count_tokens"):
+                    return self._handle_messages_count_tokens(payload)
+                if not _chat_slots.acquire(timeout=CHAT_SLOT_WAIT_SECONDS):
+                    message = ("gateway is at its concurrent chat limit "
+                               "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
+                    record_error(payload.get("model") or "unknown", 503, message,
+                                 stream=payload.get("stream"), key=self._key_id())
+                    return self._anthropic_error(503, message, "overloaded_error")
+                try:
+                    return self._handle_messages(payload)
+                finally:
+                    _chat_slots.release()
+            # Both OpenAI-shaped routes below can hold a thread for up to 600s.
+            # Take a slot for the duration; release it in finally so every early
+            # return (including client disconnects) gives the slot back.
             if not _chat_slots.acquire(timeout=CHAT_SLOT_WAIT_SECONDS):
-                message = ("gateway is at its concurrent chat limit "
-                           "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
-                record_error(payload.get("model") or "unknown", 503, message,
-                             stream=payload.get("stream"), key=self._key_id())
-                return self._anthropic_error(503, message, "overloaded_error")
+                return self._error(503, "gateway is at its concurrent chat limit "
+                                        "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
             try:
-                return self._handle_messages(payload)
+                return self._dispatch_chat_post(path, payload)
             finally:
                 _chat_slots.release()
-        # Both OpenAI-shaped routes below can hold a thread for up to 600s.
-        # Take a slot for the duration; release it in finally so every early
-        # return (including client disconnects) gives the slot back.
-        if not _chat_slots.acquire(timeout=CHAT_SLOT_WAIT_SECONDS):
-            return self._error(503, "gateway is at its concurrent chat limit "
-                                    "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
-        try:
-            return self._dispatch_chat_post(path, payload)
         finally:
-            _chat_slots.release()
+            _release_key_slot(self.key_entry)
+
+    
+# ---------------------------------------------------------------------------
+# Per-key concurrency tracking (#359)
+# ---------------------------------------------------------------------------
+_key_active_concurrency = {}
+_key_concurrency_lock = threading.Lock()
+
+def _acquire_key_slot(key_entry):
+    """Try to acquire a concurrency slot for key_entry. Returns (ok, current, limit)."""
+    if not isinstance(key_entry, dict):
+        return True, 0, 0
+    k_id = key_entry.get("id")
+    if not k_id:
+        return True, 0, 0
+    limit = int(key_entry.get("concurrency_limit") or 0)
+    if limit <= 0:
+        return True, 0, 0
+    with _key_concurrency_lock:
+        current = _key_active_concurrency.get(k_id, 0)
+        if current >= limit:
+            return False, current, limit
+        _key_active_concurrency[k_id] = current + 1
+        return True, current + 1, limit
+
+def _release_key_slot(key_entry):
+    """Release a concurrency slot for key_entry."""
+    if not isinstance(key_entry, dict):
+        return
+    k_id = key_entry.get("id")
+    if not k_id:
+        return
+    limit = int(key_entry.get("concurrency_limit") or 0)
+    if limit <= 0:
+        return
+    with _key_concurrency_lock:
+        current = _key_active_concurrency.get(k_id, 0)
+        if current > 1:
+            _key_active_concurrency[k_id] = current - 1
+        else:
+            _key_active_concurrency.pop(k_id, None)
+
 
     def _dispatch_chat_post(self, path, payload):
         # 先挡背景请求：Codex 自己发的（记忆整理／环境建议／自动复核）

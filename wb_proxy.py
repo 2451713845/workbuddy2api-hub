@@ -9827,6 +9827,17 @@ def runtime_settings_view():
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
+        "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
+        "daily_chat_web_attempts":
+            wb_settings.daily_chat_web_attempts(ACCOUNTS_DIR,
+                                                default=wb_accounts.WEB_TURN_ATTEMPTS),
+        "daily_chat_web_attempts_default": wb_accounts.WEB_TURN_ATTEMPTS,
+        "daily_chat_web_attempts_max": wb_settings.DAILY_CHAT_WEB_ATTEMPTS_MAX,
+        "daily_chat_web_timeout":
+            wb_settings.daily_chat_web_timeout(ACCOUNTS_DIR,
+                                               default=wb_accounts.WEB_TURN_TIMEOUT),
+        "daily_chat_web_timeout_default": wb_accounts.WEB_TURN_TIMEOUT,
+        "daily_chat_web_timeout_max": wb_settings.DAILY_CHAT_WEB_TIMEOUT_MAX,
         "daily_chat_model": wb_settings.daily_chat_model(ACCOUNTS_DIR),
         "daily_chat_model_default": wb_accounts.DAILY_CHAT_MODEL,
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
@@ -17360,6 +17371,35 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_daily_chat_web(ACCOUNTS_DIR, raw)
             reply["daily_chat_web"] = raw
+        if "daily_chat_web_retry" in payload:
+            # Strictly a JSON boolean, like the other switches: "false" as a
+            # string would be truthy and silently keep retrying.
+            raw = payload.get("daily_chat_web_retry")
+            if not isinstance(raw, bool):
+                return self._error(400, "daily_chat_web_retry must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_daily_chat_web_retry(ACCOUNTS_DIR, raw)
+            reply["daily_chat_web_retry"] = raw
+        if "daily_chat_web_attempts" in payload:
+            # Whole number of tries, first one included. The wait doubles each
+            # time, so a stray extra digit is hours on one account - wb_settings
+            # owns both checks and the message.
+            raw = payload.get("daily_chat_web_attempts")
+            try:
+                wb_settings.set_daily_chat_web_attempts(ACCOUNTS_DIR, raw)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            reply["daily_chat_web_attempts"] = raw
+        if "daily_chat_web_timeout" in payload:
+            # Whole seconds only, and bounded: the retry doubles this, so a
+            # stray extra digit would park the scheduler on one account for
+            # hours. wb_settings owns both checks and the message.
+            raw = payload.get("daily_chat_web_timeout")
+            try:
+                wb_settings.set_daily_chat_web_timeout(ACCOUNTS_DIR, raw)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            reply["daily_chat_web_timeout"] = raw
         if "daily_chat_model" in payload:
             raw = payload.get("daily_chat_model") or ""
             # Empty clears the override back to the built-in id. Anything else

@@ -1453,6 +1453,19 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '已启用：429 时自动切换出站身份': 'On: switch the outbound identity automatically on 429',
     '已启用：余额低于': 'On: when the balance drops below',
     '已启用：国际版打卡走网页通道': 'On: the Global check-in uses the web channel',
+    '失败重试': 'Retry on failure',
+    '最多尝试次数': 'Max attempts',
+    '首轮等待': 'First wait',
+    '最多尝试 ': 'Up to ',
+    ' 次 · ': ' attempts · ',
+    '只跑一轮': 'Single attempt',
+    '每轮等待': 'Wait per attempt',
+    '网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间是上一轮的两倍——默认 3 次、首轮 120 秒，也就是 120 / 240 / 480 秒。默认开启；会话只是慢的时候多等一轮通常就过了。': 'When a web-channel attempt does not finish (the session is still working), try again: up to N tries in total (the first one included, configurable), with each wait twice the previous one - 3 tries and a 120-second first wait by default, i.e. 120 / 240 / 480. On by default; a session that is merely slow usually finishes on the next attempt.',
+    '注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。': 'Note: the wait doubles each round, so raising either the try count or the first wait costs you on a quadratic scale - an account that never finishes can hold the sweep for base×(2^tries−1) seconds (120×7 = 840 seconds, about 14 minutes, by default). Keep it within how long a client is willing to wait.',
+    '已启用：网页通道失败后会再试（等待时间翻倍）': 'On: the web channel tries again after a failure (wait doubles each time)',
+    '已关闭：网页通道只跑一轮': 'Off: the web channel runs a single attempt',
+    '已保存：最多尝试 ': 'Saved: up to ',
+    ' 次，首轮等待 ': ' tries, first wait ',
     '已启用：每': 'On: every',
     '已启用：由网关代跑 web_search / web_fetch': 'On: the gateway runs web_search / web_fetch for the client',
     '已启用：账号单模型当日超过': 'On: once an account, for a single model, exceeds today',
@@ -2396,6 +2409,19 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "已启用：429 时自动切换出站身份": "已啟用：429 時自動切換出站身份",
     "已启用：余额低于": "已啟用：餘額低於",
     "已启用：国际版打卡走网页通道": "已啟用：國際版打卡走網頁通道",
+    "失败重试": "失敗重試",
+    "最多尝试次数": "最多嘗試次數",
+    "首轮等待": "首輪等待",
+    "最多尝试 ": "最多嘗試 ",
+    " 次 · ": " 次 · ",
+    "只跑一轮": "只跑一輪",
+    "每轮等待": "每輪等待",
+    "网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间是上一轮的两倍——默认 3 次、首轮 120 秒，也就是 120 / 240 / 480 秒。默认开启；会话只是慢的时候多等一轮通常就过了。": "網頁通道一輪沒跑完（會話還在 working）就再來一輪：最多嘗試幾次（含第一輪，可改），每輪等待時間是上一輪的兩倍——預設 3 次、首輪 120 秒，也就是 120 / 240 / 480 秒。預設開啟；會話只是慢的時候多等一輪通常就過了。",
+    "注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。": "注意：等待時間逐輪翻倍，「次數」與「首輪等待」調大都是平方級的代價——一個始終跑不完的帳號最壞能佔住巡檢 base×(2^次數−1) 秒（預設 120×7 = 840 秒 ≈ 14 分鐘）。建議不超過客戶端願意空等的時長。",
+    "已启用：网页通道失败后会再试（等待时间翻倍）": "已啟用：網頁通道失敗後會再試（等待時間翻倍）",
+    "已关闭：网页通道只跑一轮": "已關閉：網頁通道只跑一輪",
+    "已保存：最多尝试 ": "已保存：最多嘗試 ",
+    " 次，首轮等待 ": " 次，首輪等待 ",
     "已启用：每": "已啟用：每",
     "已启用：每 ": "已啟用：每 ",
     "已启用：由网关代跑 web_search / web_fetch": "已啟用：由閘道代跑 web_search / web_fetch",
@@ -4232,6 +4258,30 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         </div>
         <div style="font-size:12px;color:var(--dim);margin-top:6px">
           清单是国际版目录里的全部模型，标价 0.00x 的标成免费并排在前面。每日活跃只是一次「Hi」的会话，默认用内置的免费模型；换一个是为了把活跃挪出真实流量正在用的那个模型的窗口额度。选到付费模型的话，活跃就会按那个模型花积分。
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <label class="switch">
+            <input id="setDailyChatWebRetry" type="checkbox" onchange="saveDailyChatWebRetry()">
+            <span class="switch-track"></span>
+            <span>失败重试</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+            最多尝试次数
+            <input id="setDailyChatWebAttempts" type="number" min="1" step="1" style="width:70px">
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+            首轮等待
+            <input id="setDailyChatWebTimeout" type="number" min="1" step="1" style="width:90px">
+            秒
+          </label>
+          <button onclick="saveDailyChatWebTuning(this)">保存</button>
+          <span id="setDailyChatWebRetryState" style="font-size:12px;color:var(--dim)"></span>
+        </div>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间是上一轮的两倍——默认 3 次、首轮 120 秒，也就是 120 / 240 / 480 秒。默认开启；会话只是慢的时候多等一轮通常就过了。
+        </div>
+        <div style="font-size:12px;color:var(--warn);margin-top:4px">
+          注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。
         </div>
       </section>
 
@@ -9545,6 +9595,33 @@ async function loadSettings(showToast){
         dailyWebState.style.color = dailyWeb ? 'var(--accent2)' : 'var(--dim)';
       }
       renderDailyChatModel(data.daily_chat_model || '', data.daily_chat_model_default || '');
+      // 网页通道重试：没配过时后端给的是「开」，只有显式 false 才当关闭。
+      const dailyWebRetry = data.daily_chat_web_retry !== false;
+      const dailyWebRetryInput = document.getElementById('setDailyChatWebRetry');
+      if(dailyWebRetryInput) dailyWebRetryInput.checked = dailyWebRetry;
+      const dailyWebTimeoutDefault = Number(data.daily_chat_web_timeout_default || 120);
+      const dailyWebTimeout = Number(data.daily_chat_web_timeout || dailyWebTimeoutDefault);
+      const dailyWebAttemptsDefault = Number(data.daily_chat_web_attempts_default || 3);
+      const dailyWebAttempts = Number(data.daily_chat_web_attempts || dailyWebAttemptsDefault);
+      const dailyWebAttemptsInput = document.getElementById('setDailyChatWebAttempts');
+      if(dailyWebAttemptsInput){
+        dailyWebAttemptsInput.value = String(dailyWebAttempts);
+        // 关掉重试就只跑一轮，次数没有意义；等待时间仍对那唯一一轮有效，保持可改。
+        dailyWebAttemptsInput.disabled = !dailyWebRetry;
+      }
+      const dailyWebTimeoutInput = document.getElementById('setDailyChatWebTimeout');
+      if(dailyWebTimeoutInput) dailyWebTimeoutInput.value = String(dailyWebTimeout);
+      const dailyWebRetryState = document.getElementById('setDailyChatWebRetryState');
+      if(dailyWebRetryState){
+        // 状态行把实际的等待序列算出来，省得对着两个数字自己乘。
+        const waits = [];
+        const rounds = dailyWebRetry ? dailyWebAttempts : 1;
+        for(let i = 0; i < rounds; i++) waits.push(dailyWebTimeout * Math.pow(2, i));
+        dailyWebRetryState.textContent = dailyWebRetry
+          ? ('最多尝试 ' + dailyWebAttempts + ' 次 · ' + waits.join(' / ') + ' 秒')
+          : ('只跑一轮 · ' + dailyWebTimeout + ' 秒');
+        dailyWebRetryState.style.color = dailyWebRetry ? 'var(--accent2)' : 'var(--dim)';
+      }
       const localWeb = data.local_web_tools === true;
       const localWebInput = document.getElementById('setLocalWebTools');
       if(localWebInput) localWebInput.checked = localWeb;
@@ -10105,6 +10182,50 @@ async function saveDailyChatWeb(btn){
   try {
     await postJSON('/settings/save', {daily_chat_web: value});
     toast(value ? '已启用：国际版打卡走网页通道' : '已关闭：国际版打卡只发桌面端对话', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+/* 网页通道失败重试。后端只接受严格布尔，所以这里直接发勾选状态；存失败时
+   把开关拨回去，免得界面显示一个其实没落盘的状态。 */
+async function saveDailyChatWebRetry(){
+  const el = document.getElementById('setDailyChatWebRetry');
+  const value = !!(el && el.checked);
+  try {
+    await postJSON('/settings/save', {daily_chat_web_retry: value});
+    toast(value ? '已启用：网页通道失败后最多重试 3 次（等待翻倍）'
+                : '已关闭：网页通道只跑一轮', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+    if(el) el.checked = !value;
+  }
+}
+
+/* 每轮等待时间（秒）与最多尝试次数。与「上游响应头超时」同一套收口：空值、
+   小数、非数字就地拦下，不发上去换一个 400 回来。上限由后端把关。 */
+async function saveDailyChatWebTuning(btn){
+  const attemptsEl = document.getElementById('setDailyChatWebAttempts');
+  const timeoutEl = document.getElementById('setDailyChatWebTimeout');
+  const attempts = Math.floor(Number(attemptsEl && attemptsEl.value));
+  const timeout = Math.floor(Number(timeoutEl && timeoutEl.value));
+  if(!isFinite(attempts) || attempts < 1){
+    toast('请输入不小于 1 的整数次数', 'bad');
+    return;
+  }
+  if(!isFinite(timeout) || timeout < 1){
+    toast('请输入不小于 1 的整数秒', 'bad');
+    return;
+  }
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {daily_chat_web_attempts: attempts,
+                                      daily_chat_web_timeout: timeout});
+    toast('已保存：最多尝试 ' + attempts + ' 次，首轮等待 ' + timeout + ' 秒', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

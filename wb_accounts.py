@@ -44,7 +44,11 @@ WEB_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
 DAILY_CHAT_WEB_PROMPT = "Hi"
 #: 网页通道一轮最多等多久（秒）。实测一次「Hi」十几秒就跑完，留足余量。
+#: 没配 settings 的账号（如单测里手工构造的）用它兜底。
 WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
+#: 网页通道一共试几次（含第一轮）。第 N 轮的等待是首轮的 2^(N-1) 倍，所以
+#: 3 次 = 最多等 base×(1+2+4) 秒。设置页可改（见 wb_settings.daily_chat_web_attempts）。
+WEB_TURN_ATTEMPTS = 3
 
 
 def _retryable(exc):
@@ -1378,7 +1382,51 @@ class Account(object):
         return res
 
     def _daily_chat_web_upstream(self, prompt=None):
-        """网页通道的实际流程；返回形状见 daily_chat_web。"""
+        """网页通道的实际流程；返回形状见 daily_chat_web。
+
+        失败会再试（见 daily_chat_web_policy）：一共最多 attempts 次（含第一轮），
+        第 N 轮的等待是首轮的 2^(N-1) 倍 —— 默认 3 次、首轮 120 秒，也就是
+        120 / 240 / 480。最典型的失败是「会话还没跑完」（状态=working），它往往
+        只是慢，多等一轮就好，所以这里把等待时间当成重试的代价，不再额外 sleep。
+        业务拒绝（建会话返回非 0 code）不再试：同一个被拒的请求再发一次也一样被拒。
+
+        返回里带 attempts（实际跑了几轮），其余字段与 _daily_chat_web_once 一致。
+        """
+        base, total = self.daily_chat_web_policy()
+        attempt = 0
+        while True:
+            res = self._daily_chat_web_once(prompt, wait_seconds=base * (2 ** attempt))
+            res["attempts"] = attempt + 1
+            if res.get("ok") or attempt + 1 >= total or not res.get("retryable"):
+                return res
+            attempt += 1
+
+    def daily_chat_web_policy(self):
+        """(首轮等待秒数, 总尝试次数)。设置页改过就按设置页的来。
+
+        重试开关默认开（见 wb_settings.daily_chat_web_retry），关掉就是只试一次。
+        等待时间没设过时用 WEB_TURN_TIMEOUT —— 它吃 WB_WEB_TURN_TIMEOUT 环境变量，
+        别让这个新设置项把它悄悄顶掉。没配 settings 的账号（单测里手工构造的）
+        同样按内置默认走。
+        """
+        if not self.path:
+            return WEB_TURN_TIMEOUT, WEB_TURN_ATTEMPTS
+        directory = os.path.dirname(self.path)
+        total = 1
+        if wb_settings.daily_chat_web_retry(directory):
+            total = wb_settings.daily_chat_web_attempts(directory,
+                                                        default=WEB_TURN_ATTEMPTS)
+        return (wb_settings.daily_chat_web_timeout(directory, default=WEB_TURN_TIMEOUT),
+                total)
+
+    def _daily_chat_web_once(self, prompt=None, wait_seconds=None):
+        """网页通道的一轮尝试；返回形状见 daily_chat_web。
+
+        结果里的 retryable 说明这一轮的失败值不值得再试一次（重试策略见
+        _daily_chat_web_upstream）。
+        """
+        if wait_seconds is None:
+            wait_seconds = WEB_TURN_TIMEOUT
         model = self.daily_chat_model()
         body = {
             "prompt": prompt or DAILY_CHAT_WEB_PROMPT,
@@ -1399,40 +1447,44 @@ class Account(object):
                 detail = exc.read().decode("utf-8", "replace")
             except Exception:
                 detail = str(exc)
-            return {"ok": False, "error": "HTTP %d: %s" % (exc.code, detail[:120])}
+            return {"ok": False, "error": "HTTP %d: %s" % (exc.code, detail[:120]),
+                    "retryable": exc.code >= 500 or exc.code in (408, 429)}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": str(exc), "retryable": True}
         if not isinstance(payload, dict):
-            return {"ok": False, "error": "unexpected response"}
+            return {"ok": False, "error": "unexpected response", "retryable": True}
         conversation = (payload.get("data") or {}).get("id")
         if payload.get("code") not in (0, None) or not conversation:
             return {"ok": False, "error": "code=%s msg=%s"
-                    % (payload.get("code"), payload.get("msg"))}
+                    % (payload.get("code"), payload.get("msg")),
+                    "retryable": False}
 
         # 建完只是排队：接上沙箱、请求这一轮，它才会真的跑起来（issue #90）。
         try:
             session = (self._web_conversation_get(conversation, "/session") or {}).get("data") or {}
         except Exception as exc:
             return {"ok": False, "conversation": conversation,
-                    "error": "session 查询失败: %s" % exc}
+                    "error": "session 查询失败: %s" % exc, "retryable": True}
         link = session.get("link") or session.get("endpoint") or ""
         token = session.get("token") or ""
         session_id = session.get("sessionId") or session.get("session_id") or conversation
         cwd = session.get("cwd") or "/workspace"
         if not link or not token:
             return {"ok": False, "conversation": conversation,
-                    "error": "沙箱未就绪（没有 link/token）"}
+                    "error": "沙箱未就绪（没有 link/token）", "retryable": True}
 
         result = wb_webagent.run_turn(
             link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
             WEB_USER_AGENT,
             poll_status=lambda: self._web_conversation_status(conversation),
-            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy,
+            wait_seconds=wait_seconds, proxy=self.proxy,
             model=model)
         result["conversation"] = conversation
         if result.get("ok"):
             result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
                 result.get("chunks") or 0, result.get("elapsed_ms") or 0)
+        else:
+            result["retryable"] = True
         return result
 
     def _web_conversation_get(self, conversation, suffix=""):
@@ -1499,16 +1551,23 @@ class Account(object):
                 result["web"] = res
                 web_ok = bool(res.get("ok"))
                 if web_ok:
-                    result["msg"] = ("每日活跃对话成功完成（网页通道 %s：%d 段输出，%d ms）"
-                                     % (res.get("status") or "completed",
+                    # 重试过就把轮数带上：光看「成功」分不清是首轮就跑完，还是
+                    # 前几轮超时、多等了一轮才跑完（后者是慢，不是没跑）。
+                    tries = res.get("attempts") or 1
+                    retried = "（重试 %d 次后）" % (tries - 1) if tries > 1 else ""
+                    result["msg"] = ("每日活跃对话成功完成（网页通道%s %s：%d 段输出，%d ms）"
+                                     % (retried, res.get("status") or "completed",
                                         res.get("chunks") or 0, res.get("elapsed_ms") or 0))
                 else:
                     # 桌面腿成功不等于当天打卡完成：计入官方「每日活跃」的只有网页腿
                     # （#75/#59/#90）。面板与活动历史按 ok 画成功/失败，网页腿失败却
                     # 报成功的话，「今天这 30/50 积分没到账」在界面上一直看不见。
+                    tries = res.get("attempts") or 1
+                    suffix = "（已重试 %d 次）" % (tries - 1) if tries > 1 else ""
                     result["ok"] = False
-                    result["error"] = "网页通道失败：%s" % res.get("error")
-                    result["msg"] = "每日活跃对话未完成（网页通道失败：%s）" % res.get("error")
+                    result["error"] = "网页通道失败：%s%s" % (res.get("error"), suffix)
+                    result["msg"] = "每日活跃对话未完成（网页通道失败：%s%s）" % (
+                        res.get("error"), suffix)
             # 只有真正计入官方「每日活跃」的网页通道成功了才算今天做过：网页腿失败时
             # 若照写 lastDailyChat，当天后续巡检会直接跳过该账号，那天的 30/50 积分静默
             # 丢掉且不再重试。web=False（没开网页通道）时维持原语义：桌面腿成功即算完成。

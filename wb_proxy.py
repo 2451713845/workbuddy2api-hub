@@ -57,6 +57,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import subprocess
 import wb_accounts
 import wb_activity
 import wb_atrest
@@ -257,6 +258,80 @@ def install_console_close_handler():
         return handler
     except Exception:
         return None
+
+# ---------------------------------------------------------------------------
+# 日志终端查看器（双进程模型）
+#
+# 服务进程以 pythonw 静默后台运行（无窗口、关闭任何窗口都不停）。用户看到的
+# "终端"是一个独立的 console_tail.py 进程——它只连本地 /logs 接口实时打印日志，
+# 关掉它不影响服务。启动脚本会弹一个；面板眼睛按钮可以再开/关一个。
+# ---------------------------------------------------------------------------
+CONSOLE_VIEWER_PROC = None
+_LISTEN_PORT = 8788
+
+def _console_python():
+    """Find a console (windowed) python next to the running interpreter.
+
+    The service is launched with pythonw (GUI subsystem, no console), so
+    sys.executable is pythonw.exe. To open a visible viewer window we need the
+    console sibling (python.exe) in the same directory.
+    """
+    exe = sys.executable or "python"
+    d = os.path.dirname(exe)
+    cand = os.path.join(d, "python.exe")
+    if os.path.exists(cand):
+        return cand
+    if exe.lower().endswith("pythonw.exe"):
+        cand2 = exe[: -len("pythonw.exe")] + "python.exe"
+        if os.path.exists(cand2):
+            return cand2
+    return exe
+
+def _console_viewer_running():
+    return bool(CONSOLE_VIEWER_PROC and CONSOLE_VIEWER_PROC.poll() is None)
+
+def _launch_console_viewer():
+    """Launch console_tail.py in its own NEW console window.
+
+    Returns True on launch, False if already running, None if the script is
+    missing. A server-generated panel token is passed so the viewer works even
+    if the panel password was changed from the default.
+    """
+    global CONSOLE_VIEWER_PROC
+    if _console_viewer_running():
+        return False
+    here = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(here, "console_tail.py")
+    if not os.path.exists(script):
+        return None
+    py = _console_python()
+    try:
+        token = PANEL.create()
+    except Exception:
+        token = ""
+    try:
+        proc = subprocess.Popen(
+            [py, "-u", script, "--port", str(_LISTEN_PORT), "--token", token],
+            creationflags=0x00000010,  # CREATE_NEW_CONSOLE
+            stdin=subprocess.DEVNULL,
+        )
+        CONSOLE_VIEWER_PROC = proc
+        return True
+    except Exception:
+        return None
+
+def _kill_console_viewer():
+    global CONSOLE_VIEWER_PROC
+    if _console_viewer_running():
+        try:
+            CONSOLE_VIEWER_PROC.terminate()
+        except Exception:
+            pass
+        CONSOLE_VIEWER_PROC = None
+        return True
+    CONSOLE_VIEWER_PROC = None
+    return False
+
 UPSTREAM = "https://www.workbuddy.ai"
 CHAT_PATH = "/v2/chat/completions"
 MODELS_PATH = "/v2/enterprises/personal/models"
@@ -16508,6 +16583,10 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path.startswith("/logs"):
             return True
+        # 控制台窗口显隐 / 服务关闭是本机操作者的面板功能，与 /updates、
+        # /logs 同属 panel-only。
+        if path.startswith("/console"):
+            return True
         # The pricing table is the panel's own view of the estimate, not part
         # of the OpenAI-compatible surface: its writes (/pricing/refresh,
         # /pricing/mapping) were already panel-only, and the read side returns
@@ -16542,6 +16621,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_dashboard()
         if path == "/panel/status":
             return self._get_panel_status()
+        if path == "/console/state":
+            return self._get_console_state()
         if path == "/health":
             return self._get_health()
         if path == "/realm":
@@ -16620,6 +16701,50 @@ class Handler(BaseHTTPRequestHandler):
         # process, and the settings endpoint only reports a masked form.
         info["api_key_set"] = bool(API_KEY)
         return self._json(200, info)
+
+    def _get_console_state(self):
+        return self._json(200, {
+            "supported": True,
+            "visible": _console_viewer_running(),
+        })
+
+    def _route_console_toggle(self):
+        # 按钮请求均携带 `{}` body 但不解析：必须把残留字节读掉，否则同一条
+        # keep-alive 连接上的下一个请求会以 "{}POST /console/toggle" 进场 →
+        # 501（2026-10-16 面板连点按钮实测）。顺序与 _error 相同：先应对
+        # Expect: 100-continue，否则排空会等待一个永远不会发出的 body。
+        self._handle_expect_continue()
+        self._discard_body()
+        if _console_viewer_running():
+            _kill_console_viewer()
+            visible = False
+        else:
+            launched = _launch_console_viewer()
+            visible = bool(launched)
+        return self._json(200, {"ok": True, "visible": visible})
+
+    def _route_shutdown(self):
+        # 同 toggle：按钮的 `{}` body 不解析也必须排空，否则它会污染同一条
+        # keep-alive 连接上的下一个请求（连点触发 501）。
+        self._handle_expect_continue()
+        self._discard_body()
+        # 先关掉日志终端窗口：服务一旦退出，查看器轮询 /logs 会持续报
+        # 「上游拒绝连接」。先把窗口结束掉，用户就看不到任何报错。
+        # 然后回响应、延迟退出：0.4s 让 _json 的 body 先 flush 到
+        # socket；端口随进程释放，下次启动走原来的启动脚本。
+        try:
+            _kill_console_viewer()
+        except Exception:
+            pass
+        def _bye():
+            time.sleep(0.4)
+            try:
+                sys.stdout.flush()
+            except Exception:
+                pass
+            os._exit(0)
+        threading.Thread(target=_bye, daemon=True).start()
+        return self._json(200, {"ok": True, "shutting_down": True})
 
     def _get_health(self):
         # Always answer (the launcher uses this to detect a running copy),
@@ -19211,6 +19336,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if path == "/console/toggle":
+            # Panel-only management write: 收起/唤出本进程自己的控制台窗口，
+            # 与设置、定价那几个写入同一个门。按钮带 `{}` body，
+            # 路由内负责排空（见 _route_console_toggle）。
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            return self._route_console_toggle()
+        if path == "/shutdown":
+            # 面板顶栏的「关闭服务」：优雅退出（先回响应再 os._exit），
+            # 端口随进程释放；再次启动走原来的启动脚本。
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            return self._route_shutdown()
         if path == "/settings/save":
             if not self._panel_ok():
                 return self._error(401, "panel password required", "invalid_request_error")
@@ -19630,7 +19768,9 @@ def running_version():
     return Handler.server_version.split("/", 1)[-1]
 
 def main():
+    global _LISTEN_PORT
     args = _parse_cli_args()
+    _LISTEN_PORT = args.port
     _apply_cli_overrides(args)
     if _probe_running_instance(args):
         return
@@ -19966,6 +20106,14 @@ def _serve_forever(args):
             pass
 
 if __name__ == "__main__":
+    # pythonw (GUI subsystem) starts with sys.stdout/sys.stderr == None; any
+    # print/log would raise. Redirect to /dev/null so the process runs headless
+    # with no console window (nothing in the taskbar), while the in-memory log
+    # buffer the panel "运行日志" page reads stays fully intact.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
     try:
         # Keep console output readable regardless of the active code page.
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")

@@ -5747,6 +5747,9 @@ def recent_usage(limit=100, realm=None, page=1):
     # are all None when the row is unpriced - the panel must say so rather
     # than show a made-up 0.
     for r in page_rows:
+        # 面板「最近请求」要显示发起方，而 usage.jsonl 里存的是 key 的 id；
+        # 这里补一个可读的显示名（见 key_label），前端直接渲染成列。
+        r["key_name"] = key_label(r.get("key"))
         cost = wb_pricing.cost_for_row(r)
         r["cost_cny"] = round(cost["cny"], 6) if cost["known"] else None
         r["cost_band"] = cost["band"] if cost["known"] else None

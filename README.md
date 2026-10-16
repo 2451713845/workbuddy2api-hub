@@ -413,6 +413,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 ### Unreleased
 
 - 国际版 `deepseek-v4.1-flash` 免费模型支持额度耗尽后回退到 `deepseek-v4.1-flash-sg` 积分版。默认关闭；仅当所有已启用账号都收到带重置时间的 6004 限额记录时才回退。设置网关环境变量 `WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK=1` 启用，可能产生积分费用；用量记录会显示实际计费模型，并保留客户端请求模型字段。
+- 请求日志与看板「最近请求」表显示发起方 API Key：`chat:` / `chat done:` / `messages:` / `responses:` 四条日志行，以及「最近请求」表格新增的一列，都会带上该次请求所用 key 的名字（没填 name 就回退 id）；未带 key 的记录显示 `-` / `—`。纯显示层改动——`usage.jsonl` 里的 `key` 字段仍是 key id，「按 API Key 的消耗归属」的统计口径不变。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.10，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 

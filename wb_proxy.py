@@ -742,7 +742,8 @@ def _best_cached_tokens(usage):
 
 
 def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_ms=None, fp=None,
-                account=None, outcome="completed", key=None, effort=None):
+                account=None, outcome="completed", key=None, effort=None,
+                requested_model=None):
     """Record one finished request as exactly one JSONL row.
 
     A request without a usage block still gets a row (flagged usage_missing):
@@ -776,6 +777,8 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         "ttft_ms": ttft_ms,
         "gen_ms": gen_ms,
     }
+    if requested_model and requested_model != model:
+        row["requested_model"] = requested_model
     if usage_missing:
         row["usage_missing"] = True
     row.update(fields)
@@ -817,6 +820,12 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     except Exception:
         pass
     return row
+
+
+def record_upstream_usage(upstream, requested_model, usage, **kwargs):
+    """Record the model actually billed upstream, preserving the client alias."""
+    billed_model = getattr(upstream, "_wb_billed_model", requested_model)
+    record_usage(billed_model, usage, requested_model=requested_model, **kwargs)
 
 
 def _persist_usage(row, fail_label):
@@ -9832,6 +9841,7 @@ def runtime_settings_view():
         "pricing_variant_inherit": wb_settings.pricing_variant_inherit(ACCOUNTS_DIR),
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
+        "free_model_credit_fallback": wb_settings.free_model_credit_fallback(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
         "daily_chat_web_attempts":
@@ -12921,7 +12931,20 @@ def _apply_stream_idle_timeout(response, seconds):
         return False
 
 
-def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None):
+_FREE_MODEL_CREDIT_FALLBACKS = {
+    ("intl", "deepseek-v4.1-flash"): "deepseek-v4.1-flash-sg",
+}
+
+
+def _free_model_credit_fallback_enabled():
+    if wb_settings.free_model_credit_fallback(ACCOUNTS_DIR):
+        return True
+    return os.environ.get("WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK", "0").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None,
+                  allow_credit_fallback=True, allow_product_switch=True):
     # Refresh the daily guards before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
@@ -12985,7 +13008,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     local_net_hits = 0
     # Read once per request, not per attempt: this is a panel setting, and a
     # settings read on every retry would be pure overhead.
-    auto_switch = auto_switch_product_enabled()
+    auto_switch = (auto_switch_product_enabled()
+                   if allow_product_switch else False)
     # Panel parity: header/idle timeouts are read once per request, not
     # once per retry, so a settings read never lands in the retry loop.
     header_timeout, idle_timeout = upstream_timeouts()
@@ -13255,6 +13279,26 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             account.note_error(str(exc)[:120], cooldown=60, single_account=(total <= 1))
             last_error = exc
             continue
+    # Only spend credits after every enabled, credential-bearing account in
+    # this realm has a persisted upstream 6004 cap for this free model. The
+    # switch is opt-in because the retry can incur real charges.
+    paid_model = _FREE_MODEL_CREDIT_FALLBACKS.get((realm, model))
+    eligible = ([a for a in POOL.accounts
+                 if a.realm == realm and a.enabled and a.access_token] if POOL else [])
+    if (allow_credit_fallback and paid_model and _free_model_credit_fallback_enabled()
+            and eligible and all(a.cap_until(model) > time.time() for a in eligible)):
+        paid_payload = dict(payload)
+        paid_payload["model"] = paid_model
+        log("free model '%s' exhausted on all %d %s account(s); retrying paid model '%s'"
+            % (model, len(eligible), realm, paid_model))
+        response, account, effort = open_upstream(
+            paid_payload, session_key=session_key, target_realm=realm,
+            allow_credit_fallback=False, allow_product_switch=False)
+        try:
+            response._wb_billed_model = paid_model
+        except Exception:
+            pass
+        return response, account, effort
     if last_error is not None:
         # Carry the account that produced the failure out to the caller, so
         # the error row can name it even though the local variable that would
@@ -17360,6 +17404,12 @@ class Handler(BaseHTTPRequestHandler):
                 threading.Thread(target=PRICING.run_once, daemon=True,
                                  name="price-refresh-inherit").start()
                 reply["pricing_refresh_started"] = True
+        if "free_model_credit_fallback" in payload:
+            raw = payload.get("free_model_credit_fallback")
+            if not isinstance(raw, bool):
+                return self._error(400, "free_model_credit_fallback must be true or false", "invalid_request_error")
+            wb_settings.set_free_model_credit_fallback(ACCOUNTS_DIR, raw)
+            reply["free_model_credit_fallback"] = raw
         if "auto_switch_product" in payload:
             # Strictly a JSON boolean: a string like "false" would be truthy and
             # silently switch the feature on, which is the one thing an operator
@@ -18853,7 +18903,7 @@ class Handler(BaseHTTPRequestHandler):
                 holder["usage"] = total_usage
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             wall = int((time.time() - t_start) * 1000)
-            record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
+            record_upstream_usage(upstream, model, holder.get("usage"), stream=True, elapsed_ms=wall,
                          ttft_ms=first_ms,
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
                          fp=fp, account=account.uid,
@@ -18881,7 +18931,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
         wall = int((time.time() - t_start) * 1000)
-        record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
+        record_upstream_usage(upstream, model, holder.get("usage"), stream=True, elapsed_ms=wall,
                      ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
                      fp=fp, account=account.uid, key=self._key_id(), effort=effort)
@@ -18928,7 +18978,7 @@ class Handler(BaseHTTPRequestHandler):
         wall = int((time.time() - t_start) * 1000)
         result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
                                   sources=sources)
-        record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall, fp=fp,
+        record_upstream_usage(upstream, model, chat_obj.get("usage"), stream=False, elapsed_ms=wall, fp=fp,
                      account=account.uid, key=self._key_id(), effort=effort)
         return self._json(200, result)
 
@@ -19040,7 +19090,7 @@ class Handler(BaseHTTPRequestHandler):
             chat_obj = aggregate_stream(upstream, model, None)
             result = chat_to_messages(chat_obj)
             wall = int((time.time() - t_start) * 1000)
-            record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall,
+            record_upstream_usage(upstream, model, chat_obj.get("usage"), stream=False, elapsed_ms=wall,
                          fp=fp, account=account.uid, key=self._key_id(), effort=effort)
             return self._json(200, result)
         except Exception as exc:
@@ -19074,7 +19124,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             wall = int((time.time() - t_start) * 1000)
-            record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
+            record_upstream_usage(upstream, model, holder.get("usage"), stream=True, elapsed_ms=wall,
                          ttft_ms=first_ms,
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
                          fp=fp, account=account.uid,
@@ -19100,7 +19150,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
         wall = int((time.time() - t_start) * 1000)
-        record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
+        record_upstream_usage(upstream, model, holder.get("usage"), stream=True, elapsed_ms=wall,
                      ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
                      fp=fp, account=account.uid, key=self._key_id(), effort=effort)
@@ -19485,7 +19535,7 @@ def _release_key_slot(key_entry):
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 # Client hung up; still account for what upstream produced.
                 wall = int((time.time() - t_start) * 1000)
-                record_usage(model, last_usage, stream=True,
+                record_upstream_usage(upstream, model, last_usage, stream=True,
                              elapsed_ms=wall, ttft_ms=first_ms,
                              gen_ms=(wall - first_ms) if first_ms is not None else None,
                              fp=fp, account=account.uid,
@@ -19528,13 +19578,13 @@ def _release_key_slot(key_entry):
                     }
             outcome = "failed" if pending_finish == "error" else "completed"
             if outcome == "failed":
-                record_error(model, 502, "upstream stream finished with error",
+                record_error(getattr(upstream, "_wb_billed_model", model), 502, "upstream stream finished with error",
                              elapsed_ms=wall, account=account.uid,
                              usage=last_usage, stream=True, ttft_ms=first_ms,
                              gen_ms=(wall - first_ms) if first_ms is not None else None,
                              fp=fp, outcome="failed", key=self._key_id())
             else:
-                record_usage(model, last_usage, stream=True,
+                record_upstream_usage(upstream, model, last_usage, stream=True,
                              elapsed_ms=wall, ttft_ms=first_ms,
                              gen_ms=(wall - first_ms) if first_ms is not None else None,
                              fp=fp, account=account.uid, key=self._key_id(), effort=effort)
@@ -19551,7 +19601,7 @@ def _release_key_slot(key_entry):
         first_at = result.get("first_chunk_at")
         # Measured from request arrival so streaming and non-streaming are comparable.
         first_ms = int((first_at - t_start) * 1000) if first_at else None
-        record_usage(model, result.get("usage"), stream=False,
+        record_upstream_usage(upstream, model, result.get("usage"), stream=False,
                      elapsed_ms=wall, ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
                      fp=fp, account=account.uid, key=self._key_id(), effort=effort)

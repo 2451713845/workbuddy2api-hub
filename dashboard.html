@@ -4229,6 +4229,27 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+        <section>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+            <div>
+              <h2 style="margin:0">免费额度耗尽回退积分版 <em id="setCreditFallbackState"></em></h2>
+              <div style="font-size:12px;color:var(--dim);margin-top:4px">
+                国际版 deepseek-v4.1-flash 免费额度在所有账号均耗尽（6004 撞线）后，自动回退到 deepseek-v4.1-flash-sg 付费通道。默认关闭。
+              </div>
+              <div style="font-size:12px;color:var(--warn);margin-top:4px">
+                注意：回退后将消耗账户中的真实积分（x0.03 倍率），请确认知晓积分成本后再开启。
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+                <input id="setCreditFallback" type="checkbox" style="width:16px;height:16px">
+                启用积分回退
+              </label>
+              <button onclick="saveCreditFallback(this)">保存</button>
+            </div>
+          </div>
+        </section>
+
             <h2 style="margin:0">自动切换出站身份 <em id="setAutoSwitchState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               某账号在某模型上被上游限流（429）时，自动在 WB / VSC / CLI 之间换身分重试，每轮最多 4 次。三条身分走不同的配额通道，开启后 429 会少一些。默认关闭。
@@ -9639,6 +9660,14 @@ async function loadSettings(showToast){
         if(gaps) gaps.innerHTML = '';
       }
       const autoSwitch = data.auto_switch_product === true;
+      const creditFallback = data.free_model_credit_fallback === true;
+      const creditFallbackInput = document.getElementById('setCreditFallback');
+      if(creditFallbackInput) creditFallbackInput.checked = creditFallback;
+      const creditFallbackState = document.getElementById('setCreditFallbackState');
+      if(creditFallbackState){
+        creditFallbackState.textContent = creditFallback ? '(已启用)' : '(未启用)';
+        creditFallbackState.style.color = creditFallback ? 'var(--accent2)' : 'var(--dim)';
+      }
       const autoSwitchInput = document.getElementById('setAutoSwitch');
       if(autoSwitchInput) autoSwitchInput.checked = autoSwitch;
       const autoSwitchState = document.getElementById('setAutoSwitchState');
@@ -10216,6 +10245,21 @@ async function refreshPricingNow(btn){
     setTimeout(loadPricingStatus, 15000);
   } catch(e) {
     toast('触发失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveCreditFallback(btn){
+  const el = document.getElementById('setCreditFallback');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {free_model_credit_fallback: value});
+    toast(value ? '已启用：免费额度耗尽自动回退付费积分版' : '已关闭自动回退付费积分版', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
   } finally {
     if(btn) btn.disabled = false;
   }

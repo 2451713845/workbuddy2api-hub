@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.7.6-2496ED?style=flat-square" alt="Version 1.6.20"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.7.7-2496ED?style=flat-square" alt="Version 1.6.20"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -412,20 +412,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
-- **任务与福利页新增「未活跃打卡一键打卡」**：「国际版每日活跃福利」区在「每日活跃打卡 (国际版)」右边多一个按钮，只对**今天还没有活跃打卡记录**的国际版启用账号补跑。判定口径与「今日活跃打卡状态」卡片完全一致（都走 `activityStatusOf()`），所以不会把已经打过的账号再打一遍——重复打卡不给积分，只会白烧账号额度；一个待打卡的都没有时只提示、不发请求。服务端 `POST /accounts/daily-chat` 新增 `uids` 参数按名单精确执行，名单里混进的停用账号、其它区域账号或不存在的 uid 一律忽略；**空名单等于「一个都不打」**，不会回落成「全部账号」（要打全部就别传 `uids`）。
-- **「今日活跃打卡状态」卡片悬停可看未打卡名单**：鼠标放在卡片上会列出今天还没打卡的账号昵称与数量，不用再去账号页一个个比对；这份名单就是上面那个按钮要打的那批，看到什么就打什么。
-- 新增 `tests/_test_daily_chat_pending.js`（22 项，按钮位置/样式、名单同源、请求体只带未打卡 uid、空名单与无国际账号的边界）与 `tests/_test_daily_chat_pending_route.py`（6 项，服务端 `uids` 过滤与空名单语义）。
-- **熔断不再乱开：连续失败要有时间窗，本机断网也不算账号的账**。两个现象同源——账号治理只看次数、不看间隔，也不区分「这是谁的问题」：
-  - `fails` 以前只加不减（只有成功才归零）：几小时前的一次 502 + 昨天的一次超时 + 刚才一次抖动就能凑成「连续 3 次」，把账号关 30 分钟；下一个窗口还按 1800 → 3600 → 7200… 翻倍，于是越关越久——「明明测了能用，它还熔断」就是这么来的。现在两次失败间隔超过 `WB_FAIL_WINDOW`（默认 600 秒，设 0 关闭）就重新从 1 数起，成功照旧清零。
-  - DNS 解析不了、路由不可达这类**本机没网**的失败，以前也逐账号记一笔并冷却 60 秒；断网那一分钟里整个池子被走一遍，等网络恢复，账号全在冷却里。现在这类失败先被认出来（`looks_like_local_network()`），一个账号都不记，按「本机网络不可用」上报并给出 `gateway_hint`；`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 三条链路都走这个分支。
-  - 账号行与禁用总览新增可解释字段：连续失败次数、窗口长度与最近一次失败距今（`fails` / `failWindow` / `lastFailFor`），「还差几次熔断」一眼可见。
-- **新增「一键测试」**：工具栏按钮一次测完当前区域所有已启用账号，并同时给出「本机 ↔ 上游」的连通性（DNS 与 TCP 耗时）。结果表逐账号显示通过 / 失败、耗时与原因（失败行附带「连续失败 N 次」），**本机断网的行单独标成「本机网络」**，不会和账号真失败混在一起。测试通过会清掉该账号的熔断 / 降权 / 软限流计数（沿用 `/accounts/test` 的成功路径）；测试失败只记录原因、不冷却账号——诊断动作不该改变账号状态。后端不带 `uid` 即为整池测试：`POST /accounts/test {"realm": "cn"}`。
-- 新增 `tests/_test_breaker_fairness.py`（19 项）与 `tests/_test_account_test_all.js`（27 项）；看板套件新增共享的 `tests/_dashboard_sandbox.js`（把页面脚本装进显式沙箱再跑，本套件用它；其它看板套件仍各自 `new Function`，可后续统一）。
-- **禁用总览如实区分「配额耗尽」与「临时限流」**：面板「当前禁用」页把模型级限流一律写成「该模型配额耗尽（code 6004）」，但其中多数只是上游一次 429 临时限流（60s~10m 的短窗口，到点自动恢复）。现在按上游返回体里是否带重置墙钟（`cappedAt`）分开措辞：带的是 6004 配额耗尽，不带的是 429 临时限流，与账号卡片上的口径一致。
-- **禁用总览的时间列给出真实起始时刻**：模型级限流以前只在 6004 撞线时才有时间（列头「撞线时间」），临时 429 那一行永远是个「—」。现在网关把每次模型级限流的**发生时刻**一并记下并在 `/accounts` 的 `modelCooldowns[]` 里以 `startedAt` 透出，列头改为中性的「开始时间」——6004 行给上游撞线时刻，429 行给限流时刻，两类都有「起始 + 恢复」两段真实时间（`startedAt` 为运行时态，重启即清零；6004 的撞线时刻另有持久化兜底）。
-- **国际版每日活跃网页通道失败重试**：网页通道一轮没跑完（会话状态仍是 `working`）时，原来直接判失败、当天 30/50 积分静默丢掉。现在**默认开启**失败重试，设置页「国际版每日活跃打卡」可调「最多尝试次数」（默认 3 次，含第一轮，上限 5）与「首轮等待」秒数（默认 120，上限 3600），也可以整个关掉。第 N 轮的等待是首轮的 2 倍（默认 3 次 = 120 / 240 / 480 秒）。建会话被业务拒绝（非 0 code）不再试，只有网络/5xx/408/429、沙箱未就绪、会话超时这类瞬时失败才继续；成功与失败说明都会写明实际试了几轮。
-
-已发布版本的完整记录（v1.4.5 ~ v1.7.6，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
+已发布版本的完整记录（v1.4.5 ~ v1.7.7，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
 ## 七、致谢与引用声明 (Credits & References)
 

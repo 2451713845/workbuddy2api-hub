@@ -6930,6 +6930,8 @@ function accountRow(a){
     weightOpts += '<option value="' + i + '"' + (weight === i ? ' selected' : '') + '>' + i + '</option>';
   }
   if(weight > 10) weightOpts += '<option value="' + weight + '" selected>' + weight + '</option>';
+  // 人工禁用的模型名单（账号级黑名单，与自动冷却无关）
+  const deny = (a.disabledModels || []);
   return '<tr>'
     + '<td style="text-align:center;white-space:nowrap" data-label="版本">' + realmBadge + '</td>'
     + '<td style="text-align:left" data-label="账号">'
@@ -6939,6 +6941,9 @@ function accountRow(a){
     + (a.note
         ? '<div style="font-size:11px;color:var(--accent2);margin-top:2px;cursor:pointer" title="点击编辑备注" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">备注: ' + esc(a.note) + '</div>'
         : '<div style="font-size:10px;color:var(--dim);margin-top:2px;cursor:pointer;opacity:.7" title="点击添加备注，比如「批量」/「自用」" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">+ 备注</div>')
+    + (deny.length
+        ? '<div style="font-size:11px;color:var(--warn);margin-top:2px;cursor:pointer" title="点击编辑该账号禁用的模型（逗号分隔；留空 = 不限制）" onclick="editAccountDisabledModels(&quot;' + uidAttr + '&quot;)">禁用的模型: ' + esc(deny.join(', ')) + '</div>'
+        : '<div style="font-size:10px;color:var(--dim);margin-top:2px;cursor:pointer;opacity:.7" title="点击设置该账号禁用的模型：命中的模型不再派给这个号，池子里其他号照常接单" onclick="editAccountDisabledModels(&quot;' + uidAttr + '&quot;)">+ 禁用模型</div>')
     + err + pills + limitPills + '</td>'
     + '<td style="text-align:center" data-label="状态">' + state + '</td>'
     + '<td style="text-align:center" data-label="今日活动">' + activityStatusChip(a) + '</td>'
@@ -7414,6 +7419,96 @@ async function editAccountNote(uid){
   }catch(e){
     toast('备注保存失败: ' + e.message, 'bad');
   }
+}
+
+async function editAccountDisabledModels(uid){
+  const cur = (window.ACCOUNTS || []).find(a => a.uid === uid);
+  if(!cur) return;
+  // 按**该账号自己的**区域取模型清单：看板当前视图切到别的区域时，
+  // MODELS_DATA 里那份是另一个区域的，用它会给出对不上的选项。
+  const realm = cur.realm || window.VIEW_REALM;
+  let models = [];
+  try{
+    const r = await getJSON('/v1/models?realm=' + encodeURIComponent(realm));
+    models = (r.data || []).map(m => m.id).filter(Boolean).sort();
+  }catch(e){
+    toast('取模型清单失败: ' + e.message, 'bad');
+    return;
+  }
+  if(!models.length){ toast('该区域没有可用模型', 'bad'); return; }
+
+  const denied = new Set(cur.disabledModels || []);
+  // 面板按「启用的模型」勾选，默认全选 = 不限制；**取消勾选即禁用**。
+  const picked = new Set(models.filter(m => !denied.has(m)));
+  const nick = esc(cur.nickname || uid.slice(0, 8));
+
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.style.display = 'flex';
+  mask.innerHTML = '<div class="modal" role="dialog" aria-modal="true" style="width:min(560px,100%)">'
+    + '<div class="modal-hd"><h2>启用模型 · ' + nick + '</h2>'
+    +   '<button class="modal-x" aria-label="关闭">×</button></div>'
+    + '<div class="modal-bd">'
+    +   '<div style="font-size:12px;color:var(--dim);line-height:1.7;margin-bottom:10px">'
+    +     '取消勾选的模型<b>不再派给这个账号</b>，请求会自动落到池子里其他账号；其余模型不受影响。'
+    +     '<br>默认全部勾选 = 不限制。区域 <b>' + esc(realm) + '</b>，共 ' + models.length + ' 个模型。'
+    +   '</div>'
+    +   '<div id="mdmList" style="max-height:46vh;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:4px 10px"></div>'
+    +   '<div style="display:flex;align-items:center;gap:8px;margin-top:12px">'
+    +     '<button class="sec" id="mdmAll">全选</button>'
+    +     '<button class="sec" id="mdmNone">全不选</button>'
+    +     '<span style="flex:1"></span><span id="mdmCount" style="font-size:12px"></span>'
+    +   '</div>'
+    + '</div>'
+    + '<div class="modal-ft">'
+    +   '<button class="sec" id="mdmCancel">取消</button>'
+    +   '<button id="mdmSave">保存</button>'
+    + '</div></div>';
+
+  const listEm = mask.querySelector('#mdmList');
+  const countEm = mask.querySelector('#mdmCount');
+  listEm.innerHTML = models.map(m =>
+    '<label style="display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer;font-size:13px">'
+    + '<input type="checkbox" data-model="' + esc(m) + '"' + (picked.has(m) ? ' checked' : '') + '>'
+    + '<span class="mono">' + esc(m) + '</span></label>').join('');
+  function updateCount(){
+    const off = models.length - picked.size;
+    countEm.textContent = off ? ('将禁用 ' + off + ' 个') : '不限制';
+    countEm.style.color = off ? 'var(--warn)' : 'var(--dim)';
+  }
+  updateCount();
+  // 只更新计数、不重建复选框：重建会把滚动位置和焦点抖掉。
+  listEm.addEventListener('change', function(ev){
+    const box = ev.target;
+    if(!box || box.type !== 'checkbox') return;
+    if(box.checked) picked.add(box.dataset.model);
+    else picked.delete(box.dataset.model);
+    updateCount();
+  });
+  function setAll(on){
+    picked.clear();
+    if(on) models.forEach(m => picked.add(m));
+    listEm.querySelectorAll('input[type=checkbox]').forEach(b => { b.checked = on; });
+    updateCount();
+  }
+  mask.querySelector('#mdmAll').onclick = function(){ setAll(true); };
+  mask.querySelector('#mdmNone').onclick = function(){ setAll(false); };
+  function close(){ mask.remove(); }
+  mask.querySelector('.modal-x').onclick = close;
+  mask.querySelector('#mdmCancel').onclick = close;
+  mask.addEventListener('click', function(ev){ if(ev.target === mask) close(); });
+  mask.querySelector('#mdmSave').onclick = async function(){
+    const denyList = models.filter(m => !picked.has(m));   // 未勾选 = 禁用
+    try{
+      await postJSON('/accounts/set', {uid: uid, disabledModels: denyList});
+      await loadAccounts();
+      toast(denyList.length ? ('已禁用 ' + denyList.length + ' 个模型') : '已取消模型禁用', 'ok');
+      close();
+    }catch(e){
+      toast('保存失败: ' + e.message, 'bad');
+    }
+  };
+  document.body.appendChild(mask);
 }
 async function setAccountProduct(uid, prod, btn){
   const names = {

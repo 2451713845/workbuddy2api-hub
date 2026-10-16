@@ -268,6 +268,29 @@ FREE_CAP_MODELS = {
 }
 
 
+def normalise_disabled_models(raw):
+    """把「人工禁用的模型名单」归一成干净的 list[str]。
+
+    供账号档加载与面板写入两条路共用，保证「内存里的判断」和「落盘的内容」
+    口径一致：保留非空字符串、按小写归一（与 is_model_banned 同口径）、去重、
+    保持输入顺序。非列表输入一律当作「没配」返回空列表——坏数据不至于让账号
+    加载失败。
+    """
+    out = []
+    if not isinstance(raw, (list, tuple)):
+        return out
+    seen = set()
+    for mid in raw:
+        if not isinstance(mid, str):
+            continue
+        m = mid.strip().lower()
+        if not m or m in seen:
+            continue
+        seen.add(m)
+        out.append(m)
+    return out
+
+
 def is_free_cap_model(realm, model):
     """该「账号区域 × 模型」是否在限额联动的范围内。
 
@@ -532,6 +555,18 @@ class Account(object):
         # 写过，超长截断，别让一条长备注把账号行撑爆。
         raw_note = data.get("note")
         self.note = (raw_note if isinstance(raw_note, str) else "").strip()[:200]
+        # 该账号**人工**禁用的模型名单（面板 / 接口配置）。与 weight、note 同款：
+        # 随凭证档持久化 —— 这是使用者的明确意图，不该在重启后悄悄回到默认。
+        #
+        # 与 model_cooldowns / model_caps 那些**自动**节流区分开：那些表达「暂时
+        # 不该用」（限流或额度撞线的恢复窗口），这里表达「这个号就别碰这几个
+        # 模型」。典型用途：某个号在某些模型上有授权/合规限制，但同一个模型还想
+        # 走别的号——那就禁这一对组合，而不是把整个号停掉。
+        #
+        # 模型 id 统一**小写**存储与比较（与 is_model_banned 的口径一致），
+        # 只做精确匹配不做前缀：行为可预期，不会误伤同前缀的其他模型。
+        raw_deny = data.get("disabledModels")
+        self.disabled_models = normalise_disabled_models(raw_deny)
         # Live error state, never restored from the credential file: the label
         # describes the last upstream answer, not the credential. It used to be
         # persisted and read back, so a 429 that had long since recovered came
@@ -683,6 +718,7 @@ class Account(object):
             "enabled": self.enabled,
             "weight": self.weight,
             "note": self.note,
+            "disabledModels": list(self.disabled_models),
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
             "credits": self.credits,
@@ -736,6 +772,7 @@ class Account(object):
             "enabled": bool(self.enabled),
             "weight": int(self.weight),
             "note": self.note,
+            "disabledModels": list(self.disabled_models),
             "source": self.source,
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy,
@@ -1084,6 +1121,10 @@ class Account(object):
             return "已停用"
         if not self.access_token:
             return "无凭证"
+        # 与 ready() 同序：人工黑名单排在所有「暂时不可用」之前，所以
+        # 「所有账号都禁用了这个模型」时，池子抽干的报错里会逐个号写明原因。
+        if self.model_disabled(model):
+            return "该模型已被人工禁用"
         now = time.time()
         # 四种惩罚的到期时间各走各的，谁把时间推得最远就报谁：只报「冷却」
         # 会让人往 429 的方向查，而实际可能是上游连续断连触发的熔断（30 分钟
@@ -1108,8 +1149,23 @@ class Account(object):
             return "凭证已过期"
         return ""
 
+    def model_disabled(self, model):
+        """这个账号被人工禁用了该模型？空名单恒为 False。
+
+        与自动节流区分：`model_cooldowns` / `model_caps` 表达「暂时不该用」，
+        这里是使用者明确指定的「这个号就别碰这几个模型」。精确匹配（名单在
+        加载时已按小写归一），不做前缀匹配。
+        """
+        if not model or not self.disabled_models:
+            return False
+        return str(model).strip().lower() in self.disabled_models
+
     def ready(self, model=None):
         if not self.enabled or not self.access_token:
+            return False
+        # 人工黑名单排在最前：它是静态配置（最便宜），而且在语义上优先于所有
+        # 「暂时不可用」的判断 —— 被禁用的模型不该因为账号恰好恢复了就漏进来。
+        if self.model_disabled(model):
             return False
         if self.throttle_wait(model=model) > 0:
             return False
@@ -2744,6 +2800,23 @@ class AccountPool(object):
         if account is None:
             return None
         account.note = str(note or "").strip()[:200]
+        account.save(self.dir)
+        return account.public()
+
+    def set_disabled_models(self, uid, models):
+        """设置该账号**人工**禁用的模型名单，落盘并回公共视图。
+
+        语义：这些模型不再派给这个账号。不影响该账号的其他模型，也不影响其他
+        账号对同一模型的可用性 —— 请求会自动落到池子里别的号上。传空列表 =
+        清空禁用、恢复原行为。
+
+        名单按 normalise_disabled_models 归一；坏输入退化成空列表（= 不禁用）
+        而不是抛错：面板传进来什么形状都不该让一个账号加载失败。
+        """
+        account = self.get(uid)
+        if account is None:
+            return None
+        account.disabled_models = normalise_disabled_models(models)
         account.save(self.dir)
         return account.public()
 

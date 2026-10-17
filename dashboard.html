@@ -1073,7 +1073,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   var THEME_KEY = 'wb-theme';
   var THEME_STYLE_KEY = 'wb-theme-style';
   var THEME_STYLES = {
-    claude: {label:'Claude', light:{"--bg":"#efebe0","--panel":"#ffffff","--panel2":"#e9e5d6","--panel3":"#e0dbc9","--line":"#d5cfbc","--line-hover":"#c5bfab","--fg":"#1f1e1b","--dim":"#625f57","--dim-light":"#87847a","--accent":"#a14427","--accent-hover":"#8a3a20","--accent-soft":"rgba(161,68,39,.09)","--accent-selected-bg":"rgba(161,68,39,.14)","--accent2":"#497035","--accent2-soft":"rgba(73,112,53,.12)","--warn":"#a0691c","--warn-soft":"rgba(183,121,31,.12)","--think":"#7d5c8a","--think-soft":"rgba(125,92,138,.10)","--bad":"#b5473b","--bad-soft":"rgba(181,71,59,.09)","--shadow-sm":"0 1px 2px 0 rgba(31,30,27,.05)","--shadow":"0 1px 2px 0 rgba(31,30,27,.05),0 4px 14px rgba(31,30,27,.04)","--shadow-md":"0 2px 6px 0 rgba(31,30,27,.06),0 12px 32px rgba(31,30,27,.09)","--header-bg":"rgba(239,235,224,.92)","--hm0":"#ece6db","--hm1":"#f3d5c1","--hm2":"#e8a98a","--hm3":"#d6846a","--hm4":"#b4533a"}, dark:{"--bg":"#1f1e1b","--panel":"#2d2c25","--panel2":"#38362f","--panel3":"#433f37","--line":"#4f4b42","--line-hover":"#5d584e","--fg":"#edebe3","--dim":"#a5a29a","--dim-light":"#7c796f","--accent":"#e88a68","--accent-hover":"#f0967a","--accent-soft":"rgba(232,138,104,.14)","--accent-selected-bg":"rgba(232,138,104,.18)","--accent2":"#8fae78","--accent2-soft":"rgba(143,174,120,.15)","--warn":"#d9b25f","--warn-soft":"rgba(217,178,95,.15)","--think":"#bfa3cc","--think-soft":"rgba(191,163,204,.15)","--bad":"#d97b72","--bad-soft":"rgba(217,123,114,.15)","--shadow-sm":"0 1px 2px 0 rgba(0,0,0,.25)","--shadow":"0 1px 2px 0 rgba(0,0,0,.25),0 4px 14px rgba(0,0,0,.25)","--shadow-md":"0 2px 6px 0 rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.4)","--header-bg":"rgba(31,30,27,.92)","--hm0":"#2b2924","--hm1":"#3d352e","--hm2":"#5a3e30","--hm3":"#8a5a45","--hm4":"#c97250"}},
+    claude: {label:'Claude', light:{"--bg":"#efebe0","--panel":"#ffffff","--panel2":"#e9e5d6","--panel3":"#e0dbc9","--line":"#d5cfbc","--line-hover":"#c5bfab","--fg":"#1f1e1b","--dim":"#625f57","--dim-light":"#87847a","--accent":"#a14427","--accent-hover":"#8a3a20","--accent-soft":"rgba(161,68,39,.09)","--accent-selected-bg":"rgba(161,68,39,.14)","--accent2":"#497035","--accent2-soft":"rgba(73,112,53,.12)","--warn":"#a0691c","--warn-soft":"rgba(183,121,31,.12)","--think":"#7d5c8a","--think-soft":"rgba(125,92,138,.10)","--bad":"#b5473b","--bad-soft":"rgba(181,71,59,.09)","--shadow-sm":"0 1px 2px 0 rgba(31,30,27,.05)","--shadow":"0 1px 2px 0 rgba(31,30,27,.05),0 4px 14px rgba(31,30,27,.04)","--shadow-md":"0 2px 6px 0 rgba(31,30,27,.06),0 12px 32px rgba(31,30,27,.09)","--header-bg":"rgba(239,235,224,.92)","--hm0":"#ece6db","--hm1":"#f3d5c1","--hm2":"#e8a98a","--hm3":"#d6846a","--hm4":"#b4533a"}, dark:{"--bg":"#1f1e1b","--panel":"#2d2c25","--panel2":"#38362f","--panel3":"#433f37","--line":"#4f4b42","--line-hover":"#5d584e","--fg":"#edebe3","--dim":"#a5a29a","--dim-light":"#9c9a90","--accent":"#e88a68","--accent-hover":"#f0967a","--accent-soft":"rgba(232,138,104,.14)","--accent-selected-bg":"rgba(232,138,104,.18)","--accent2":"#8fae78","--accent2-soft":"rgba(143,174,120,.15)","--warn":"#d9b25f","--warn-soft":"rgba(217,178,95,.15)","--think":"#bfa3cc","--think-soft":"rgba(191,163,204,.15)","--bad":"#d97b72","--bad-soft":"rgba(217,123,114,.15)","--shadow-sm":"0 1px 2px 0 rgba(0,0,0,.25)","--shadow":"0 1px 2px 0 rgba(0,0,0,.25),0 4px 14px rgba(0,0,0,.25)","--shadow-md":"0 2px 6px 0 rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.4)","--header-bg":"rgba(31,30,27,.92)","--hm0":"#2b2924","--hm1":"#3d352e","--hm2":"#5a3e30","--hm3":"#8a5a45","--hm4":"#c97250"}},
     material: {label:'Material', light:{"--bg":"#fefbff","--panel":"#ffffff","--panel2":"#f5eff7","--panel3":"#ece6f0","--line":"#cac4d0","--line-hover":"#b4aab8","--fg":"#1d1b20","--dim":"#5b5b66","--dim-light":"#767680","--accent":"#6750a4","--accent-hover":"#4f378b","--accent-soft":"#eaddff","--accent-selected-bg":"#e8def8","--accent2":"#006a60","--accent2-soft":"#ccfbee","--warn":"#7e5260","--bad":"#b3261e","--bad-soft":"#f9dedc","--think":"#5e5891","--think-soft":"#e5dffa","--shadow-sm":"0 1px 2px 0 rgba(29,27,32,.15)","--shadow":"0 1px 2px 0 rgba(29,27,32,.18),0 1px 3px 1px rgba(29,27,32,.10)","--shadow-md":"0 2px 4px -1px rgba(29,27,32,.12),0 4px 6px 1px rgba(29,27,32,.10)","--header-bg":"rgba(254,251,255,.94)","--hm0":"#e8def8","--hm1":"#d3c2f1","--hm2":"#b8a1ec","--hm3":"#9a82e3","--hm4":"#6750a4"}, dark:{"--bg":"#141218","--panel":"#211f26","--panel2":"#2b2930","--panel3":"#36343b","--line":"#49454f","--line-hover":"#5b5963","--fg":"#e6e1e5","--dim":"#c4c5d0","--dim-light":"#928f9a","--accent":"#d0bcff","--accent-hover":"#b9a4fa","--accent-soft":"rgba(208,188,255,.24)","--accent-selected-bg":"rgba(208,188,255,.30)","--accent2":"#4ecdb4","--accent2-soft":"rgba(78,205,180,.24)","--warn":"#f2b8b4","--bad":"#f2b8b4","--bad-soft":"rgba(242,184,180,.24)","--think":"#cfc4f7","--think-soft":"rgba(207,196,247,.18)","--shadow-sm":"0 1px 2px 0 rgba(0,0,0,.30)","--shadow":"0 1px 2px 0 rgba(0,0,0,.40),0 1px 3px 1px rgba(0,0,0,.30)","--shadow-md":"0 2px 4px -1px rgba(0,0,0,.45),0 4px 6px 1px rgba(0,0,0,.32)","--header-bg":"rgba(20,18,24,.88)","--hm0":"#2b2930","--hm1":"#332e44","--hm2":"#3d3460","--hm3":"#4d4080","--hm4":"#d0bcff"}},
     miuix: {label:'MiuiX', light:{"--bg":"#f6f7fa","--panel":"#ffffff","--panel2":"#eef0f4","--panel3":"#e2e6ee","--line":"#dde1e8","--line-hover":"#c9d0db","--fg":"#1f2024","--dim":"#5f6671","--dim-light":"#8c93a0","--accent":"#ff5c00","--accent-hover":"#ff7a33","--accent-soft":"rgba(255,92,0,.10)","--accent-selected-bg":"rgba(255,92,0,.18)","--accent2":"#07c160","--accent2-soft":"rgba(7,193,96,.12)","--warn":"#d48200","--bad":"#e53935","--bad-soft":"rgba(229,57,53,.10)","--think":"#7c4dff","--think-soft":"rgba(124,77,255,.10)","--shadow-sm":"0 1px 2px 0 rgba(31,32,36,.05)","--shadow":"0 2px 6px 0 rgba(31,32,36,.08)","--shadow-md":"0 6px 16px 0 rgba(31,32,36,.10)","--header-bg":"rgba(255,255,255,.85)","--hm0":"#ffece0","--hm1":"#ffd0b8","--hm2":"#ffb085","--hm3":"#ff8c4a","--hm4":"#ff5c00"}, dark:{"--bg":"#0e0f12","--panel":"#191b1f","--panel2":"#22252b","--panel3":"#2a2d34","--line":"#2e3239","--line-hover":"#3a3f48","--fg":"#f0f1f4","--dim":"#9aa0aa","--dim-light":"#7a8090","--accent":"#ff7a33","--accent-hover":"#ff9056","--accent-soft":"rgba(255,122,51,.18)","--accent-selected-bg":"rgba(255,122,51,.26)","--accent2":"#3ed984","--accent2-soft":"rgba(62,217,132,.20)","--warn":"#ffb852","--bad":"#ff6f6f","--bad-soft":"rgba(255,111,111,.16)","--think":"#a78bff","--think-soft":"rgba(167,139,255,.18)","--shadow-sm":"0 1px 2px 0 rgba(0,0,0,.40)","--shadow":"0 2px 6px 0 rgba(0,0,0,.55)","--shadow-md":"0 6px 18px 0 rgba(0,0,0,.60)","--header-bg":"rgba(14,15,18,.78)","--hm0":"#22252b","--hm1":"#332820","--hm2":"#4a2c20","--hm3":"#5c3220","--hm4":"#ff7a33"}}
   };
@@ -14067,11 +14067,12 @@ function buildHeatGrid(heat){
 /* ---------------- 用量明细（维度切换） ---------------- */
 const dimDefs = {
   model: {
-    head: ['模型', '请求', 'Token', '平均速度', '缓存命中', '花费'],
+    head: ['模型', '请求', 'Token', '平均速度', '缓存命中', '消耗积分', '花费'],
     columns: [
       {id:'who', label:'模型'}, {id:'req', label:'请求', align:'num'},
       {id:'tok', label:'Token'}, {id:'speed', label:'平均速度', align:'num'},
-      {id:'cache', label:'缓存命中', align:'num'}, {id:'cost', label:'花费', align:'num'},
+      {id:'cache', label:'缓存命中', align:'num'}, {id:'credit', label:'消耗积分', align:'num'},
+      {id:'cost', label:'花费', align:'num'},
     ],
     rows(){
       const a = state.analytics; if (!a) return [];
@@ -14084,16 +14085,17 @@ const dimDefs = {
         tokSub: `思考 ${fmtCompact(m.window.reasoning_tokens ?? m.window.reasoning ?? 0)} · 缓存 ${fmtCompact(m.window.cached_tokens ?? 0)}`,
         speed: m.window.speed_avg,
         cache: m.window.cache_hit_pct,
+        credit: m.window.credit != null ? Number(m.window.credit).toFixed(2) : '—',
         cost: m.window.cost_cny,
       }));
     }
   },
   account: {
-    head: ['账号', '请求', 'Token', '平均速度', '缓存命中', '剩余积分', '花费'],
+    head: ['账号', '请求', 'Token', '平均速度', '缓存命中', '消耗积分', '花费'],
     columns: [
       {id:'who', label:'账号'}, {id:'req', label:'请求', align:'num'},
       {id:'tok', label:'Token'}, {id:'speed', label:'平均速度', align:'num'},
-      {id:'cache', label:'缓存命中', align:'num'}, {id:'remain', label:'剩余积分', align:'num'},
+      {id:'cache', label:'缓存命中', align:'num'}, {id:'credit', label:'消耗积分', align:'num'},
       {id:'cost', label:'花费', align:'num'},
     ],
     rows(){
@@ -14106,17 +14108,18 @@ const dimDefs = {
         tokSub: `思考 ${fmtCompact(acc.window.reasoning_tokens)} · 缓存 ${fmtCompact(acc.window.cached_tokens)}`,
         speed: acc.window.speed_avg,
         cache: acc.window.cache_hit_pct,
-        remain: acc.credits ? acc.credits.remain : null,
+        credit: acc.window.credit != null ? Number(acc.window.credit).toFixed(2) : '—',
         cost: acc.window.cost_cny,
       }));
     }
   },
   key: {
-    head: ['API Key', '请求', 'Token', '平均速度', '缓存命中', '花费'],
+    head: ['API Key', '请求', 'Token', '平均速度', '缓存命中', '消耗积分', '花费'],
     columns: [
       {id:'who', label:'API Key'}, {id:'req', label:'请求', align:'num'},
       {id:'tok', label:'Token'}, {id:'speed', label:'平均速度', align:'num'},
-      {id:'cache', label:'缓存命中', align:'num'}, {id:'cost', label:'花费', align:'num'},
+      {id:'cache', label:'缓存命中', align:'num'}, {id:'credit', label:'消耗积分', align:'num'},
+      {id:'cost', label:'花费', align:'num'},
     ],
     rows(){
       const a = state.analytics; if (!a) return [];
@@ -14128,6 +14131,7 @@ const dimDefs = {
         tokSub: `思考 ${fmtCompact(k.window.reasoning_tokens)} · 缓存 ${fmtCompact(k.window.cached_tokens)}`,
         speed: k.window.speed_avg,
         cache: k.window.cache_hit_pct,
+        credit: k.window.credit != null ? Number(k.window.credit).toFixed(2) : '—',
         cost: k.window.cost_cny,
       }));
     }
@@ -14210,6 +14214,7 @@ function renderDim(){
       tok: `<div class="tokcell"><span class="t">${numSpan(r.tok)}</span><div class="minibar"><i style="width:${Math.max(2,pct)}%;--bar-color:${colors[ri % colors.length]}"></i></div><span class="sub">${r.tokSub || ''}</span></div>`,
       speed: r.speed != null ? Number(r.speed).toFixed(0) + ' tok/s' : '—',
       cache: fmtPct(r.cache),
+      credit: (r.credit != null && r.credit !== '—') ? (Number(r.credit) > 0 ? '<b style="color:var(--warn)">'+r.credit+'</b>' : r.credit) : '—',
       remain: remainTxt,
       cost: r.cost != null ? fmtCostCny(r.cost) : '—',
     };

@@ -23,15 +23,17 @@
   * `BaseAgent._preRequest` / `_executeSingleStep`：monitor_promptPrepareStartTime /
     monitor_httpSendTime（毫秒时间戳，model 请求）；
   * `TuringShieldServiceImpl`：非企业号带真实 X-Device-Token，取不到时发
-    X-Device-Token-Error（hub 无本机 SDK，用官方同款 "sdk_not_initialized"）。
+    X-Device-Token 不发真实值；官方非企业号是 token 或 error 二选一，hub 没有
+    本机 SDK，按官方失败态发 X-Device-Token-Error: sdk_not_initialized。
 
 本套件钉住这些值，以及 open_upstream 真的把它们带出去（model / 稳定
 conversation id）。桌面端 / CLI 分支的行为也在末尾钉一遍，防止这次对齐改到
-它们。gzip 暂不压（官方 RequestBodyGzip=true 与扩展默认开关的关系待抓包
-确认），测试里只钉「当前不发 Content-Encoding」。
+它们。官方主 chat 默认 gzip（RequestBodyGzip=true → executeByMode →
+createCustomFetch 压缩），测试钉住 Content-Encoding 与请求体解压。
 
 No network: accounts are built from dicts, the transport is a scripted stub.
 """
+import gzip
 import io
 import json
 import os
@@ -81,7 +83,18 @@ check("productVersion is 4.12.39997873",
 check("host VSCode version stays 1.119.0 (constant)",
       wb_identity.VSCODE_IDE_VERSION == "1.119.0")
 check("UA is VSCode/<host> CodeBuddy/<extension>",
-      wb_identity.VSCODE_UA == INTL_UA, wb_identity.VSCODE_UA)
+      wb_identity.vscode_ua() == INTL_UA, wb_identity.vscode_ua())
+_saved_ide = os.environ.get("WB_VSCODE_IDE_VERSION")
+os.environ["WB_VSCODE_IDE_VERSION"] = "1.120.0"
+try:
+    check("WB_VSCODE_IDE_VERSION overrides the host version",
+          wb_identity.vscode_ua() == "VSCode/1.120.0 CodeBuddy/4.12.39997873",
+          wb_identity.vscode_ua())
+finally:
+    if _saved_ide is None:
+        os.environ.pop("WB_VSCODE_IDE_VERSION", None)
+    else:
+        os.environ["WB_VSCODE_IDE_VERSION"] = _saved_ide
 check("the endpoint table is untouched",
       wb_identity.endpoint_for("intl", "vscode")
       == ("https://www.workbuddy.ai", "www.workbuddy.ai")
@@ -327,14 +340,14 @@ if len(upstream.calls) >= 2:
     check("the model request carries the monitor timestamps",
           str(first.get("monitor_promptpreparestarttime", "")).isdigit()
           and str(first.get("monitor_httpsendtime", "")).isdigit())
-    # gzip 待确认：官方 product.json 有 productFeatures.RequestBodyGzip=true，
-    # 但扩展 BaseAgent 的 enableRequestBodyGzip 默认 false；主 chat 是否真的
-    # 压缩要等抓包，本 PR 先不压。确认后再把这条断言翻过来。
-    check("no request-body gzip while the feature stays unconfirmed",
-          "content-encoding" not in first)
+    # 官方主 chat 默认 gzip：RequestBodyGzip=true → executeByMode 置
+    # enableRequestBodyGzip → createCustomFetch 在 POST 有 body 时压缩。
+    check("the request-body is gzipped on the wire",
+          first.get("content-encoding") == "gzip", first.get("content-encoding"))
     raw = upstream.calls[0].data or b""
-    check("the body round-trips",
-          json.loads(raw.decode("utf-8"))["model"] == PAYLOAD["model"])
+    check("the body round-trips after gzip",
+          json.loads(gzip.decompress(raw).decode("utf-8"))["model"]
+          == PAYLOAD["model"])
 
 print()
 print("[8] the desktop / CLI identities are untouched")
@@ -352,8 +365,8 @@ check("desktop does not get X-Model-ID / X-Product-Version / X-Request-Trace-Id"
       "X-Model-ID" not in d and "X-Product-Version" not in d
       and "X-Request-Trace-Id" not in d)
 c = wb_identity.build_identity_headers("cli", "intl", "u1", "tok", model="ignored")
-check("CLI UA stays CLI/2.168.2 CodeBuddy/2.168.2 OpenAI/JS 6.25.0",
-      c.get("User-Agent") == "CLI/2.168.2 CodeBuddy/2.168.2 OpenAI/JS 6.25.0", c.get("User-Agent"))
+check("CLI UA stays CLI/2.168.2 CodeBuddy/2.168.2",
+      c.get("User-Agent") == "CLI/2.168.2 CodeBuddy/2.168.2", c.get("User-Agent"))
 check("CLI keeps Request-ID = Message-ID",
       c.get("X-Request-ID") == c.get("X-Conversation-Message-ID"))
 check("CLI does not get X-Model-ID / X-Request-Trace-Id",

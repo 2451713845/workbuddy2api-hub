@@ -1344,12 +1344,11 @@ class Account(object):
             conversation_id=conversation_id,
         )
         if self.is_cli_identity():
-            # 官方 CLI 的 chat 请求由 OpenAI Node SDK 发出：浏览器头一个都没有，
-            # Accept 就是 application/json（见 headers() 的 docstring）。
+            # 官方 CLI 的 chat 请求由 OpenAI Node SDK 发出：浏览器头一个都没有
+            # （X-Requested-With 也没有），Accept 就是 application/json。
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "X-Requested-With": "XMLHttpRequest",
             }
         else:
             headers = {
@@ -1367,10 +1366,10 @@ class Account(object):
             headers["X-Device-Token"] = device_token
         elif (self.product == wb_identity.PRODUCT_VSCODE
               and not self.enterprise_id):
-            # 官方非企业号会带本机 QIMEI/TuringShield 真实设备 token；hub 没有
-            # 本机 native SDK，生成不了也不伪造。官方取不到 token 时发
-            # X-Device-Token-Error（TuringShieldServiceImpl 的
-            # {error: "sdk_not_initialized"}），这里用同一个值占位。
+            # 官方非企业号一定发 token 或 error 二选一（源码实锤：
+            # AgentContextBuilderImpl / buildAuthHeaders 里 token || error）。
+            # hub 没有本机 QIMEI/TuringShield SDK，生成不了真实 token，按官方
+            # 的失败态发 error 占位，而不是两者都不发（那是官方不存在的状态）。
             headers["X-Device-Token-Error"] = "sdk_not_initialized"
         return headers
 

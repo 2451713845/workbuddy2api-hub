@@ -24,20 +24,24 @@
        UserAgentHttpInterceptor.buildUserAgent 拼成
        `<platform>/<platformVersion> <productName>/<productVersion>`，
        platformVersion 是宿主的 VSCode 版本（扩展从 vscode.env 取），
-       hub 没有宿主，固定为 VSCODE_IDE_VERSION。
+       hub 没有宿主，默认 1.119.0，可用 WB_VSCODE_IDE_VERSION 覆盖。
 
   3. 官方 CodeBuddy CLI (cli):
      - X-IDE-Type / X-IDE-Name: CLI、X-IDE-Version: 2.168.2
      - X-Product: SaaS
      - X-Agent-Intent: craft、X-Agent-Purpose: conversation、X-Agent-Type: main、
        X-Agent-Runtime: other
-     - UA: CLI/2.168.2 CodeBuddy/2.168.2 OpenAI/JS 6.25.0（官方 buildUserAgent：
-       platform 段 + productName 段 + OpenAI Node SDK 自带的 userAgentExtension）
-     - OpenAI Node SDK 6.25.0 的 X-Stainless-* 指纹头（见 CLI_STAINLESS_HEADERS）
+     - UA: CLI/2.168.2 CodeBuddy/2.168.2（官方 buildUserAgent：platform 段 +
+       productName 段；adapter 先删掉 SDK 的 user-agent，CLI 也没有
+       userAgentExtension，所以没有第三段）
+     - OpenAI Node SDK 6.25.0 的 x-stainless-* 指纹头（见
+       cli_stainless_headers()；OS/arch/node 版本默认取宿主，可用
+       WB_IDENTITY_OS / WB_IDENTITY_ARCH / WB_IDENTITY_NODE_VERSION 覆盖）
+     - X-Private-Data：个人号 false、企业号 true（官方 getCustomHeaders 默认值）
      - chat 请求体：JSON.stringify 紧凑形态 + gzip（productFeatures.RequestBodyGzip）
        + cache_retention=long；不带 metadata / conversation_id /
-       previous_response_id；X-Root-Request-ID 只在 meta.rootRequestId 存在时发，
-       主对话不发（本网关不发）
+       previous_response_id；X-Root-Request-ID 主对话会发，值 = 本轮
+       X-Conversation-Request-ID
      - 国际版端点: www.workbuddy.ai（官方 product.json 是 www.codebuddy.ai；本网关
        因解析不了 codebuddy.ai 走 workbuddy.ai，属已知 endpoint 差异），国内版
        端点: copilot.tencent.com
@@ -53,6 +57,8 @@ code 11-128（`conversation id missing`）。ID 形态按 5.8.4 实测：会话 
 
 import gzip
 import io
+import os
+import platform
 import secrets
 import threading
 import time
@@ -80,24 +86,47 @@ DEFAULT_IDE_VERSION = "2.168.2"
 #:   <platform>/<platformVersion> + <applicationName|productName>/<productVersion>
 #:   + 可选 userAgentExtension
 #: CLI 的 product.json：platform=CLI、productName=CodeBuddy、applicationName
-#: 为空；userAgentExtension 由 OpenAI Node SDK 6.25.0 自己填 "OpenAI/JS 6.25.0"
-#: （buildUserAgent 把它作为第三段保留）→
-#: "CLI/2.168.2 CodeBuddy/2.168.2 OpenAI/JS 6.25.0"。
-CLI_SDK_UA = "OpenAI/JS 6.25.0"
+#: 为空；CLI 没有 CLIENT_INFO_USER_AGENT_EXTENSION，adapter 又会先删掉 SDK
+#: 的 `user-agent` 头（SDK 的 Headers 实例键已小写化），所以 buildUserAgent
+#: 的入参是空串，最终只有两段。
 #: 官方 CLI 的 chat 请求由 OpenAI Node SDK 6.25.0 发出，SDK 自带的一组
-#: X-Stainless-* 指纹头。值取自 SDK 6.25.0 的默认值与官方 CLI 的运行环境
-#: （Windows x64 / Node v22.21.1 / 客户端 maxRetries=0 因此 Retry-Count=0）。
-#: 头名按 SDK 原样（大小写由传输层决定，本 PR 不自己改写）。
-CLI_STAINLESS_HEADERS = {
-    "X-Stainless-Lang": "js",
-    "X-Stainless-Package-Version": "6.25.0",
-    "X-Stainless-OS": "Windows",
-    "X-Stainless-Arch": "x64",
-    "X-Stainless-Runtime": "node",
-    "X-Stainless-Runtime-Version": "v22.21.1",
-    "X-Stainless-Retry-Count": "0",
-    "X-Stainless-Timeout": "1200",
-}
+#: X-Stainless-* 指纹头。值取自 SDK 6.25.0 的默认值；OS / Arch / Runtime-Version
+#: 本来由 SDK 按宿主机生成，这里默认取网关宿主（与 TLS/网络栈一致），可用
+#: WB_IDENTITY_OS / WB_IDENTITY_ARCH / WB_IDENTITY_NODE_VERSION 覆盖。
+#: 头名按官方 wire 小写（SDK 的 Headers 迭代时键已小写化）。
+def _identity_os():
+    override = str(os.environ.get("WB_IDENTITY_OS") or "").strip()
+    if override:
+        return override
+    system = platform.system()
+    return {"Windows": "Windows", "Darwin": "MacOS", "Linux": "Linux"}.get(
+        system, system or "Linux")
+
+
+def _identity_arch():
+    override = str(os.environ.get("WB_IDENTITY_ARCH") or "").strip()
+    if override:
+        return override
+    machine = (platform.machine() or "").lower()
+    return {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64",
+            "arm64": "arm64", "i386": "ia32", "i686": "ia32"}.get(
+        machine, machine or "x64")
+
+
+def cli_stainless_headers():
+    """官方 OpenAI Node SDK 6.25.0 的 x-stainless-* 指纹头。"""
+    return {
+        "x-stainless-lang": "js",
+        "x-stainless-package-version": "6.25.0",
+        "x-stainless-os": _identity_os(),
+        "x-stainless-arch": _identity_arch(),
+        "x-stainless-runtime": "node",
+        "x-stainless-runtime-version": (
+            str(os.environ.get("WB_IDENTITY_NODE_VERSION") or "").strip()
+            or "v22.21.1"),
+        "x-stainless-retry-count": "0",
+        "x-stainless-timeout": "1200",
+    }
 #: X-Agent-Runtime：官方枚举 AGENT_RUNTIMES = local-agent / cloud-agent /
 #: agent-agent；解析函数对未知/缺省值回 "other"（默认 other，可由 env 或
 #: session meta 覆盖）。主对话没有覆盖时就是 other。
@@ -119,13 +148,25 @@ CLI_BODY_DROP_FIELDS = ("metadata", "conversation_id", "previous_response_id")
 # UA 由 UserAgentHttpInterceptor.buildUserAgent 拼成
 # `<platform>/<platformVersion> <productName>/<productVersion>`；其中
 # platformVersion 是宿主的 VSCode 版本（扩展从 vscode.env 取），hub 没有宿主，
-# 固定为 VSCODE_IDE_VERSION —— 要跟宿主版本对齐时只改这一个常量。
+# 默认 1.119.0，可用 WB_VSCODE_IDE_VERSION 覆盖。
 VSCODE_PRODUCT_VERSION = "4.12.39997873"
 VSCODE_IDE_VERSION = "1.119.0"
 VSCODE_PLATFORM = "VSCode"
 VSCODE_PRODUCT_NAME = "CodeBuddy"
-VSCODE_UA = "%s/%s %s/%s" % (VSCODE_PLATFORM, VSCODE_IDE_VERSION,
-                             VSCODE_PRODUCT_NAME, VSCODE_PRODUCT_VERSION)
+
+
+def vscode_ide_version():
+    """宿主 VSCode 版本（官方取 vscode.env；hub 没有宿主，默认 1.119.0）。
+
+    可用 WB_VSCODE_IDE_VERSION 覆盖，跟你的实际宿主 IDE 版本对齐。
+    """
+    return (str(os.environ.get("WB_VSCODE_IDE_VERSION") or "").strip()
+            or VSCODE_IDE_VERSION)
+
+
+def vscode_ua():
+    return "%s/%s %s/%s" % (VSCODE_PLATFORM, vscode_ide_version(),
+                            VSCODE_PRODUCT_NAME, VSCODE_PRODUCT_VERSION)
 # 官方 HttpEnvRouteInterceptor：developerMode 关闭时固定 production。
 VSCODE_ENV_ID = "production"
 
@@ -393,14 +434,14 @@ def build_identity_headers(product, realm, uid, token,
             "X-Agent-Type": "main",
             "X-IDE-Type": VSCODE_PLATFORM,
             "X-IDE-Name": VSCODE_PLATFORM,
-            "X-IDE-Version": VSCODE_IDE_VERSION,
+            "X-IDE-Version": vscode_ide_version(),
             "X-Product-Version": VSCODE_PRODUCT_VERSION,
             "X-Env-ID": VSCODE_ENV_ID,
             # 官方主 chat 代码路径没有 X-Product（只有 codewiki 路径有）。本 PR
             # 保留现状，避免误删；「主 chat 是否发 X-Product」待 5.8.x 抓包确认。
             "X-Product": "SaaS",
             "X-Domain": endpoint_for(realm, product)[1],
-            "User-Agent": VSCODE_UA,
+            "User-Agent": vscode_ua(),
             "X-User-Id": str(uid or "anonymous"),
             "Authorization": "Bearer " + str(token or ""),
             "X-Request-Trace-Id": new_request_trace_id(),
@@ -424,14 +465,12 @@ def build_identity_headers(product, realm, uid, token,
             headers["X-Private-Data"] = "true"
         headers.update(vscode_trace_headers())
         # X-Device-Token：官方由本机 QIMEI/TuringShield native SDK 生成真实设备
-        # token（仅非企业号）；hub 没有本机 SDK，生成不了也不伪造。官方取不到
-        # token 时发 `X-Device-Token-Error`（TuringShieldServiceImpl 返回
-        # {error:"sdk_not_initialized"}），该占位由 Account.headers 追加；运维
-        # 手工配置的真实 token 仍优先。
+        # token（仅非企业号），且 token 或 error 必发其一；hub 没有本机 SDK，
+        # 生成不了也不伪造，由 Account.headers 按官方失败态发
+        # X-Device-Token-Error: sdk_not_initialized。运维配置的真实 token 仍优先。
         #
-        # gzip：官方 product.json 有 productFeatures.RequestBodyGzip=true，但扩展
-        # BaseAgent 的 enableRequestBodyGzip 默认 false、主 chat 是否真的压缩要等
-        # 抓包确认；本 PR 先不压（CLI 侧 gzip 有源码依据，由 CLI PR 负责）。
+        # gzip：官方主 chat 默认压缩（RequestBodyGzip=true → executeByMode 置
+        # enableRequestBodyGzip → createCustomFetch 压缩），由 wb_proxy 统一做。
     else:  # PRODUCT_CLI
         ide_version = DEFAULT_IDE_VERSION
         headers = {
@@ -444,18 +483,20 @@ def build_identity_headers(product, realm, uid, token,
             "X-IDE-Version": ide_version,
             "X-Product": "SaaS",
             "X-Domain": endpoint_for(realm, product)[1],
-            "User-Agent": "CLI/%s CodeBuddy/%s %s" % (
-                ide_version, ide_version, CLI_SDK_UA),
+            "User-Agent": "CLI/%s CodeBuddy/%s" % (ide_version, ide_version),
             "X-User-Id": str(uid or "anonymous"),
             "Authorization": "Bearer " + str(token or ""),
             "X-Conversation-ID": conv,
             "X-Conversation-Request-ID": conv_req_id,
+            "X-Root-Request-ID": conv_req_id,
             "X-Conversation-Message-ID": msg_id,
             "X-Request-ID": msg_id,
         }
-        # X-Root-Request-ID：官方只在 meta.rootRequestId 存在时发（子代理用主会话
-        # 的 conversationRequestId），主对话不发；本网关不冒充子代理，所以不发。
-        headers.update(CLI_STAINLESS_HEADERS)
+        # X-Private-Data：官方 getCustomHeaders 先按模型优化开关写 true/false
+        # （个人号默认 false、企业号 true），随后策略只在自定义模型/skip 时删头、
+        # sticky 会话强制 true。这里按账号是否企业号取对应的默认值。
+        headers["X-Private-Data"] = "true" if enterprise_id else "false"
+        headers.update(cli_stainless_headers())
         headers.update(trace_headers(with_parent=True))
 
     if enterprise_id:

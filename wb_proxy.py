@@ -13351,7 +13351,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             attempt_body = upstream_body
         # 官方 CLI 的 chat 请求体（见 wb_identity）：gzip（RequestBodyGzip=true，
         # 带 Content-Encoding: gzip）+ 注入 cache_retention=long；Responses API
-        # 的字段 / 客户端 metadata 不带。VSCode 官方主 chat 也默认 gzip。
+        # 的字段 / 客户端 metadata 不带。VSCode 官方主 chat 也默认 gzip
+        # （RequestBodyGzip=true → executeByMode → createCustomFetch 压缩）。
         cli_identity = account.is_cli_identity()
         vscode_identity = account.product == wb_identity.PRODUCT_VSCODE
         if cli_identity:
@@ -13793,7 +13794,8 @@ def probe_account(account, model=None, timeout=30):
     body = encode_upstream_body(probe_body)
     if cli_identity or vscode_identity:
         body = wb_identity.gzip_body(body)
-    # 与 open_upstream 同一条出站形态：VSCode 身分的 model 请求带 X-Model-ID。
+    # 与 open_upstream 同一条出站形态：VSCode 身分的 model 请求带 X-Model-ID；
+    # CLI / VSCode 官方主 chat 都默认 gzip。
     probe_headers = account.headers(purpose="chat", model=model)
     if cli_identity or vscode_identity:
         probe_headers["Content-Encoding"] = wb_identity.REQUEST_CONTENT_ENCODING

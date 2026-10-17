@@ -133,7 +133,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 156 个套件：115 个 Python + 41 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 157 个套件：116 个 Python + 41 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -418,6 +418,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
   - `unavailable_reason()` 的剩余时间改成秒级（`_human_left()`）：还剩 42 秒时以前写「剩余 0 min」，读起来像「早该能用了、网关还挡着」；现在写「剩余 42s」，连续第 2 次起附上「（连续第 N 次）」，看得出是在升级还是刚开始。
   - 通用失败分支（非 429 / 403 / 402 / 5xx / 传输抖动）以前**静默**给账号记一笔并冷却 3/60 秒：池子空了的报错只说得清谁在冷却，说不清是谁把它记成冷却的。现在打一行 `account <uid>: <异常原文>, cooling Ns (fails=…, ready=…)`。
   - `tests/_test_breaker_fairness.py` 扩到 27 项（两条阶梯的窗口衰减、`WB_FAIL_WINDOW=0` 的旧语义、剩余时间格式，以及「这条静默分支必须留日志」）。
+- 支持**按账号禁用个别模型**（账号 × 模型黑名单）：账号新增持久化字段 `disabledModels`，面板账号行点「+ 禁用模型」会弹出该账号所属区域的模型复选框列表（**默认全选；取消勾选即禁用**，带全选 / 全不选与实时计数），也可直接 `POST /accounts/set` 传 `disabledModels`（空数组 = 清空）。命中的模型不再派给该账号，请求自动落到池子里其他账号；该账号的其他模型完全不受影响。默认空 = 不限制、行为不变。仅**精确匹配**模型 id（不做前缀）。这是**人工**配置，与 `model_caps` / `model_cooldowns` 那些自动节流互不干扰；池子里所有账号都禁用了某个模型时，报错会逐个账号写明原因。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.10，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 

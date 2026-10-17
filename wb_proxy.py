@@ -18742,6 +18742,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(404, "no such account")
             log("account %s note set (%d chars)"
                 % (uid[:8], len(updated.get("note") or "")))
+        if "disabledModels" in payload:
+            # 人工黑名单：这些模型不再派给该账号，其他模型与别的账号都不受影响。
+            # 传空数组 = 清空禁用。
+            updated = POOL.set_disabled_models(uid, payload.get("disabledModels"))
+            if updated is None:
+                return self._error(404, "no such account")
+            log("account %s disabled models: %s"
+                % (uid[:8],
+                   ",".join(updated.get("disabledModels") or []) or "(none)"))
         if updated is None:
             return self._error(
                 400,

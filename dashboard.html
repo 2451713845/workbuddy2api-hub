@@ -5025,6 +5025,11 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <div id="creditsModalLoading" style="display:none;text-align:center;padding:30px 0">
         <div class="hint">正在向上游同步最新积分与权益包明细…</div>
       </div>
+      <div id="creditsModalError" style="display:none;text-align:center;padding:36px 16px">
+        <div id="creditsModalErrorTitle" style="font-size:16px;font-weight:600;margin-bottom:8px;color:var(--bad)">登录凭证已失效</div>
+        <div id="creditsModalErrorMsg" style="color:var(--dim);font-size:13px;max-width:480px;margin:0 auto 18px;line-height:1.6">上游鉴权网关返回 401 Unauthorized，该账号的登录会话已过期。请重新扫码登录以更新凭据。</div>
+        <button id="btnCreditsRelogin" class="bad" onclick="reloginFromCreditsModal()" style="font-size:13px;padding:7px 18px">重新登录该账号</button>
+      </div>
       <div id="creditsModalContent">
         <!-- 顶部指标卡片 (4 列卡片) -->
         <div class="credits-stat-grid" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:12px;margin-bottom:14px">
@@ -7147,9 +7152,12 @@ function accountRow(a){
   // both the attribute and the quoted JS string. uid comes from an upstream
   // JWT; treat it as untrusted and keep it to a safe charset.
   const uidAttr = esc(String(a.uid || '').replace(/[^\w.@-]/g, ''));
+  const realmAttr = esc(String(a.realm || 'intl').replace(/[^\w-]/g, ''));
   const nameAttr = esc(String(a.nickname || '').replace(/["'\\<>]/g, ''));
   const usage = USAGE_BY_ACCOUNT[a.uid] || {};
+  const isTokenBad = !!(a.tokenExpired || a.expiresIn === 'expired');
   const state = !a.enabled ? '<span class="badge off">已停用</span>'
+              : isTokenBad ? '<span class="badge bad" title="登录凭证已失效（上游返回 401 或已过期），请重新登录">凭证失效</span>'
               : a.reserveBlocked ? '<span class="badge warn">保留积分</span>'
               : a.dailyLimitBlocked ? '<span class="badge warn" title="今日已用 ' + fmt(a.dailyTokensToday || 0) + ' / ' + fmt(a.dailyTokenLimit || 0) + ' token，暂停接单（本地 0 点恢复）">日限额</span>'
               : a.creditLimitReached ? '<span class="badge warn" title="今日已消费 ' + Number(a.dailyCreditsToday || 0).toFixed(2) + ' / ' + (a.dailyCreditLimit || 0) + ' 积分，仅免费模型可用（本地 0 点恢复）">积分限额</span>'
@@ -7251,7 +7259,9 @@ function accountRow(a){
     +   '<div class="acct-actions-row">'
     +     '<button class="sec mini" onclick="toggleAccount(&quot;' + uidAttr + '&quot;,' + (!a.enabled) + ', this)">' + (a.enabled ? '停用' : '启用') + '</button>'
     +     '<button class="sec mini" onclick="testAccount(&quot;' + uidAttr + '&quot;, this)">测试</button>'
-    +     '<button class="sec mini" onclick="refreshOne(&quot;' + uidAttr + '&quot;, this)">刷新凭证</button>'
+    +     (isTokenBad
+          ? '<button class="bad mini" onclick="openLoginModal(&quot;' + realmAttr + '&quot;)" title="凭证已失效，点击重新扫码授权并自动更新该账号">重新登录</button>'
+          : '<button class="sec mini" onclick="refreshOne(&quot;' + uidAttr + '&quot;, this)">刷新凭证</button>')
     +     '<button class="sec mini" onclick="syncProfile(&quot;' + uidAttr + '&quot;, this)" title="从 Web 控制台同步最新昵称（改名后免重登）">同步昵称</button>'
     +   '</div>'
     +   '<div class="acct-actions-row">'
@@ -8245,6 +8255,11 @@ async function openCreditsDetail(uid, forceRefresh = false){
   const m = document.getElementById("creditsDetailModal");
   if(m) m.classList.add("show");
 
+  const errEl = document.getElementById("creditsModalError");
+  if(errEl) errEl.style.display = "none";
+  const contEl = document.getElementById("creditsModalContent");
+  if(contEl) contEl.style.display = "block";
+
   const searchInput = document.getElementById("cmPkgSearch");
   if(searchInput) searchInput.value = "";
   const sortSelect = document.getElementById("cmPkgSort");
@@ -8294,7 +8309,9 @@ async function reloadCreditsDetail(btn){
   if(btnEl){ btnEl.disabled = true; btnEl.textContent = "刷新中..."; }
   const loadingEl = document.getElementById("creditsModalLoading");
   const contentEl = document.getElementById("creditsModalContent");
+  const errorEl = document.getElementById("creditsModalError");
   if(loadingEl && (!contentEl || contentEl.style.display === 'none')) loadingEl.style.display = "block";
+  if(errorEl) errorEl.style.display = "none";
 
   try {
     const res = await postJSON("/accounts/credits/detail", { uid: CURRENT_CREDIT_DETAIL_UID, refresh: true });
@@ -8304,17 +8321,51 @@ async function reloadCreditsDetail(btn){
       const acct = (window.ACCOUNTS || []).find(a => a.uid === CURRENT_CREDIT_DETAIL_UID);
       if(acct){
         acct.credits = res.credits;
+        acct.tokenExpired = false;
         renderAccounts();
       }
+      if(errorEl) errorEl.style.display = "none";
+      if(contentEl) contentEl.style.display = "block";
       renderCreditsDetail(res.credits, acct);
     } else {
-      toast("拉取积分明细失败: " + ((res && res.error) || "请确认后端代理服务已重启以加载新代码"));
+      const errMsg = (res && res.error) || "请确认后端代理服务已重启以加载新代码";
+      const isAuthErr = errMsg.includes("401") || errMsg.includes("登录") || errMsg.includes("过期")
+        || errMsg.includes("Unauthorized") || errMsg.includes("Authorization")
+        || errMsg.toLowerCase().includes("token") || !!(res && res.need_relogin);
+      if(contentEl) contentEl.style.display = "none";
+      if(errorEl){
+        errorEl.style.display = "block";
+        const titleEl = document.getElementById("creditsModalErrorTitle");
+        const msgEl = document.getElementById("creditsModalErrorMsg");
+        const btnRelogin = document.getElementById("btnCreditsRelogin");
+        if(titleEl) titleEl.textContent = isAuthErr ? "登录凭证已失效" : "拉取积分明细失败";
+        if(msgEl) msgEl.textContent = errMsg;
+        if(btnRelogin) btnRelogin.style.display = isAuthErr ? "inline-block" : "none";
+      }
+      if(isAuthErr){
+        const acct = (window.ACCOUNTS || []).find(a => a.uid === CURRENT_CREDIT_DETAIL_UID);
+        if(acct){
+          acct.tokenExpired = true;
+          acct.lastError = errMsg;
+          renderAccounts();
+        }
+      }
+      toast(isAuthErr ? "登录已过期，请重新登录" : ("拉取积分明细失败: " + errMsg), "bad");
     }
   } catch(e) {
-    toast("网络异常: " + e.message);
+    if(contentEl) contentEl.style.display = "none";
+    if(errorEl){
+      errorEl.style.display = "block";
+      const titleEl = document.getElementById("creditsModalErrorTitle");
+      const msgEl = document.getElementById("creditsModalErrorMsg");
+      const btnRelogin = document.getElementById("btnCreditsRelogin");
+      if(titleEl) titleEl.textContent = "网络异常";
+      if(msgEl) msgEl.textContent = e.message;
+      if(btnRelogin) btnRelogin.style.display = "none";
+    }
+    toast("网络异常: " + e.message, "bad");
   } finally {
     if(loadingEl) loadingEl.style.display = "none";
-    if(contentEl) contentEl.style.display = "block";
     if(btnEl){ btnEl.disabled = false; btnEl.textContent = "刷新明细"; }
   }
 }
@@ -8642,6 +8693,13 @@ function renderCreditsPackagesTable(){
       + '</td>'
       + '</tr>';
   }).join('');
+}
+
+function reloginFromCreditsModal(){
+  const acct = (window.ACCOUNTS || []).find(a => a.uid === CURRENT_CREDIT_DETAIL_UID);
+  const realm = acct ? acct.realm : (window.VIEW_REALM || "intl");
+  closeCreditsDetail();
+  openLoginModal(realm);
 }
 
 function closeCreditsDetail(){

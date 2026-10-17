@@ -5860,7 +5860,7 @@ PRICING = None
 CREDITS_REFRESHER = None
 # Release discovery only - the checker never downloads or installs anything.
 UPDATES = None
-ACCOUNTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
+ACCOUNTS_DIR = os.environ.get("ACCOUNTS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
 def realm_state_file():
     """Path of the persisted realm switch.
 

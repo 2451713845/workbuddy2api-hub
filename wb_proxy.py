@@ -12730,6 +12730,12 @@ def gateway_hint(status, message):
             or "replace the image" in lower):
         return ("image data rejected by upstream; use a real/valid image, "
                 "may need a new conversation")
+    if ("11140" in lower or "账号存在异常行为" in text
+            or "account has been restricted" in lower
+            or "unusual activity" in lower):
+        return ("上游已对该账号做账号级风控限制（403 / code 11140）；网关已让该账号"
+                "冷却并停止换号重试。请勿换号或高频重试（同设备账号会连坐），"
+                "按 WorkBuddy 官方渠道申诉，通常 1-3 个工作日自动解除。")
     if "no usable account" in lower or "no healthy account" in lower:
         return "no healthy account available in pool; check /status or retry later"
     if "本机网络不可用" in text or "local network unavailable" in lower:
@@ -13054,9 +13060,97 @@ def rate_limit_is_account_level(detail, reset_at):
 
 
 #: 上游风控限制（HTTP 403, code 11140「账号存在异常行为，已被限制使用」）
-#: 的账号冷却时长：限制按小时计，2 小时后自然重试，上游解封即自愈——比
-#: 透传给客户端、账号继续被选用好，也比 402 那种「停到本地 04:00」轻。
-RESTRICTED_403_COOLDOWN = 7200.0
+#: 的账号冷却时长。定义在 wb_accounts：这是账号级状态且要持久化
+#: （restrictedUntil），时长跟着它走，避免两处各写一份。
+RESTRICTED_403_COOLDOWN = wb_accounts.RESTRICTED_ACCOUNT_COOLDOWN
+
+# --- 风控连坐保护 ---------------------------------------------------------
+# 社区复盘（Zhengyuuuui/workbuddy2api《封禁事件复盘与改进执行清单》）给出的
+# 处置口径：看到 11140 立即停手，解封前严禁换号继续打同一台设备——设备指纹会
+# 连坐。网关原来在 11140 上「冷却该号、立刻换下一个号继续同一请求」，一个请求
+# 能遍历整个池子；#422 用户实测 7 个号在一次任务里全被封。下面四个开关就是这条
+# 红线的代码化，默认值按「宁可少服务一会儿，也别把账号送走」取：
+#   WB_RESTRICTED_403_ROTATE_MAX  一次请求最多再换几个号（默认 0 = 不换）
+#   WB_RESTRICTION_WAVE_MIN       窗口内几个号被限制就整池暂停（默认 2）
+#   WB_RESTRICTION_WAVE_WINDOW    连坐判定的时间窗，秒（默认 900）
+#   WB_RESTRICTION_HOLD_SECONDS   整池暂停时长，秒（默认 1800；0 = 关闭暂停）
+def _env_number(name, default, cast=float):
+    try:
+        return max(0, cast(os.environ.get(name) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+RESTRICTED_403_ROTATE_MAX = int(_env_number("WB_RESTRICTED_403_ROTATE_MAX", 0, int))
+RESTRICTION_WAVE_MIN = max(1, int(_env_number("WB_RESTRICTION_WAVE_MIN", 2, int)))
+RESTRICTION_WAVE_WINDOW = _env_number("WB_RESTRICTION_WAVE_WINDOW", 900.0)
+RESTRICTION_HOLD_SECONDS = _env_number("WB_RESTRICTION_HOLD_SECONDS", 1800.0)
+
+_RESTRICTION_LOCK = threading.Lock()
+_RESTRICTION_EVENTS = {}   # realm -> {uid: epoch}（窗口内被限制的账号）
+_RESTRICTION_HOLD = {}     # realm -> 暂停到哪个 epoch
+
+
+def reset_restriction_state():
+    """清空连坐保护状态（测试，以及人工确认「已申诉、可以恢复派发」时用）。"""
+    with _RESTRICTION_LOCK:
+        _RESTRICTION_EVENTS.clear()
+        _RESTRICTION_HOLD.clear()
+
+
+def restriction_hold_remaining(realm, now=None):
+    """该区域整池暂停还剩多少秒（0 = 没有暂停）。"""
+    now = time.time() if now is None else now
+    with _RESTRICTION_LOCK:
+        return max(0.0, _RESTRICTION_HOLD.get(realm, 0.0) - now)
+
+
+def note_account_restriction(realm, uid="", now=None):
+    """记一次账号级风控限制；返回整池暂停的到期 epoch（0 = 尚未触发）。
+
+    同一窗口内达到 RESTRICTION_WAVE_MIN 个**不同**账号被限制，就认为上游在
+    按设备 / 出口做连坐清扫：把整个区域暂停 RESTRICTION_HOLD_SECONDS，期间
+    不再向上游发任何请求（open_upstream 直接快速失败），等人工确认或时间到
+    再恢复。按 uid 去重，所以同一个号被反复探测 / 测试不会把暂停骗出来。
+    """
+    now = time.time() if now is None else now
+    uid = str(uid or "").strip() or "-"
+    with _RESTRICTION_LOCK:
+        events = {key: at for key, at in _RESTRICTION_EVENTS.get(realm, {}).items()
+                  if now - at <= RESTRICTION_WAVE_WINDOW}
+        events[uid] = now
+        _RESTRICTION_EVENTS[realm] = events
+        if len(events) < RESTRICTION_WAVE_MIN or RESTRICTION_HOLD_SECONDS <= 0:
+            return 0.0
+        until = max(_RESTRICTION_HOLD.get(realm, 0.0),
+                    now + RESTRICTION_HOLD_SECONDS)
+        _RESTRICTION_HOLD[realm] = until
+    log("upstream restriction wave on %s: %d account(s) restricted within %.0fs; "
+        "pausing dispatch for %.0fs to avoid cross-account bans (uid %s)"
+        % (realm, len(events), RESTRICTION_WAVE_WINDOW,
+           RESTRICTION_HOLD_SECONDS, uid[:8]))
+    return until
+
+
+def restriction_hold_message(realm, remaining):
+    """整池暂停期间交给客户端的说明。"""
+    return ("上游风控已限制本区域账号（403 / code 11140，账号存在异常行为）。"
+            "网关已暂停派发 %d 秒，避免继续换号重试导致同设备账号连坐被封。"
+            "请勿换号或高频重试；按 WorkBuddy 官方渠道申诉（通常 1-3 个工作日"
+            "自动解除），解封后再恢复。 Upstream restricted the account(s); "
+            "dispatch paused %ds to avoid further bans."
+            % (int(remaining), int(remaining)))
+
+
+def _persist_restriction(account):
+    """把 restrictedUntil 落盘；失败只记日志，不影响请求路径。"""
+    try:
+        path = getattr(account, "path", "") or ""
+        if path:
+            account.save(os.path.dirname(path))
+    except Exception as exc:
+        log("account %s: restriction not persisted: %s"
+            % ((getattr(account, "uid", "") or "?")[:8], exc))
 
 #: 识别风控限制 403 的正文特征。内容审核的 403 走降级提示词那条路，二者必须
 #: 分开：对被限制的账号换提示词没有意义。code 匹配用正则（requestId 是 hex，
@@ -13244,6 +13338,13 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             remaining_schedule_weights() if remaining_priority_enabled() else None)
     realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
     model = str(payload.get("model") or "")
+    # 连坐保护：同一区域刚有账号被上游风控限制，整池暂停派发。这里直接快速
+    # 失败、一个上游请求都不发——继续打只会把同一台设备上的其他账号也送走。
+    hold = restriction_hold_remaining(realm)
+    if hold > 0:
+        raise RateLimited(None, "upstream account restriction in effect",
+                          wait=int(hold) + 1,
+                          message=restriction_hold_message(realm, hold))
     # 复用调用方已建好的 body：/v1/chat/completions 在进这里之前已经 build 过
     # 一次（那次的产物只用于一行日志和 prompt_fingerprint），此前这里会为同一
     # 个 payload 再建一遍，大请求实测白付 ~13.6ms/请求。403 降级重试时仍按
@@ -13286,6 +13387,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     last_403_detail = ""
     transient_hits = 0
     degraded_retried = False
+    # 一次请求里因为 11140 换过的号数：默认 0，即第一个号被限制就停手。
+    restricted_rotations = 0
     # 本机断网的次数：这一轮里只要出现过，最终报错就按「网络不可用」报，不按
     # 「上游不稳」报——两者的处置完全相反（去查本机网络 vs 去查账号/上游）。
     local_net_hits = 0
@@ -13344,10 +13447,14 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         # json.dumps(separators=(", ", ": ")) 会让 body 字节与 Content-Length 都成
         # 一处机器特征。上游解析等价，只影响线上字节。
         attempt_data = encode_upstream_body(attempt_body)
-        # 会话头族（X-Conversation-ID 等）由身分构造里每次请求现生成：上游不拿
-        # 这个 id 存历史，不需要按会话复用；缺了它上游的渠道校验会回 400 /
-        # code 11-128（`conversation id missing`），补的是「有」而不是「稳定」。
-        chat_headers = account.headers(purpose="chat")
+        # 会话头族（X-Conversation-ID 等）：官方客户端同一会话复用同一个 id，
+        # 这里按「账号 + 会话键」稳定派生；客户端没给会话键时保持每请求新生成。
+        # 缺了这套头上游的渠道校验会回 400 / code 11-128（`conversation id
+        # missing`）。跨账号重试时按账号各自派生，不会把两个号串到同一个会话上。
+        chat_headers = account.headers(
+            purpose="chat",
+            conversation_id=wb_identity.conversation_id_for(
+                account.uid, session_key))
         req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
                                      headers=chat_headers)
         # 头名保真：Request.add_header 会把头名 capitalize（X-Request-ID →
@@ -13451,19 +13558,30 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 except Exception:
                     detail = ""
                 # 先分流：上游风控限制（code 11140「账号存在异常行为，已被限制
-                # 使用」）是账号级的坏，降级提示词救不了，透传给客户端只会让
-                # 一个被限制的账号把对话一次次打死。冷却这个账号、换下一个继
-                # 续；全都试完还是不行才把原因交给客户端。
+                # 使用」）是账号级的坏，降级提示词救不了。处置按社区复盘的红线
+                # 走：冷却这个账号（持久化）、记一次连坐事件，然后**停手**——
+                # 不再把同一条请求换到下一个号上继续打（默认，见
+                # RESTRICTED_403_ROTATE_MAX）。
                 if restriction_is_account_level(detail):
-                    account.note_error("HTTP 403 (account restricted)",
-                                       cooldown=RESTRICTED_403_COOLDOWN,
-                                       single_account=(total <= 1), detail=detail)
+                    account.note_restricted(detail=detail,
+                                            cooldown=RESTRICTED_403_COOLDOWN)
+                    _persist_restriction(account)
                     log("account %s restricted by upstream (403 11140), "
-                        "cooling %.0fs" % (account.uid[:8], RESTRICTED_403_COOLDOWN))
+                        "cooling %.0fs (persisted)" % (account.uid[:8],
+                                                       RESTRICTED_403_COOLDOWN))
                     if session_key and POOL:
                         POOL.affinity.demote(session_key, account.uid)
                     last_error = exc
                     last_403_detail = detail
+                    note_account_restriction(realm, account.uid)
+                    # 红线：解封前不换号继续打同一台设备。默认把原因交给客户端
+                    # 就停手，下一次请求自然会落到别的账号；不再把同一条请求
+                    # 原样复制到池里每个账号——那正是「一封全封」的放大器。
+                    # 需要旧行为（透明换号）时把 WB_RESTRICTED_403_ROTATE_MAX
+                    # 调大即可。
+                    if restricted_rotations >= RESTRICTED_403_ROTATE_MAX:
+                        break
+                    restricted_rotations += 1
                     continue
                 # Panel degrade.go: a content rejection in passthrough/append
                 # mode is usually a system-prompt fingerprint false positive.
@@ -13792,6 +13910,16 @@ def probe_account(account, model=None, timeout=30):
         # panel can show the whole upstream body on hover.
         row["status"] = exc.code
         row["error"] = "HTTP %d: %s" % (exc.code, detail[:150])
+        if exc.code == 403 and restriction_is_account_level(detail):
+            # 测试也认账号级风控限制：不能用 60 秒的普通冷却把 2 小时覆盖掉，
+            # 更不能用「测试通过」的语义把被限制的账号放回池子（见 #422）。
+            # 一并记连坐事件：一键测试正好是发现「整池被清扫」的入口。
+            account.note_restricted(detail=detail)
+            _persist_restriction(account)
+            note_account_restriction(account.realm, account.uid)
+            row["restricted"] = True
+            row["fails"] = int(account.fails)
+            return row
         account.note_error("HTTP %d: %s" % (exc.code, detail[:80]),
                            cooldown=60, detail=detail)
         row["fails"] = int(account.fails)

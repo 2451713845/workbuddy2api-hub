@@ -32,6 +32,7 @@ code 11-128（`conversation id missing`）。ID 形态按 5.8.4 实测：会话 
 连字符的 UUID，请求/消息 id 是 32 位无连字符 hex（UUIDv7），见 uuid7。
 """
 
+import hashlib
 import secrets
 import time
 import uuid
@@ -116,6 +117,29 @@ def new_conversation_id():
     return str(uuid7())
 
 
+def conversation_id_for(uid, session_key):
+    """按「账号 + 会话键」稳定派生一个会话 id（带连字符的 UUID）。
+
+    官方客户端在同一个会话里始终复用同一个 X-Conversation-ID（抓包里主对话
+    是 UUIDv4、辅助请求是 v7，两种都被接受）；网关以前每个请求都现生成一个，
+    等于把一次多轮对话拆成上千个「一次性会话」，与人类客户端的画像不符。
+    这里按账号 + 会话键做稳定派生：同一账号的同一会话多轮复用同一个 id，
+    不同账号 / 不同会话互不相同——既贴近官方语义，又不会成为跨账号关联键
+    （把同一段会话的 id 发给多个账号才是关联键）。
+
+    没有会话键（客户端没带）时返回空串，调用方保持原来的「每请求新生成」。
+    """
+    key = str(session_key or "").strip()
+    if not key:
+        return ""
+    digest = hashlib.sha256(("%s|%s" % (uid or "", key)).encode("utf-8")).hexdigest()
+    h = list(digest[:32])
+    h[12] = "4"          # UUID 版本位
+    h[16] = "a"          # RFC 4122 变体位
+    h = "".join(h)
+    return "%s-%s-%s-%s-%s" % (h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+
+
 def new_message_id():
     """X-Request-ID / X-Conversation-Message-ID / -Request-ID / -Root-Request-ID：
     32 位无连字符 hex（5.8.4 实测形态）。"""
@@ -145,10 +169,12 @@ def build_identity_headers(product, realm, uid, token,
                            tenant_id="", department=""):
     """回传这一轮要用的身分标头。product = 'workbuddy' (桌面端), 'vscode' 或 'cli'。
 
-    conversation_id 只用于显式指定：留空（网关的常态）就每次请求新生成一个
-    UUIDv7。上游不拿这个 id 存历史——抓包后的实测里，同一 id 连发两轮、第二轮
-    只带 system+user，模型仍答不出上一轮；换个新 id 结果一样。所以网关不需要
-    在会话维度上维护映射。
+    conversation_id 由调用方给：网关的 chat 路径用 conversation_id_for(uid,
+    session_key) 按会话稳定派生（官方客户端同一会话复用同一个 id，见该函数），
+    探活 / 每日活跃这类单发请求留空即每次新生成一个 UUIDv7。上游不拿这个 id
+    存历史——抓包后的实测里，同一 id 连发两轮、第二轮只带 system+user，模型仍
+    答不出上一轮；换个新 id 结果一样。所以稳定与否不影响模型行为，只影响
+    出站请求「像不像官方客户端」。
     """
     product = normalize_product(product)
     is_cn = (realm == "cn")

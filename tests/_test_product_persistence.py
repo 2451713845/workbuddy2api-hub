@@ -125,9 +125,29 @@ for want in ("workbuddy", "vscode", "cli"):
               and all(c in "0123456789abcdef" for c in str(h.get(k)))
               for k in HEX32),
           [h.get(k) for k in HEX32])
-check("a fresh conversation id per call (upstream keeps no history by it)",
+# 官方客户端同一会话复用同一个 X-Conversation-ID（抓包：主对话是 UUIDv4，
+# 换轮次不换 id）；没有会话键的单发请求才每次新生成。稳定派生同时按账号
+# 隔离——把同一段会话的 id 发给多个账号才是关联键。
+check("without a session key the conversation id stays fresh per call",
       wb_identity.build_identity_headers("workbuddy", "intl", "u1", "tok")["X-Conversation-ID"]
       != wb_identity.build_identity_headers("workbuddy", "intl", "u1", "tok")["X-Conversation-ID"])
+conv_a = wb_identity.conversation_id_for("u1", "session-a")
+check("a session key derives one stable dashed-uuid conversation id",
+      conv_a == wb_identity.conversation_id_for("u1", "session-a")
+      and len(conv_a) == 36 and conv_a.count("-") == 4, conv_a)
+check("a different session key derives a different id",
+      wb_identity.conversation_id_for("u1", "session-b") != conv_a)
+check("a different account derives a different id",
+      wb_identity.conversation_id_for("u2", "session-a") != conv_a)
+check("no session key derives no id (fresh per request stays)",
+      wb_identity.conversation_id_for("u1", "") == "")
+explicit = wb_identity.build_identity_headers(
+    "workbuddy", "intl", "u1", "tok", conversation_id=conv_a)
+check("build_identity_headers honours the conversation id it is given",
+      explicit.get("X-Conversation-ID") == conv_a, explicit.get("X-Conversation-ID"))
+check("the desktop chat headers carry the derived conversation id",
+      A.Account(credential("workbuddy")).headers(
+          "chat", conversation_id=conv_a).get("X-Conversation-ID") == conv_a)
 a7, b7 = wb_identity.uuid7(), wb_identity.uuid7()
 check("uuid7 is time-ordered and version 7",
       a7.hex[:12] <= b7.hex[:12] and a7.version == 7 and b7.version == 7,

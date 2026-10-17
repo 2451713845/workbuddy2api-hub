@@ -4229,48 +4229,48 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
-        <section>
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-            <div>
-        <section>
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-            <div>
-              <h2 style="margin:0">启用 Anthropic Messages 接口 (Claude) <em id="setAnthropicMessagesState"></em></h2>
-              <div style="font-size:12px;color:var(--dim);margin-top:4px">
-                允许 Claude Code / Anthropic SDK 访问网关 /v1/messages。网关对内将其转换为 OpenAI Chat Completions 协议转发。
-              </div>
-              <div style="font-size:12px;color:var(--warn);margin-top:4px">
-                注意：转换层目前未保留 cache_control 语义，在长会话中可能因缓存命中率降低而导致积分消耗偏高。请知晓风险后再开启。默认关闭。
-              </div>
+            <h2 style="margin:0">启用 Anthropic Messages 接口 (Claude) <em id="setAnthropicMessagesState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              允许 Claude Code / Anthropic SDK 访问网关 /v1/messages。网关对内将其转换为 OpenAI Chat Completions 协议转发。
             </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-              <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
-                <input id="setAnthropicMessages" type="checkbox" style="width:16px;height:16px">
-                启用 Messages 接口
-              </label>
-              <button onclick="saveAnthropicMessages(this)">保存</button>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              注意：转换层目前未保留 cache_control 语义，在长会话中可能因缓存命中率降低而导致积分消耗偏高。请知晓风险后再开启。默认关闭。
             </div>
           </div>
-        </section>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setAnthropicMessages" type="checkbox" style="width:16px;height:16px">
+              启用 Messages 接口
+            </label>
+            <button onclick="saveAnthropicMessages(this)">保存</button>
+          </div>
+        </div>
+      </section>
 
-              <h2 style="margin:0">免费额度耗尽回退积分版 <em id="setCreditFallbackState"></em></h2>
-              <div style="font-size:12px;color:var(--dim);margin-top:4px">
-                国际版 deepseek-v4.1-flash 免费额度在所有账号均耗尽（6004 撞线）后，自动回退到 deepseek-v4.1-flash-sg 付费通道。默认关闭。
-              </div>
-              <div style="font-size:12px;color:var(--warn);margin-top:4px">
-                注意：回退后将消耗账户中的真实积分（x0.03 倍率），请确认知晓积分成本后再开启。
-              </div>
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">免费额度耗尽回退积分版 <em id="setCreditFallbackState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              国际版 deepseek-v4.1-flash 免费额度在所有账号均耗尽（6004 撞线）后，自动回退到 deepseek-v4.1-flash-sg 付费通道。默认关闭。
             </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-              <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
-                <input id="setCreditFallback" type="checkbox" style="width:16px;height:16px">
-                启用积分回退
-              </label>
-              <button onclick="saveCreditFallback(this)">保存</button>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              注意：回退后将消耗账户中的真实积分（x0.03 倍率），请确认知晓积分成本后再开启。
             </div>
           </div>
-        </section>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setCreditFallback" type="checkbox" style="width:16px;height:16px">
+              启用积分回退
+            </label>
+            <button onclick="saveCreditFallback(this)">保存</button>
+          </div>
+        </div>
+      </section>
 
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">自动切换出站身份 <em id="setAutoSwitchState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               某账号在某模型上被上游限流（429）时，自动在 WB / VSC / CLI 之间换身分重试，每轮最多 4 次。三条身分走不同的配额通道，开启后 429 会少一些。默认关闭。

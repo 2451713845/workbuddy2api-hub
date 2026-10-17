@@ -52,6 +52,12 @@ S3_INTL_6004 = ('{"code":6004,"msg":"usage exceeds frequency limit, but don\'t '
                 'alternatively, you can switch to the other models to continue '
                 'using it."}')
 
+# A 429 also registers a window record (wb_window_probe) next to the gateway's
+# accounts dir. The stub pool below has no `dir`, so the write would fall back
+# to the repo's own accounts/ folder - point the constant at the temp dir as
+# well, so running the suite never leaves state behind in the checkout.
+proxy.ACCOUNTS_DIR = _startup_dir.name
+
 
 class ModelCooldownTests(unittest.TestCase):
     def account(self):

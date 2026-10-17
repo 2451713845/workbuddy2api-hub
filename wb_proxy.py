@@ -15,6 +15,7 @@ start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
 """
 import argparse
 import bisect
+import calendar
 import hashlib
 import heapq
 import ipaddress
@@ -5860,7 +5861,7 @@ PRICING = None
 CREDITS_REFRESHER = None
 # Release discovery only - the checker never downloads or installs anything.
 UPDATES = None
-ACCOUNTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
+ACCOUNTS_DIR = os.environ.get("ACCOUNTS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
 def realm_state_file():
     """Path of the persisted realm switch.
 
@@ -9992,6 +9993,10 @@ def runtime_settings_view():
         "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
         "usage": wb_settings.usage_config(ACCOUNTS_DIR),
         "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
+        "window_probe": wb_settings.window_probe(ACCOUNTS_DIR),
+        "quota_scan_models": wb_settings.quota_scan_models(ACCOUNTS_DIR),
+        "quota_scan_interval_hours": quota_scan_interval_hours(),
+        "quota_scans": quota_scan_snapshot(),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
@@ -10000,6 +10005,25 @@ def runtime_settings_view():
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
     return POOL.representative() if POOL else None
+
+def quota_scan_interval_hours():
+    """The polling period the quota scanner runs on, for the panel caption."""
+    try:
+        import wb_quota_scan
+        return int(getattr(wb_quota_scan, "SCAN_INTERVAL", 6 * 3600) // 3600)
+    except Exception:
+        return 6
+
+def quota_scan_snapshot(limit=12):
+    """Recent quota-scan rows, or [] when the module cannot answer.
+
+    A broken state file must never take the settings page down with it.
+    """
+    try:
+        import wb_quota_scan
+        return wb_quota_scan.snapshot(ACCOUNTS_DIR, limit=limit)
+    except Exception:
+        return []
 # ---------------------------------------------------------------------------
 # Prefix-based session affinity (PATCHED-BY-OPS)
 # ---------------------------------------------------------------------------
@@ -12964,33 +12988,59 @@ def restriction_is_account_level(detail):
     return any(marker in lowered for marker in _RESTRICTION_403_MARKERS)
 
 
+def _unescape_body(detail):
+    """还原 JSON 转义过的响应体（`\\u5c06\\u5728` -> `将在`）。
+
+    线上上游返回的是原始 UTF-8 中文，但中间层或某些网关会把它转成
+    json.dumps 的默认转义形式。只在确实出现 `\\u` 时还原：本来就正常的
+    UTF-8 中文经 unicode_escape 会被解成乱码，那比不还原更糟。
+    """
+    if "\\u" not in detail:
+        return detail
+    try:
+        return detail.encode("utf-8", "surrogatepass").decode("unicode_escape")
+    except Exception:
+        return detail
+
+
 def parse_rate_limit_reset(detail):
     """Pull the reset time out of an upstream 429 body, if it names one.
 
-    Upstream answers code 6004 with a reset wall clock, but the wording is
-    per-realm: the intl form is "... your usage will reset at
-    2026-09-19 18:29:03 UTC+8 ...", the cn form is "... 将在
-    2026-10-09 14:44:59 UTC+8 重置 ...". Matching only the English form left
-    every cn 429 without a reset time, so it read as an account-level soft
-    limit and cooled the whole credential instead of parking just the
-    throttled model. Returns an epoch or None. Kept tolerant on purpose: an
-    unparseable body must not break the request path.
+    Upstream answers code 6004 with one of two shapes:
+        "... your usage will reset at 2026-09-19 18:29:03 UTC+8 ..."
+        "您的使用量已超出频率限制，将在 2026-10-02 16:00:34 UTC+8 重置 ..."
+    Matching only the English phrasing left every cn 429 without a reset
+    time, so it read as an account-level soft limit and cooled the whole
+    credential instead of parking just the throttled model - and left the
+    window probe (wb_window_probe) with no reset instant to schedule against.
+    Both shapes are accepted here.
+
+    The stamp is wall-clock time in the body's own UTC offset, so it is
+    converted with timegm: mktime would interpret it in the *host* timezone
+    and land hours off on any machine that is not already at UTC+8.
+
+    Returns an epoch or None. Kept tolerant on purpose: an unparseable body
+    must not break the request path.
     """
     if not detail:
         return None
-    m = re.search(r"(?:reset at|将在)\s*"
-                  r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})", detail)
+    text = _unescape_body(detail)
+    m = re.search(r"(?:reset at|将在)\s*(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})", text)
+    if not m:
+        # 措辞不认识（本地化文案、转义残留）时的兜底：上游固定把时间戳写成
+        # 「YYYY-MM-DD HH:MM:SS UTC±N」，认这个搭配比认关键词稳。
+        m = re.search(r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})\s*UTC[+-]\d{1,2}", text)
     if not m:
         return None
     stamp = m.group(1).replace("T", " ")
-    tz = re.search(r"UTC([+-]\d{1,2})(?::?(\d{2}))?", detail)
+    tz = re.search(r"UTC([+-]\d{1,2})(?::?(\d{2}))?", text)
     offset = 0
     if tz:
         hours = int(tz.group(1))
         minutes = int(tz.group(2) or 0)
         offset = hours * 3600 + (minutes * 60 if hours >= 0 else -minutes * 60)
     try:
-        base = time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S")) - time.timezone
+        base = calendar.timegm(time.strptime(stamp, "%Y-%m-%d %H:%M:%S"))
         return base - offset
     except Exception:
         return None
@@ -13047,6 +13097,27 @@ def _apply_stream_idle_timeout(response, seconds):
         sock.settimeout(seconds)
         return True
     except Exception:
+        return False
+
+
+def schedule_window_probe(account, model, reset_at):
+    """把上游给出的重置时刻登记给窗口探针（wb_window_probe）。
+
+    上游的额度窗口按首次请求起算，到点无人请求就不会开始新一轮，所以这个
+    时刻要在后台被主动用掉，而不是只当作一段冷却。登记本身不能影响请求
+    路径：任何异常都只写日志，本次 429 照常换号重试。
+    """
+    if not reset_at or account is None or not model:
+        return False
+    # 以池子的目录为准：--accounts-dir / Docker 卷会把它指到别处，而
+    # ACCOUNTS_DIR 只是启动默认值。登记目录必须和 run_due() 读的目录一致，
+    # 否则窗口登记在一处、执行在另一处，探针永远不触发。
+    accounts_dir = getattr(POOL, "dir", "") or ACCOUNTS_DIR
+    try:
+        import wb_window_probe
+        return wb_window_probe.schedule(accounts_dir, account.uid, model, reset_at)
+    except Exception as exc:
+        log("window probe schedule failed: %s" % exc)
         return False
 
 
@@ -13231,6 +13302,9 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 # so sibling models stay serviceable on the same credential.
                 account.note_error("HTTP 429 (model throttled)", model=model, until=reset_at,
                                    cooldown=wait, detail=detail)
+                # 除了记冷却，还要把重置时刻交给后台探针：到点主动发一个最小
+                # 请求，把新一轮窗口的计时起点钉在那一刻（窗口按首次请求起算）。
+                schedule_window_probe(account, model, reset_at)
                 if reset_at:
                     # A cap with a reset clock is the one observable moment the
                     # window budget can be measured from; the usage rows alone
@@ -17833,6 +17907,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, str(exc), "invalid_request_error")
             wb_settings.set_prompt_config(ACCOUNTS_DIR, patch)
             reply["prompt"] = wb_settings.prompt_config(ACCOUNTS_DIR)
+        if "window_probe" in payload:
+            raw = payload.get("window_probe")
+            if not isinstance(raw, bool):
+                return self._error(400, "window_probe must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_window_probe(ACCOUNTS_DIR, raw)
+            reply["window_probe"] = raw
+        if "quota_scan_models" in payload:
+            raw_models = payload.get("quota_scan_models")
+            # The watch list is either a list of model ids or nothing at all
+            # (clearing it switches the scanner off); anything else is a panel
+            # bug worth rejecting rather than silently dropping every model.
+            if raw_models is not None and not isinstance(raw_models, list):
+                return self._error(400, "quota_scan_models must be a list of model ids",
+                                   "invalid_request_error")
+            if isinstance(raw_models, list):
+                for item in raw_models:
+                    if item is not None and not isinstance(item, str):
+                        return self._error(400, "quota_scan_models holds a non-string entry",
+                                           "invalid_request_error")
+            if len(raw_models or []) > 200:
+                return self._error(400, "quota_scan_models cannot hold more than 200 models",
+                                   "invalid_request_error")
+            wb_settings.set_quota_scan_models(ACCOUNTS_DIR, raw_models)
+            reply["quota_scan_models_saved"] = len(
+                wb_settings.quota_scan_models(ACCOUNTS_DIR))
         new_key = payload.get("api_key")
         if new_key is not None:
             new_key = str(new_key).strip()
@@ -18526,6 +18626,29 @@ class Handler(BaseHTTPRequestHandler):
         if SCHEDULER:
             return self._json(200, SCHEDULER.trigger_now())
         return self._json(200, {"ok": False, "msg": "调度器未初始化"})
+
+    def _route_quota_scan_run(self):
+        """Check the watched quota lines right now, ignoring the 6h interval.
+
+        Still refuses anything the scanner considers off limits: a line already
+        carrying a 429 window belongs to wb_window_probe, and forcing another
+        request at it would only confirm what the panel already shows.
+        """
+        if POOL is None:
+            return self._error(503, "account pool unavailable")
+        try:
+            import wb_quota_scan
+            sent = wb_quota_scan.run_due(POOL, log=lambda msg: add_log_entry(
+                "[额度查询] %s" % msg, tag="scheduler"), force=True)
+        except Exception as exc:
+            return self._error(500, "quota scan failed: %s" % exc,
+                               "server_error")
+        return self._json(200, {
+            "ok": True,
+            "sent": sent,
+            "msg": ("已查询 %d 条配额线" % sent) if sent
+                   else "没有需要查询的配额线（未勾选模型或都已到下一次查询时刻）",
+        })
 
     def _route_scheduler_toggle(self, payload):
         if SCHEDULER:
@@ -19445,6 +19568,10 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             return self._route_catalog_refresh(payload)
+        if path == "/quota-scan/run":
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            return self._route_quota_scan_run()
         if path.startswith("/proxy/"):
             if not self._panel_ok():
                 return self._error(

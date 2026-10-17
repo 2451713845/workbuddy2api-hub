@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.7.10-2496ED?style=flat-square" alt="Version 1.6.20"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.7.11-2496ED?style=flat-square" alt="Version 1.6.20"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -415,16 +415,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
-- 国际版 `deepseek-v4.1-flash` 免费模型支持额度耗尽后回退到 `deepseek-v4.1-flash-sg` 积分版。默认关闭；仅当所有已启用账号都收到带重置时间的 6004 限额记录时才回退。设置网关环境变量 `WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK=1` 启用，可能产生积分费用；用量记录会显示实际计费模型，并保留客户端请求模型字段。
-- **软限流阶梯补上时间窗，冷却剩余时间不再写成「0 min」**（承接「连续失败要有时间窗」那条：当时只修了 `fails` / `degrade`，两条软限流阶梯漏了）：
-  - `soft_streak` / `unscoped_streak` 也按 `WB_FAIL_WINDOW`（默认 600 秒）判定「连续」：它们以前只加不减、只有成功才归零，于是昨天被限过 3 次，今天第一个 429 就直接从 2400s 起步（模型档 240s），后天更高，一路顶到 7200s——账号早就恢复正常（面板测试是绿的），却动不动被按几十分钟到两小时。
-  - `unavailable_reason()` 的剩余时间改成秒级（`_human_left()`）：还剩 42 秒时以前写「剩余 0 min」，读起来像「早该能用了、网关还挡着」；现在写「剩余 42s」，连续第 2 次起附上「（连续第 N 次）」，看得出是在升级还是刚开始。
-  - 通用失败分支（非 429 / 403 / 402 / 5xx / 传输抖动）以前**静默**给账号记一笔并冷却 3/60 秒：池子空了的报错只说得清谁在冷却，说不清是谁把它记成冷却的。现在打一行 `account <uid>: <异常原文>, cooling Ns (fails=…, ready=…)`。
-  - `tests/_test_breaker_fairness.py` 扩到 27 项（两条阶梯的窗口衰减、`WB_FAIL_WINDOW=0` 的旧语义、剩余时间格式，以及「这条静默分支必须留日志」）。
-- 支持**按账号禁用个别模型**（账号 × 模型黑名单）：账号新增持久化字段 `disabledModels`，面板账号行点「+ 禁用模型」会弹出该账号所属区域的模型复选框列表（**默认全选；取消勾选即禁用**，带全选 / 全不选与实时计数），也可直接 `POST /accounts/set` 传 `disabledModels`（空数组 = 清空）。命中的模型不再派给该账号，请求自动落到池子里其他账号；该账号的其他模型完全不受影响。默认空 = 不限制、行为不变。仅**精确匹配**模型 id（不做前缀）。这是**人工**配置，与 `model_caps` / `model_cooldowns` 那些自动节流互不干扰；池子里所有账号都禁用了某个模型时，报错会逐个账号写明原因。
-- 请求日志与看板「最近请求」表显示发起方 API Key：`chat:` / `chat done:` / `messages:` / `responses:` 四条日志行，以及「最近请求」表格新增的一列，都会带上该次请求所用 key 的名字（没填 name 就回退 id）；未带 key 的记录显示 `-` / `—`。纯显示层改动——`usage.jsonl` 里的 `key` 字段仍是 key id，「按 API Key 的消耗归属」的统计口径不变。
-
-已发布版本的完整记录（v1.4.5 ~ v1.7.10，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
+已发布版本的完整记录（v1.4.5 ~ v1.7.11，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
 ## 七、致谢与引用声明 (Credits & References)
 

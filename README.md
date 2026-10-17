@@ -434,7 +434,20 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 - 新增 `tests/_test_quota_scan.py`（16 项）：钉住未勾选时什么都不做、查通之后要等满一个间隔、429 时既记冷却又登记窗口且之后停止轮询、失败不算查过并按短间隔重试、连续失败到上限才推迟到下一周期、持久化与重启视角、停用/无凭证/冷却中的组合被跳过、首次登记错峰与批次上限。
 - **出站 chat 请求：头名保真 + 按账号隔离连接 + 紧凑 JSON**：出站头名此前被 `urllib` / 连接池统一改写大小写（`X-Request-ID` → `X-Request-Id`、`X-IDE-*` → `X-Ide-*`、`traceparent` / `b3` → `Traceparent` / `B3`），与官方客户端代码里的写法不是同一字节串；现在 chat / 每日活跃 / 面板探活三条路径按原名原样发送，billing / 登录 / 签到等未传有序头的路径行为不变。连接池键新增凭据摘要（`Authorization` / `X-Refresh-Token` / `X-User-Id` 的 sha256 前 16 位）：同一出口上的不同账号不再共用同一条 TCP/TLS 连接（同一账号仍复用；`egress_key` 与退避 / 熔断口径不变）。chat 请求体改为紧凑 JSON（与 Node `JSON.stringify` 一致）。测试：`tests/_test_upstream_pool.py` 新增 [17] 头名保真 / [18] 按账号分池，`tests/_test_upstream_repairs.py` 新增 [6] 紧凑 JSON。
 
-已发布版本的完整记录（v1.4.5 ~ v1.7.13，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
+- **CLI 身份对齐官方 CodeBuddy CLI 2.168.2**：`X-IDE-Version` 与 UA 升到
+  `2.168.2`（`CLI/2.168.2 CodeBuddy/2.168.2 OpenAI/JS 6.25.0`）；补齐官方 CLI 的
+  `X-Agent-Purpose` / `X-Agent-Type` / `X-Agent-Runtime`、四段
+  b3 链路头族（含 `X-B3-ParentSpanId`）与 OpenAI Node SDK 6.25.0 的
+  `X-Stainless-*` 指纹头。`X-Conversation-ID` 按（账号, 会话键）稳定、
+  `X-Conversation-Request-ID` 在一轮 user send 的所有重试/换号里复用同一个值，
+  `X-Request-ID` 仍等于 `X-Conversation-Message-ID`，主对话不发
+  `X-Root-Request-ID`。chat 请求去掉 Origin / Referer / X-CodeBuddy-Request /
+  Accept-Language，`Accept` 改为 `application/json`；请求体 gzip 并注入
+  `cache_retention=long`，CLI 身份不再发 `X-Device-Token`。桌面端 / VSCode 身份
+  行为不变。国际版端点仍是 `www.workbuddy.ai`（官方 CLI 用 `www.codebuddy.ai`，
+  解析不了，属已知差异，本版不改）。
+
+已发布版本的完整记录（v1.4.5 ~ v1.7.12，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
 ## 七、致谢与引用声明 (Credits & References)
 

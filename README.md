@@ -135,7 +135,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 170 个套件：126 个 Python + 44 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 171 个套件：127 个 Python + 44 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -325,6 +325,16 @@ python wb_agents.py restore --client codex                 # 随时字节级还�
 
 ---
 
+### 14. 国内版上游地址（`WB_CN_CHAT_UPSTREAM`）
+
+国内版对话侧默认发往 `https://copilot.tencent.com`。网关跑在海外出口后面（代理软件的全局模式、海外服务器）时，到它的 TLS 握手会被复位，日志里是 `SSL: UNEXPECTED_EOF_WHILE_READING` 或 `WinError 10054`，国内版账号的对话、刷新 token、模型目录、签到与成长任务全部失败。`www.workbuddy.cn` 提供同一套接口且海外可达（官方桌面端当前即以它为 endpoint，VSCode 身分本来也走它）。
+
+- 设置 `WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn`，重启 `wb-proxy`；启动日志的 `realm` 行会显示新的出口，并多一行 `cn upstream: ... (WB_CN_CHAT_UPSTREAM)`；
+- 只改「往哪发」：`X-Domain` 仍用账号登录时记下的 domain，计费侧（`www.codebuddy.cn`）不变；
+- 不是 `http(s)://` 开头的值会被忽略并回落默认地址，启动日志给出提示；不设则行为与此前完全一致。
+
+---
+
 ## 三、账号添加与管理
 
 打开看板 `http://127.0.0.1:8788/`，在「账号」区域操作。若上游对某账号的单个模型返回 429，账号行会显示受限模型与预计恢复时间（浏览器本地时间），该账号仍可用于其他模型；模型冷却只在当前进程内保留，重启清空。
@@ -425,6 +435,9 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **国内版对话上游可通过 `WB_CN_CHAT_UPSTREAM` 改址**：`copilot.tencent.com` 从海外出口（代理软件全局模式等）连接时 TLS 握手被复位（`SSL: UNEXPECTED_EOF_WHILE_READING` / `WinError 10054`），国内版对话、刷新 token、模型目录、签到与成长任务全部失败，账号还会因此被熔断。设 `WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn` 后，桌面端 / CLI 身分的对话端点、`REALM_CONFIGS["cn"]["chat_upstream"]` 与成长任务的 `CHAT_BASE` 一起改走该地址；`X-Domain` 仍用账号自己的 domain。不设时行为与此前完全一致。
+  `WB_CN_CHAT_UPSTREAM` overrides the China-realm chat upstream. From an overseas exit (e.g. a proxy in global mode) the TLS handshake to `copilot.tencent.com` is reset, so China-realm chat, token refresh, the model catalogue, check-in and growth tasks all fail and accounts get tripped by the breaker. With `WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn` the desktop / CLI chat endpoints, `REALM_CONFIGS["cn"]["chat_upstream"]` and the growth-task `CHAT_BASE` all move to that host; `X-Domain` still comes from the account's own domain. Unset, nothing changes.
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.15，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 

@@ -20872,7 +20872,13 @@ def _log_startup_summary(args, api_key_generated):
     log(f"issuer     : {wb_accounts.jwt_issuer(rep.access_token) if rep else chr(45)}")
     log("realm      : %s (%s)" % (
         CURRENT_REALM,
-        "www.workbuddy.ai" if CURRENT_REALM == "intl" else "copilot.tencent.com"))
+        "www.workbuddy.ai" if CURRENT_REALM == "intl"
+        else urllib.parse.urlsplit(wb_identity.CN_CHAT_BASE).netloc))
+    if wb_identity.CN_CHAT_BASE != wb_identity.CN_CHAT_BASE_DEFAULT:
+        log("cn upstream: %s (WB_CN_CHAT_UPSTREAM)" % wb_identity.CN_CHAT_BASE)
+    elif wb_identity.CN_CHAT_BASE_IGNORED:
+        log("cn upstream: ignored WB_CN_CHAT_UPSTREAM=%r (not an http(s) URL), using %s" % (
+            wb_identity.CN_CHAT_BASE_IGNORED, wb_identity.CN_CHAT_BASE_DEFAULT))
     log("user-agent : %s" % wb_accounts.USER_AGENT)
     if args.host == "0.0.0.0":
         ips = local_ip_addresses() or ["<this-pc-ip>"]

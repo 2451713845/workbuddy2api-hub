@@ -19,7 +19,6 @@ import bisect
 import hashlib
 import heapq
 import ipaddress
-import math
 from collections import deque
 import re
 import json
@@ -5863,6 +5862,16 @@ def account_views(realm=None):
     return POOL.list_public(realm=realm)
 
 
+def _finite_number(value):
+    """True for a float that is neither NaN nor +/-inf.
+
+    Deliberately avoids `math`: the portable runtime ships the compiled
+    `math` module, and the release-asset test maps every imported stdlib
+    name to a `Lib/*.py` file, which `math` does not have.
+    """
+    return value == value and value not in (float("inf"), float("-inf"))
+
+
 def credit_balance_summary(realm=None):
     """Aggregate cached credit snapshots without account-identifying fields.
 
@@ -5886,7 +5895,7 @@ def credit_balance_summary(realm=None):
             remain = float(credits.get("remain"))
         except (TypeError, ValueError):
             continue
-        if not math.isfinite(remain) or remain < 0:
+        if not _finite_number(remain) or remain < 0:
             continue
         total += remain
         known += 1
@@ -5894,7 +5903,7 @@ def credit_balance_summary(realm=None):
             stamp = float(credits.get("updated_at"))
         except (TypeError, ValueError):
             continue
-        if math.isfinite(stamp):
+        if _finite_number(stamp):
             updated.append(stamp)
     return {
         "balance": round(total, 2) if known else None,

@@ -9952,6 +9952,7 @@ def runtime_settings_view():
         "pricing_variant_inherit": wb_settings.pricing_variant_inherit(ACCOUNTS_DIR),
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
+        "auto_switch_products": wb_settings.auto_switch_products(ACCOUNTS_DIR),
         "free_model_credit_fallback": wb_settings.free_model_credit_fallback(ACCOUNTS_DIR),
         "enable_anthropic_messages": wb_settings.enable_anthropic_messages(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
@@ -12804,20 +12805,28 @@ def _switch_count(account, model):
 def _try_switch_product(account, model):
     """429 时换身分重试。回传 True 表示已切换、可以重试。
 
-    同一请求内最多切 MAX_PRODUCT_SWITCHES 次：
-      cli -> workbuddy -> cli -> workbuddy
-    四次都不行就放弃，让呼叫端回报真正的 429。
+    只会在面板配置允许的身份之间按 WB → VSC → CLI 顺序切换；同一请求内最多
+    切 MAX_PRODUCT_SWITCHES 次，四次都不行就放弃，让呼叫端回报真正的 429。
     """
     count = _switch_count(account, model)
     if count >= MAX_PRODUCT_SWITCHES:
         return False
     current = getattr(account, "product", wb_identity.PRODUCT_DESKTOP)
-    if current == wb_identity.PRODUCT_DESKTOP:
-        target = wb_identity.PRODUCT_VSCODE
-    elif current == wb_identity.PRODUCT_VSCODE:
-        target = wb_identity.PRODUCT_CLI
-    else:
-        target = wb_identity.PRODUCT_DESKTOP
+    allowed = wb_settings.auto_switch_products(ACCOUNTS_DIR)
+    sequence = (wb_identity.PRODUCT_DESKTOP, wb_identity.PRODUCT_VSCODE,
+                wb_identity.PRODUCT_CLI)
+    try:
+        start = sequence.index(current)
+    except ValueError:
+        start = -1
+    target = None
+    for offset in range(1, len(sequence) + 1):
+        candidate = sequence[(start + offset) % len(sequence)]
+        if candidate != current and candidate in allowed:
+            target = candidate
+            break
+    if not target:
+        return False
     try:
         changed = account.set_product(target)
     except Exception as exc:
@@ -17840,6 +17849,18 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_auto_switch_product(ACCOUNTS_DIR, raw)
             reply["auto_switch_product"] = raw
+        if "auto_switch_products" in payload:
+            # 允许自动切换落在哪些身份上：必须是已知 product id 的列表。
+            raw = payload.get("auto_switch_products")
+            if not isinstance(raw, list) or any(not isinstance(p, str) for p in raw):
+                return self._error(
+                    400, "auto_switch_products must be a list of product ids",
+                    "invalid_request_error")
+            try:
+                clean = wb_settings.set_auto_switch_products(ACCOUNTS_DIR, raw)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            reply["auto_switch_products"] = clean
         if "daily_chat_web" in payload:
             raw = payload.get("daily_chat_web")
             if not isinstance(raw, bool):

@@ -1304,6 +1304,47 @@ def set_auto_switch_product(accounts_dir, enabled):
     return enabled
 
 
+#: 出站身份自动切换允许落在哪些身份上（默认三条都允许，保持旧行为）。
+AUTO_SWITCH_PRODUCTS = ("workbuddy", "vscode", "cli")
+
+
+def auto_switch_products(accounts_dir):
+    """Allowed target identities for the 429 auto-switch.
+
+    Defaults to all three so an install that predates this setting keeps the
+    old behaviour. Unknown entries are dropped rather than failing the read.
+    """
+    raw = load(accounts_dir).get("auto_switch_products")
+    if not isinstance(raw, list):
+        return list(AUTO_SWITCH_PRODUCTS)
+    out = []
+    for item in raw:
+        if isinstance(item, str) and item in AUTO_SWITCH_PRODUCTS and item not in out:
+            out.append(item)
+    return out
+
+
+def set_auto_switch_products(accounts_dir, products):
+    """Persist the allowed auto-switch identities. Returns the stored list.
+
+    Raises ValueError for anything that is not a list of known product ids, so
+    the panel gets a readable 400 instead of silently storing garbage.
+    """
+    if not isinstance(products, list):
+        raise ValueError("auto_switch_products must be a list")
+    clean = []
+    for item in products:
+        if not isinstance(item, str) or item not in AUTO_SWITCH_PRODUCTS:
+            raise ValueError("unknown auto-switch product: %r" % (item,))
+        if item not in clean:
+            clean.append(item)
+    with _lock:
+        data = load(accounts_dir)
+        data["auto_switch_products"] = clean
+        save(accounts_dir, data)
+    return clean
+
+
 def remaining_priority_enabled(accounts_dir):
     """Whether pairs close to their estimated remaining quota are served first.
 

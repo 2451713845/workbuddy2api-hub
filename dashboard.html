@@ -1529,6 +1529,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '启用': 'Enable',
     '启用价估算': 'Enable estimate',
     '启用自动切换': 'Enable auto-switch',
+    '允许切换的身份：': 'Allowed identities: ',
+    '至少选择一个身份': 'Pick at least one identity',
     '启用调度': 'Enable scheduler',
     '回到顶部': 'Back to top',
     '回收失败': 'Recovery failed',
@@ -2541,6 +2543,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "启用临期优先": "啟用臨期優先",
     "启用价估算": "啟用價估算",
     "启用自动切换": "啟用自動切換",
+    "允许切换的身份：": "允許切換的身分：",
+    "至少选择一个身份": "至少選擇一個身分",
     "启用调度": "啟用排程",
     "回收密钥": "回收金鑰",
     "导入密钥": "匯入金鑰",
@@ -4503,6 +4507,18 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
               <input id="setAutoSwitch" type="checkbox" style="width:16px;height:16px">
               启用自动切换
             </label>
+            <div style="display:flex;align-items:center;gap:10px;font-size:13px;min-height:40px;flex-wrap:wrap">
+              允许切换的身份：
+              <label style="display:flex;align-items:center;gap:4px">
+                <input id="setAutoSwitchWB" type="checkbox" style="width:16px;height:16px">WB
+              </label>
+              <label style="display:flex;align-items:center;gap:4px">
+                <input id="setAutoSwitchVSC" type="checkbox" style="width:16px;height:16px">VSC
+              </label>
+              <label style="display:flex;align-items:center;gap:4px">
+                <input id="setAutoSwitchCLI" type="checkbox" style="width:16px;height:16px">CLI
+              </label>
+            </div>
             <button onclick="saveAutoSwitchProduct(this)">保存</button>
           </div>
         </div>
@@ -10226,6 +10242,13 @@ async function loadSettings(showToast){
         autoSwitchState.textContent = autoSwitch ? '(已启用)' : '(未启用)';
         autoSwitchState.style.color = autoSwitch ? 'var(--accent2)' : 'var(--dim)';
       }
+      const autoSwitchProducts = Array.isArray(data.auto_switch_products)
+        ? data.auto_switch_products : ['workbuddy', 'vscode', 'cli'];
+      [['setAutoSwitchWB', 'workbuddy'], ['setAutoSwitchVSC', 'vscode'],
+       ['setAutoSwitchCLI', 'cli']].forEach(function(pair){
+        const input = document.getElementById(pair[0]);
+        if(input) input.checked = autoSwitchProducts.indexOf(pair[1]) >= 0;
+      });
       const dailyWeb = data.daily_chat_web !== false;
       const dailyWebInput = document.getElementById('setDailyChatWeb');
       if(dailyWebInput) dailyWebInput.checked = dailyWeb;
@@ -10847,9 +10870,20 @@ async function saveCreditFallback(btn){
 async function saveAutoSwitchProduct(btn){
   const el = document.getElementById('setAutoSwitch');
   const value = !!(el && el.checked);
+  const products = [];
+  [['setAutoSwitchWB', 'workbuddy'], ['setAutoSwitchVSC', 'vscode'],
+   ['setAutoSwitchCLI', 'cli']].forEach(function(pair){
+    const input = document.getElementById(pair[0]);
+    if(input && input.checked) products.push(pair[1]);
+  });
+  if(!products.length){
+    toast('至少选择一个身份', 'bad');
+    return;
+  }
   if(btn) btn.disabled = true;
   try {
-    await postJSON('/settings/save', {auto_switch_product: value});
+    await postJSON('/settings/save', {auto_switch_product: value,
+                                      auto_switch_products: products});
     toast(value ? '已启用：429 时自动切换出站身份' : '已关闭自动切换出站身份', 'ok');
     loadSettings();
   } catch(e) {

@@ -431,6 +431,28 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertFalse(settings.auto_switch_product(directory),
                          "a hand-edited string must not read as enabled")
 
+    def test_auto_switch_products_defaults_and_validates(self):
+        """Allowed identities: all three by default; unknown entries rejected."""
+        directory = tempfile.mkdtemp(prefix="auto-switch-products-")
+        self.assertEqual(settings.auto_switch_products(directory),
+                         ["workbuddy", "vscode", "cli"])
+        self.assertEqual(
+            settings.set_auto_switch_products(directory, ["vscode", "cli"]),
+            ["vscode", "cli"])
+        self.assertEqual(settings.auto_switch_products(directory),
+                         ["vscode", "cli"])
+        self.assertEqual(
+            settings.set_auto_switch_products(directory, ["vscode", "vscode"]),
+            ["vscode"], "duplicates are collapsed")
+        with self.assertRaises(ValueError):
+            settings.set_auto_switch_products(directory, ["bogus"])
+        with self.assertRaises(ValueError):
+            settings.set_auto_switch_products(directory, "vscode")
+        with open(settings.settings_path(directory), "w", encoding="utf-8") as fh:
+            json.dump({"auto_switch_products": ["bogus", 7, "vscode"]}, fh)
+        self.assertEqual(settings.auto_switch_products(directory), ["vscode"],
+                         "hand-edited garbage is filtered, not trusted")
+
     def test_a_429_keeps_the_identity_while_the_setting_is_off(self):
         directory = tempfile.mkdtemp(prefix="auto-switch-off-")
         old_dir = proxy.ACCOUNTS_DIR

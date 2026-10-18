@@ -463,6 +463,35 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
   失败态发 `X-Device-Token-Error: sdk_not_initialized`（不伪造 token）。
 - **阿里云 systemd 部署支持手动安装稳定版**：设置页可从配置的 fork Release 安装新版本；更新包必须通过 `SHA256SUMS` 与 `release-manifest.json` 校验，账号与用量目录列为保护路径。网关只提交版本号，root-owned systemd 更新服务负责备份、替换、重启与健康检查；失败会恢复程序文件。每日检查仍默认关闭，打开后也只检查、不自动安装。
 
+- **CLI 身份对齐官方 CodeBuddy CLI 2.168.2**：`X-IDE-Version` 与 UA 升到
+  `2.168.2`（`CLI/2.168.2 CodeBuddy/2.168.2`；官方 adapter 会删掉 SDK 的
+  user-agent，CLI 也没有 userAgentExtension，所以是两段）；补齐官方 CLI 的
+  `X-Agent-Purpose` / `X-Agent-Type` / `X-Agent-Runtime`、`X-Private-Data`
+  （个人号 false、企业号 true）、四段 b3 链路头族（含 `X-B3-ParentSpanId`）
+  与 OpenAI Node SDK 6.25.0 的 `x-stainless-*` 指纹头（OS/arch/node 版本默认取
+  宿主，可用 `WB_IDENTITY_OS` / `WB_IDENTITY_ARCH` /
+  `WB_IDENTITY_NODE_VERSION` 覆盖）。`X-Conversation-ID`
+  按（账号, 会话键）稳定、`X-Conversation-Request-ID` 在一轮 user send 的
+  所有重试/换号里复用同一个值，`X-Request-ID` 仍等于
+  `X-Conversation-Message-ID`，`X-Root-Request-ID` = 本轮
+  `X-Conversation-Request-ID`。chat 请求去掉 Origin / Referer /
+  X-CodeBuddy-Request / X-Requested-With / Accept-Language，`Accept` 改为
+  `application/json`；请求体 gzip 并注入 `cache_retention=long`，CLI 身份
+  不再发 `X-Device-Token`。桌面端 / VSCode 身份行为不变。国际版端点仍是
+  `www.workbuddy.ai`（官方 CLI 用 `www.codebuddy.ai`，解析不了，属已知差异，
+  本版不改）。
+- **VSCode 身份对齐官方扩展 4.12.39997873**：UA 改为
+  `VSCode/1.119.0 CodeBuddy/4.12.39997873`（productName=CodeBuddy、扩展版本
+  4.12.39997873），补 `X-Product-Version` / `X-Model-ID` / `X-Agent-Type` /
+  `X-Private-Data`（仅 intl）/ B3 链路头族（含 `X-B3-ParentSpanId` 与四段 b3）/
+  `X-Request-Trace-Id` / `monitor_*` 时间戳；`X-Request-ID` 与
+  `X-Conversation-Request-ID` 同值、`X-Conversation-Message-ID` 独立，
+  `X-Conversation-ID` 为 32 位 hex（宿主 VSCode 版本默认 1.119.0，可用
+  `WB_VSCODE_IDE_VERSION` 覆盖）。桌面端 / CLI 身份行为不变。官方主 chat
+  默认请求体 gzip（`RequestBodyGzip=true` → `executeByMode` →
+  `createCustomFetch` 压缩），本版启用；非企业号没有真实设备 token 时按官方
+  失败态发 `X-Device-Token-Error: sdk_not_initialized`（不伪造 token）。
+
 已发布版本的完整记录（v1.4.5 ~ v1.7.13，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
 ## 七、致谢与引用声明 (Credits & References)

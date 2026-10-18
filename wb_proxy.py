@@ -13354,14 +13354,15 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         # 带 Content-Encoding: gzip）+ 注入 cache_retention=long；Responses API
         # 的字段 / 客户端 metadata 不带。VSCode 官方主 chat 也默认 gzip
         # （RequestBodyGzip=true → executeByMode → createCustomFetch 压缩）。
-        # 注：紧凑 JSON 由 transport PR（upstream #429）统一做，这里不重复实现。
         cli_identity = account.is_cli_identity()
         vscode_identity = account.product == wb_identity.PRODUCT_VSCODE
         if cli_identity:
             attempt_body = {k: v for k, v in attempt_body.items()
                             if k not in wb_identity.CLI_BODY_DROP_FIELDS}
             attempt_body["cache_retention"] = wb_identity.CLI_CACHE_RETENTION
-        # 紧凑 JSON：官方客户端（Node JSON.stringify）不带分隔符后的空格。
+        # 紧凑 JSON：官方客户端（Node JSON.stringify）不带分隔符后的空格，默认的
+        # json.dumps(separators=(", ", ": ")) 会让 body 字节与 Content-Length 都成
+        # 一处机器特征。上游解析等价，只影响线上字节。
         attempt_data = encode_upstream_body(attempt_body)
         if cli_identity or vscode_identity:
             attempt_data = wb_identity.gzip_body(attempt_data)

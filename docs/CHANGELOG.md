@@ -1,3 +1,11 @@
+## v1.7.16
+
+国内版上游可改址、面板稳定性与英文界面修复：新增 WB_CN_CHAT_UPSTREAM，海外出口可把国内版对话 / 刷新 / 任务一起切到 www.workbuddy.cn（#465）；修复空数据时 Token 时序悬停崩溃、英文界面词级拼接、区间切换串号与轮询 304 不命中（#470）。套件 172 个（127 Python + 45 JS）。
+
+- **国内版对话上游可通过 `WB_CN_CHAT_UPSTREAM` 改址**：`copilot.tencent.com` 从海外出口（代理软件全局模式等）连接时 TLS 握手被复位（`SSL: UNEXPECTED_EOF_WHILE_READING` / `WinError 10054`），国内版对话、刷新 token、模型目录、签到与成长任务全部失败，账号还会因此被熔断。设 `WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn` 后，桌面端 / CLI 身分的对话端点、`REALM_CONFIGS["cn"]["chat_upstream"]` 与成长任务的 `CHAT_BASE` 一起改走该地址；`X-Domain` 仍用账号自己的 domain。不设时行为与此前完全一致。
+  `WB_CN_CHAT_UPSTREAM` overrides the China-realm chat upstream. From an overseas exit (e.g. a proxy in global mode) the TLS handshake to `copilot.tencent.com` is reset, so China-realm chat, token refresh, the model catalogue, check-in and growth tasks all fail and accounts get tripped by the breaker. With `WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn` the desktop / CLI chat endpoints, `REALM_CONFIGS["cn"]["chat_upstream"]` and the growth-task `CHAT_BASE` all move to that host; `X-Domain` still comes from the account's own domain. Unset, nothing changes.
+- **面板三处缺陷与 README 结构修正**（#470）：空数据时 Token 时序图悬停不再抛 TypeError；补齐 12 条英文短语词条，消除「Taskand福利」「callsRequests」这类杂交串；区间切换加代次保护，迟到的旧响应会被丢弃，轮询窗口上界量化到 15 秒桶，连续轮询也能命中 304；README 的 §二 小节号与断开的端点表一并修正。
+
 ## v1.7.15
 
 账号面板的模型冷却 / 达日限额提醒改为整行展示：长模型名与恢复时刻不再被 180px 账号列截断，悬停提示只保留原因与影响范围（#461）。套件 170 个（126 Python + 44 JS）。

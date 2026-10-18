@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.7.15-2496ED?style=flat-square" alt="Version 1.7.15"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.7.16-2496ED?style=flat-square" alt="Version 1.7.16"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -435,10 +435,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
-- **国内版对话上游可通过 `WB_CN_CHAT_UPSTREAM` 改址**：`copilot.tencent.com` 从海外出口（代理软件全局模式等）连接时 TLS 握手被复位（`SSL: UNEXPECTED_EOF_WHILE_READING` / `WinError 10054`），国内版对话、刷新 token、模型目录、签到与成长任务全部失败，账号还会因此被熔断。设 `WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn` 后，桌面端 / CLI 身分的对话端点、`REALM_CONFIGS["cn"]["chat_upstream"]` 与成长任务的 `CHAT_BASE` 一起改走该地址；`X-Domain` 仍用账号自己的 domain。不设时行为与此前完全一致。
-  `WB_CN_CHAT_UPSTREAM` overrides the China-realm chat upstream. From an overseas exit (e.g. a proxy in global mode) the TLS handshake to `copilot.tencent.com` is reset, so China-realm chat, token refresh, the model catalogue, check-in and growth tasks all fail and accounts get tripped by the breaker. With `WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn` the desktop / CLI chat endpoints, `REALM_CONFIGS["cn"]["chat_upstream"]` and the growth-task `CHAT_BASE` all move to that host; `X-Domain` still comes from the account's own domain. Unset, nothing changes.
-
-已发布版本的完整记录（v1.4.5 ~ v1.7.15，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
+已发布版本的完整记录（v1.4.5 ~ v1.7.16，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
 ## 七、致谢与引用声明 (Credits & References)
 

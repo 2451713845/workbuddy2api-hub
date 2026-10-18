@@ -13260,6 +13260,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         if session_key and AFFINITY_DEBUG:
             log("affinity: derived %s for %d msgs"
                 % (session_key, len(upstream_body.get("messages") or [])))
+    # 一轮 user send 的 request id：官方 CLI 在这一轮的所有请求（含重试/换号）
+    # 复用同一个 X-Conversation-Request-ID / X-Root-Request-ID，只有 message id
+    # 每请求新生成（见 wb_identity.new_turn_request_id）。生成在重试循环外，
+    # 循环里只把它传给身份构造；桌面端 / VSCode 分支不消费它，行为不变。
+    turn_request_id = wb_identity.new_turn_request_id()
     total = max(1, POOL.count_ready(realm, model=model)) if POOL else 1
     tried = set()
     # 这一轮请求已经记过账的账号：重试轮（transient_hits 后 tried.clear() 整池
@@ -13313,6 +13318,10 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         return egress_wait[key]
 
     max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
+    # 官方 VSCode 扩展的 X-Conversation-ID 是 32hex、会话稳定；网关没有会话
+    # 映射，至少保证同一次 open_upstream（含换号重试）里是同一个 id。桌面端 /
+    # CLI 分支保持原行为（每次尝试各自新生成带连字符的 UUID），不受影响。
+    vscode_conversation_id = wb_identity.new_message_id()
     # 每次失败都把【出错的那个账号】从这段对话的历史里降级（demote），而不是
     # 忘掉整段对话：重选时优先回到还留着这段前缀的暖号（见 SessionAffinity），
     # 一次大 prompt 的冷启动比重选一次账号贵得多。
@@ -13340,21 +13349,38 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             attempt_body = inject_prompt_cache_key(upstream_body, account.uid, session_key)
         else:
             attempt_body = upstream_body
-        # 紧凑 JSON：官方客户端（Node JSON.stringify）不带分隔符后的空格，默认的
-        # json.dumps(separators=(", ", ": ")) 会让 body 字节与 Content-Length 都成
-        # 一处机器特征。上游解析等价，只影响线上字节。
+        # 官方 CLI 的 chat 请求体（见 wb_identity）：gzip（RequestBodyGzip=true，
+        # 带 Content-Encoding: gzip）+ 注入 cache_retention=long；Responses API
+        # 的字段 / 客户端 metadata 不带。VSCode 官方主 chat 也默认 gzip
+        # （RequestBodyGzip=true → executeByMode → createCustomFetch 压缩）。
+        # 注：紧凑 JSON 由 transport PR（upstream #429）统一做，这里不重复实现。
+        cli_identity = account.is_cli_identity()
+        vscode_identity = account.product == wb_identity.PRODUCT_VSCODE
+        if cli_identity:
+            attempt_body = {k: v for k, v in attempt_body.items()
+                            if k not in wb_identity.CLI_BODY_DROP_FIELDS}
+            attempt_body["cache_retention"] = wb_identity.CLI_CACHE_RETENTION
+        # 紧凑 JSON：官方客户端（Node JSON.stringify）不带分隔符后的空格。
         attempt_data = encode_upstream_body(attempt_body)
-        # 会话头族（X-Conversation-ID 等）由身分构造里每次请求现生成：上游不拿
-        # 这个 id 存历史，不需要按会话复用；缺了它上游的渠道校验会回 400 /
-        # code 11-128（`conversation id missing`），补的是「有」而不是「稳定」。
-        chat_headers = account.headers(purpose="chat")
+        if cli_identity or vscode_identity:
+            attempt_data = wb_identity.gzip_body(attempt_data)
+        # 会话头族（X-Conversation-ID / -Request-ID）的语义见 wb_identity：桌面端
+        # 仍是每请求现生成（上游不拿它存历史，补的是「有」而不是「稳定」，缺了会
+        # 吃 400 / code 11-128）；CLI 身份则按官方语义取 (账号, 会话键) 稳定的会话
+        # id 和整轮复用的 request id（见上面 turn_request_id）；VSCode 身份用
+        # 一次请求内稳定的 32hex 会话 id，并带 X-Model-ID（官方 model-provider）。
+        # 重试换号时 session_key / turn_request_id / vscode_conversation_id 都不变。
+        req_headers = account.headers(
+            purpose="chat", session_key=session_key,
+            turn_request_id=turn_request_id, model=model,
+            conversation_id=(vscode_conversation_id
+                             if account.product == wb_identity.PRODUCT_VSCODE
+                             else None))
+        if cli_identity or vscode_identity:
+            req_headers["Content-Encoding"] = wb_identity.REQUEST_CONTENT_ENCODING
         req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
-                                     headers=chat_headers)
-        # 头名保真：Request.add_header 会把头名 capitalize（X-Request-ID →
-        # X-request-id），发送层再 .title() 就成了 X-Request-Id。官方客户端保留
-        # 代码里的写法，这里把有序原名挂给池路径，按原样发；回退到 urllib 的
-        # 路径（3xx / 非 HTTP 代理 / 关池）仍走原来的 .title()，行为不变。
-        req.wb_exact_headers = list(chat_headers.items())
+                                     headers=req_headers)
+        req.wb_exact_headers = list(req_headers.items())
         try:
             resp = wb_accounts.urlopen(req, timeout=header_timeout,
                                        proxy=account.proxy)
@@ -13753,11 +13779,23 @@ def probe_account(account, model=None, timeout=30):
     chat_url = account.chat_base_url() + CHAT_PATH
     test_body = {"model": model, "messages": [{"role": "user", "content": "hi"}],
                  "stream": False}
-    body = encode_upstream_body(build_upstream_body(test_body))
-    probe_headers = account.headers(purpose="chat")
+    probe_body = build_upstream_body(test_body)
+    cli_identity = account.is_cli_identity()
+    vscode_identity = account.product == wb_identity.PRODUCT_VSCODE
+    if cli_identity:
+        probe_body = {k: v for k, v in probe_body.items()
+                      if k not in wb_identity.CLI_BODY_DROP_FIELDS}
+        probe_body["cache_retention"] = wb_identity.CLI_CACHE_RETENTION
+    body = encode_upstream_body(probe_body)
+    if cli_identity or vscode_identity:
+        body = wb_identity.gzip_body(body)
+    # 与 open_upstream 同一条出站形态：VSCode 身分的 model 请求带 X-Model-ID；
+    # CLI / VSCode 官方主 chat 都默认 gzip。
+    probe_headers = account.headers(purpose="chat", model=model)
+    if cli_identity or vscode_identity:
+        probe_headers["Content-Encoding"] = wb_identity.REQUEST_CONTENT_ENCODING
     req = urllib.request.Request(chat_url, data=body, method="POST",
                                  headers=probe_headers)
-    # 探活也是 chat 请求：与 open_upstream 同口径，头名原样、body 紧凑 JSON。
     req.wb_exact_headers = list(probe_headers.items())
     t0 = time.time()
     try:

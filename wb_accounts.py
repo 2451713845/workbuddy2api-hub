@@ -2259,8 +2259,7 @@ class Account(object):
                 # 若详细接口明确返回认证失败，直接上报，不再尝试 fallback
                 # （fallback 使用相同 token，会得到同样的 401）。
                 err = res.get("error", "")
-                if err and ("401" in err or "登录" in err or "Authorization" in err
-                            or "Unauthorized" in err or "token" in err.lower()):
+                if err and (_auth_failure_text(err) or "登录" in err):
                     self.token_expired = True
                     self._set_last_error("登录已过期，请重新登录")
                     return res
@@ -2288,7 +2287,7 @@ class Account(object):
             # The visible label keeps its existing truncation; `detail` carries the
             # untouched upstream body so the panel can show it on hover.
             self.last_error_detail = str(detail)[:2000] if detail else ""
-            if "401" in str(message) or "Authorization" in str(message) or "unauthorized" in str(message).lower() or "token" in str(message).lower():
+            if _auth_failure_text(message):
                 self.token_expired = True
             if model:
                 # Model-scoped throttle: keep the account usable for every other model.
@@ -2483,6 +2482,22 @@ def _human_delta(seconds):
     hours = seconds / 3600.0
     if hours >= 1: return "%.1f hours" % hours
     return "%d min" % int(seconds / 60)
+
+
+def _auth_failure_text(text):
+    """True for a credential-shaped 401, not an intermediate proxy page.
+
+    A bare 401 from openresty / nginx (an HTML error page) is not evidence
+    that the token is dead: parking the account on it would take a healthy
+    credential out of rotation until a manual re-login (#435). Only mark the
+    account when the failure itself names authorization.
+    """
+    lower = str(text or "").lower()
+    if "<html" in lower:
+        return False
+    return ("401" in lower or "unauthorized" in lower or "authorization" in lower
+            or "token expired" in lower or "invalid_token" in lower)
+
 
 def _human_left(seconds):
     """还剩多久，精确到秒（对外解释「为什么现在不能用」时用）。

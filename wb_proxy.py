@@ -10045,7 +10045,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.13",
+        "version": "1.7.14",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -13050,6 +13050,11 @@ def is_transient(exc):
     and turned one hiccup into a 502 storm.
     """
     t = ("%s %s" % (type(exc).__name__, exc)).lower()
+    # A certificate/hostname verification failure is deterministic: every
+    # retry hits the same chain. Treating it as a transport hiccup consumed
+    # the egress budget and turned a configuration error into a 502 storm.
+    if wb_accounts.is_tls_verify_error(exc):
+        return False
     markers = (
         "ssl", "unexpected_eof", "eof occurred", "remote end closed",
         "connection reset", "connection aborted", "connectionreseterror",
@@ -13548,6 +13553,23 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # 好几笔 fails/degrade——池子越空、重轮越频繁，越容易把一个刚抖了一下的
     # 账号直接推过熔断阈值。一次请求对一个账号最多记一次。
     charged = set()
+    # A 401 may simply mean the access token expired before its JWT clock did.
+    # Refresh at most once per account per request, then retry that same
+    # account instead of silently rotating away from a recoverable credential.
+    refreshed = set()
+    refresh_uid = None
+
+    def pool_account(uid):
+        """Look up one account by uid; test pools only expose an accounts list."""
+        if POOL is None:
+            return None
+        getter = getattr(POOL, "get", None)
+        if getter is not None:
+            return getter(uid)
+        for candidate in getattr(POOL, "accounts", ()) or ():
+            if candidate.uid == uid:
+                return candidate
+        return None
 
     def charge_account(account, message, unknown):
         """给账号记一笔失败，一次请求最多记一笔（见上面的 charged）。"""
@@ -13607,6 +13629,9 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     for _attempt in range(max_attempts):
         if pinned is not None:
             account = pinned if pinned.uid not in tried else None
+        elif refresh_uid is not None:
+            account = pool_account(refresh_uid)
+            refresh_uid = None
         else:
             account = POOL.pick_for_session(realm=realm, session_key=session_key,
                                             exclude=tried, model=model,
@@ -13821,9 +13846,24 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 last_error = exc
                 continue
             if exc.code == 401:
-                log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                 if session_key and POOL:
                     POOL.affinity.demote(session_key, account.uid)
+                if account.uid not in refreshed:
+                    refreshed.add(account.uid)
+                    try:
+                        refreshed_ok = account.refresh()
+                    except Exception as refresh_exc:
+                        refreshed_ok = False
+                        log("account %s: token refresh after 401 failed: %s"
+                            % (account.uid[:8], exc_detail(refresh_exc, 160)))
+                    if refreshed_ok:
+                        log("account %s: HTTP 401, token refreshed; retrying the same account"
+                            % account.uid[:8])
+                        tried.discard(account.uid)
+                        refresh_uid = account.uid
+                        last_error = exc
+                        continue
+                log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                 account.note_error("HTTP 401",
                                    cooldown=60,
                                    single_account=(total <= 1))
@@ -13857,6 +13897,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 continue
             raise
         except Exception as exc:
+            if wb_accounts.is_tls_verify_error(exc):
+                # One attempt is enough: the chain is the same for every
+                # account, and retrying only multiplies the failed handshakes.
+                last_error = exc
+                break
             if session_key and POOL:
                 POOL.affinity.demote(session_key, account.uid)
             if looks_like_local_network(exc):
@@ -13934,6 +13979,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             last_error.account_uid = last_uid
         except Exception:
             pass
+        if wb_accounts.is_tls_verify_error(last_error):
+            exc = wb_accounts.TLSVerifyError(
+                wb_accounts.tls_verify_hint(last_error))
+            exc.account_uid = last_uid
+            raise exc
         if looks_like_local_network(last_error):
             # 最后一笔就是本机网络的问题：按「本机网络不可用」上报，不要报成
             # 「上游不可达」——后者会让人去查上游/账号，而真正要查的是本机。
@@ -14145,6 +14195,9 @@ def probe_account(account, model=None, timeout=30):
         return row
     except Exception as exc:
         row["elapsed_ms"] = int((time.time() - t0) * 1000)
+        if wb_accounts.is_tls_verify_error(exc):
+            row["error"] = wb_accounts.tls_verify_hint(exc)
+            return row
         if looks_like_local_network(exc):
             # 断网时上游一个字节都没收到：只报「本机网络不可用」，不给账号记冷却，
             # 否则网络一恢复，池子里全是刚才这轮测试留下的冷却账号。
@@ -16743,7 +16796,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.13"
+    server_version = "wb-proxy/1.7.14"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -19402,6 +19455,10 @@ class Handler(BaseHTTPRequestHandler):
         target_realm = payload.get("realm") or CURRENT_REALM
         try:
             started = POOL.start_login(realm=target_realm, platform=platform)
+        except wb_accounts.TLSVerifyError as exc:
+            # The hint already names the file/variable to fix; prefixing it
+            # with "could not start login" only buries it.
+            return self._error(502, str(exc))
         except Exception as exc:
             return self._error(502, "could not start login: %s" % exc)
         log("oauth login started (realm=%s, platform=%s, state=%s)" % (target_realm, platform, started["state"][:8]))
@@ -19776,6 +19833,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(503, "本机网络不可用：%s - 请检查本机网络/代理后重试"
                                     "（本次不计入账号熔断）" % (exc.detail or "DNS/路由失败"),
                                "invalid_request_error")
+        except wb_accounts.TLSVerifyError as exc:
+            record_error(model, 502, str(exc)[:200],
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         key=self._key_id())
+            return self._error(502, str(exc), "invalid_request_error")
         except RateLimited as exc:
             t = time.time() - t_start
             record_error(model, 429, exc.detail[:200], elapsed_ms=int(t * 1000),
@@ -20005,6 +20067,11 @@ class Handler(BaseHTTPRequestHandler):
                                               "（本次不计入账号熔断）"
                                               % (exc.detail or "DNS/路由失败"),
                                          "api_error")
+        except wb_accounts.TLSVerifyError as exc:
+            record_error(model, 502, str(exc)[:200],
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         key=self._key_id())
+            return self._anthropic_error(502, str(exc), "api_error")
         except RateLimited as exc:
             record_error(model, 429, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -20363,6 +20430,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(503, "本机网络不可用：%s - 请检查本机网络/代理后重试"
                                     "（本次不计入账号熔断）" % (exc.detail or "DNS/路由失败"),
                                "invalid_request_error")
+        except wb_accounts.TLSVerifyError as exc:
+            record_error(model, 502, str(exc)[:200],
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         key=self._key_id())
+            return self._error(502, str(exc), "invalid_request_error")
         except RateLimited as exc:
             record_error(model, 429, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),

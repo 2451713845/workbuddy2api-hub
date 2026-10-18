@@ -1474,6 +1474,11 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '刷新模型清单': 'Refresh catalog',
     '立即从上游 API 重新拉取当前视图版本的模型清单（不走缓存；同一版本 30 秒内只能刷一次）': 'Refetch the model catalog of the current view from the upstream API (bypassing cache; limited to one refresh per version every 30s)',
     '刷新凭证': 'Refresh token',
+    '凭证失效': 'Token expired',
+    '重新登录': 'Sign in again',
+    '重新登录该账号': 'Sign in again for this account',
+    '登录凭证已失效': 'Login token expired',
+    '登录已过期，请重新登录': 'Session expired, please sign in again',
     '一键刷新凭证': 'Refresh all tokens',
     '刷新失败:': 'Refresh failed:',
     '刷新完成:': 'Refresh finished:',
@@ -4578,7 +4583,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
-<h2 style="margin:0">剩余用量优先调度 <em id="setRemainingPriorityState"></em></h2>
+            <h2 style="margin:0">剩余用量优先调度 <em id="setRemainingPriorityState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               按「剩余用量估算」优先调度：某 (账号 × 模型) 的估计剩余越接近耗尽，分到的请求越多——先把快用完的额度用掉，等它到点重置。剩余不到 30% 开始加权、5% 以内权重最高；没有预算样本、或剩余为 0 / 冷却中的组合不参与。默认关闭。
             </div>
@@ -4599,6 +4604,27 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">模型额度窗口探针 <em id="setWindowProbeState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              上游的免费额度窗口按「首次请求」起算：某账号在某模型上被限流（429）后，上游会给出一个重置时刻。开启后，网关会在该时刻到点主动补一个最小请求，把新一轮窗口的计时起点钉在重置那一刻——否则要等到下一次真实请求窗口才开始计时，额度白白空转。默认开启。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              注意：探针会真的发一次对话请求，消耗该账号极少量额度（约一条 "Hi"）。到点后若上游仍未放开，最多重试 20 次（每 15 秒一次）后放弃，等下一次 429 重新登记。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setWindowProbe" type="checkbox" style="width:16px;height:16px">
+              到点自动请求
+            </label>
+            <button onclick="saveWindowProbe(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">出口级瞬时失败退避 <em id="setEgressBackoffState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               传输类失败与 502/503/504 改记在「出口」而不是账号上：同一个出口的账号共用一个计数器，退避是秒级（1 秒起、翻倍、封顶 15 秒、带抖动），任一次成功即清零；账号级熔断（30 分钟起、翻倍到 6 小时）不再被一次链路抖动触发。500 与 401/403/429 仍走原路径。默认关闭。
@@ -4612,6 +4638,31 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
             <button onclick="saveEgressBackoff(this)">保存</button>
           </div>
         </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">模型额度定时主动查询 <em id="setQuotaScanState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              勾选要留意的模型后，网关每 6 小时为每个「账号 + 模型」发一个最小请求，主动确认这条配额线是否已经被打满：打到 429 就立即记该模型的冷却，并把上游给的重置时刻交给上面的「模型额度窗口探针」到点处理；请求通了就说明这条线还没到限额。窗口探针管的是「已经限额之后」，这里管的是「还没限额时先知道」。默认不勾选，勾选后才会定时查询。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              注意：每次查询都会真的发一次对话请求，消耗该账号极少量额度；本地一旦有了该「账号 + 模型」的 429 记录，就停止定时查询（改由上面的探针负责），窗口记录消失后自动恢复轮询。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <button onclick="saveQuotaScanModels(this)">保存勾选</button>
+            <button class="sec" onclick="runQuotaScan(this)">立即查询</button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <button class="sec mini" onclick="toggleAllQuotaScanModels(true)">全选</button>
+          <button class="sec mini" onclick="toggleAllQuotaScanModels(false)">清空</button>
+          <span id="quotaScanHint" style="font-size:12px;color:var(--dim)"></span>
+        </div>
+        <div id="quotaScanModels" style="display:flex;flex-wrap:wrap;gap:6px 14px;max-height:220px;overflow:auto;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px"></div>
+        <div id="quotaScanState" style="margin-top:12px"></div>
       </section>
 
       <section>
@@ -5135,9 +5186,10 @@ function closeLogin(){
   if(loginState){ postJSON("/accounts/login/cancel", {state: loginState}).catch(()=>{}); loginState = null; }
 }
 
-function openLoginModal(){
+function openLoginModal(targetRealm){
   openLogin();
-  const isCn = (window.VIEW_REALM === "cn");
+  const realm = targetRealm || window.VIEW_REALM || "intl";
+  const isCn = (realm === "cn");
   const rCn = document.getElementById("radioCn");
   const rIntl = document.getElementById("radioIntl");
   if(rCn) rCn.checked = isCn;
@@ -5912,7 +5964,27 @@ async function loadSchedulerStatus(){
       ? (s.mode_intl || '账号 Token 自动保活与凭证常驻 (每日 22:00 集中巡检)')
       : (s.mode_cn || s.mode || '整点排程');
     if(txt) txt.textContent = s.enabled ? ('运行中 · ' + modeText) : '已暂停';
-    if(times) times.textContent = '上次: ' + (s.last_run_time || '-') + ' · 下次: ' + (s.next_run_time || '-');
+    if(times){
+      let line = '上次: ' + (s.last_run_time || '-') + ' · 下次: ' + (s.next_run_time || '-');
+      // 待触发的模型额度窗口：探针会在这些时刻到点时自动发请求，看不到就成了黑盒。
+      const wins = Array.isArray(s.windows) ? s.windows : [];
+      if(wins.length){
+        const w = wins[0];
+        const left = Math.max(0, Math.round(Number(w.reset_in) || 0));
+        const h = Math.floor(left / 3600);
+        const m = Math.floor((left % 3600) / 60);
+        line += ' · 待触发窗口 ' + wins.length + ' 个，最近: ' + (w.model || '-')
+             + '（' + (w.uid8 || '-') + '）' + (h ? h + 'h' : '') + m + 'm 后';
+      }
+      // 定时主动查询同样要看得见：知道下一次会查哪个模型，比黑盒轮询好。
+      const scans = Array.isArray(s.quota_scans) ? s.quota_scans.filter(x => !x.pending) : [];
+      if(scans.length){
+        const sc = scans[0];
+        line += ' · 额度查询 ' + scans.length + ' 条，最近: ' + (sc.model || '-')
+             + ' ' + fmtDueSec(sc.due_in) + ' 后';
+      }
+      times.textContent = line;
+    }
     if(btn) btn.textContent = s.enabled ? '暂停调度' : '启用调度';
     if(btnTrig) btnTrig.textContent = '立即巡检保活';
   }catch(e){}
@@ -10206,6 +10278,14 @@ async function loadSettings(showToast){
         remainingPriorityState.textContent = remainingPriority ? '(已启用)' : '(未启用)';
         remainingPriorityState.style.color = remainingPriority ? 'var(--accent2)' : 'var(--dim)';
       }
+      const windowProbe = data.window_probe !== false;
+      const windowProbeInput = document.getElementById('setWindowProbe');
+      if(windowProbeInput) windowProbeInput.checked = windowProbe;
+      const windowProbeState = document.getElementById('setWindowProbeState');
+      if(windowProbeState){
+        windowProbeState.textContent = windowProbe ? '(已启用)' : '(未启用)';
+        windowProbeState.style.color = windowProbe ? 'var(--accent2)' : 'var(--dim)';
+      }
       const egressBackoff = data.egress_backoff_enabled === true;
       const egressBackoffInput = document.getElementById('setEgressBackoff');
       if(egressBackoffInput) egressBackoffInput.checked = egressBackoff;
@@ -10214,6 +10294,11 @@ async function loadSettings(showToast){
         egressBackoffState.textContent = egressBackoff ? '(已启用)' : '(未启用)';
         egressBackoffState.style.color = egressBackoff ? 'var(--accent2)' : 'var(--dim)';
       }
+      SAVED_QUOTA_SCAN_MODELS = Array.isArray(data.quota_scan_models) ? data.quota_scan_models.slice() : [];
+      QUOTA_SCAN_SELECTED = SAVED_QUOTA_SCAN_MODELS.slice();
+      await loadQuotaScanCatalog();
+      renderQuotaScanModels();
+      renderQuotaScanState(data);
       // 上游响应头超时：没改过时后端给的就是默认 120，所以「等于 120」按默认态
       // 显示，只有被改过才标出实际秒数。
       const headerTimeout = (data.upstream || {}).header_timeout_seconds;
@@ -10930,6 +11015,21 @@ async function saveRemainingPriority(btn){
   }
 }
 
+async function saveWindowProbe(btn){
+  const el = document.getElementById('setWindowProbe');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {window_probe: value});
+    toast(value ? '已启用：额度窗口到点自动请求' : '已关闭额度窗口探针', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function saveEgressBackoff(btn){
   const el = document.getElementById('setEgressBackoff');
   const value = !!(el && el.checked);
@@ -11122,6 +11222,156 @@ async function saveUpdateCheckEnabled(btn){
   } finally {
     if(btn) btn.disabled = false;
   }
+}
+
+/* ---- Model quota scan: watch a chosen set of models on a fixed timer ---- */
+let SAVED_QUOTA_SCAN_MODELS = [];
+let QUOTA_SCAN_SELECTED = [];
+
+let QUOTA_MODEL_CATALOG = [];
+
+async function loadQuotaScanCatalog(){
+  // Only the "all realms" listing can offer every model to watch: MODELS_DATA
+  // follows whichever realm tab is open, so half the catalogue would be
+  // missing when the panel is showing the other one.
+  if(QUOTA_MODEL_CATALOG.length) return QUOTA_MODEL_CATALOG;
+  try{
+    const r = await getJSON('/v1/models?realm=all');
+    QUOTA_MODEL_CATALOG = (r.data || []).filter(m => m && m.id);
+  }catch(e){
+    QUOTA_MODEL_CATALOG = [];
+  }
+  // Fall back to whatever the models tab already cached rather than showing
+  // an empty box when the listing call fails. Go through window so a test
+  // stub that never defined MODELS_DATA reads undefined instead of throwing.
+  if(!QUOTA_MODEL_CATALOG.length && Array.isArray(window.MODELS_DATA)){
+    QUOTA_MODEL_CATALOG = window.MODELS_DATA.filter(m => m && m.id);
+  }
+  return QUOTA_MODEL_CATALOG;
+}
+
+function renderQuotaScanModels(){
+  const box = document.getElementById('quotaScanModels');
+  const hint = document.getElementById('quotaScanHint');
+  if(!box) return;
+  const models = QUOTA_MODEL_CATALOG || [];
+  if(!models.length){
+    box.innerHTML = '<span style="font-size:12px;color:var(--dim)">暂无可用模型目录</span>';
+    if(hint) hint.textContent = '';
+    return;
+  }
+  const selected = {};
+  (QUOTA_SCAN_SELECTED || []).forEach(m => { selected[m] = true; });
+  box.innerHTML = models.map(m => {
+    const id = String(m.id || '');
+    if(!id) return '';
+    return '<label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">'
+         + '<input type="checkbox" data-model="' + esc(id) + '"'
+         + (selected[id] ? ' checked' : '') + ' style="width:14px;height:14px">'
+         + '<span class="mono">' + esc(id) + '</span></label>';
+  }).join('');
+  // A model that was saved earlier but is no longer published upstream cannot
+  // be unchecked through the catalogue; say so rather than silently dropping it.
+  const missing = SAVED_QUOTA_SCAN_MODELS.filter(
+    m => !models.some(x => String((x && x.id) || '') === m));
+  if(hint){
+    hint.textContent = missing.length
+      ? ('已有 ' + missing.length + ' 个勾选模型不在当前目录中（' + missing.join(', ') + '），保存时保留')
+      : ('共 ' + models.length + ' 个模型可选');
+  }
+}
+
+function toggleAllQuotaScanModels(on){
+  const box = document.getElementById('quotaScanModels');
+  if(!box) return;
+  box.querySelectorAll('input[type=checkbox]').forEach(el => { el.checked = !!on; });
+}
+
+async function saveQuotaScanModels(btn){
+  const box = document.getElementById('quotaScanModels');
+  if(btn){ btn.disabled = true; btn.textContent = '保存中...'; }
+  try{
+    const checked = [];
+    if(box){
+      box.querySelectorAll('input[type=checkbox]').forEach(el => {
+        if(el.checked && el.dataset.model) checked.push(el.dataset.model);
+      });
+    }
+    const catalogued = {};
+    (QUOTA_MODEL_CATALOG || []).forEach(m => { catalogued[String(m.id)] = true; });
+    // Keep watch entries the catalogue no longer publishes: they were chosen
+    // deliberately and would otherwise vanish on the next save.
+    (SAVED_QUOTA_SCAN_MODELS || []).forEach(m => {
+      if(m && !catalogued[m] && checked.indexOf(m) < 0) checked.push(m);
+    });
+    await postJSON('/settings/save', {quota_scan_models: checked});
+    toast(checked.length ? ('已保存：定时查询 ' + checked.length + ' 个模型') : '已清空：不再定时查询任何模型', 'ok');
+    loadSettings();
+  }catch(e){
+    toast('保存失败: ' + e.message, 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '保存勾选'; }
+  }
+}
+
+async function runQuotaScan(btn){
+  if(btn){ btn.disabled = true; btn.textContent = '查询中...'; }
+  try{
+    const r = await postJSON('/quota-scan/run', {});
+    toast(r.msg || '查询完成', r.ok ? 'ok' : 'bad');
+    loadSettings();
+  }catch(e){
+    toast('查询失败: ' + e.message, 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '立即查询'; }
+  }
+}
+
+function fmtDueSec(sec){
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  if(s < 60) return s + ' 秒';
+  const m = Math.floor(s / 60);
+  if(m < 60) return m + ' 分钟';
+  const h = Math.floor(m / 60);
+  return h + ' 小时' + (m % 60 ? (m % 60) + ' 分' : '');
+}
+
+function renderQuotaScanState(data){
+  const stateEm = document.getElementById('setQuotaScanState');
+  const box = document.getElementById('quotaScanState');
+  const watched = Array.isArray(data.quota_scan_models) ? data.quota_scan_models.length : 0;
+  const hours = Number(data.quota_scan_interval_hours || 6);
+  if(stateEm){
+    stateEm.textContent = watched ? ('(已监视 ' + watched + ' 个模型)') : '(未启用)';
+    stateEm.style.color = watched ? 'var(--accent2)' : 'var(--dim)';
+  }
+  if(!box) return;
+  const rows = Array.isArray(data.quota_scans) ? data.quota_scans : [];
+  if(!rows.length){
+    box.innerHTML = '<div style="font-size:12px;color:var(--dim)">'
+      + (watched ? '尚无查询记录，第一条记录会在首次查询后写入。' : '勾选上方模型并保存后开始定时查询。')
+      + '</div>';
+    return;
+  }
+  const label = {ok: '正常 (未达限额)', throttled: '已达限额', error: '查询失败'};
+  box.innerHTML = '<table><thead><tr><th>模型</th><th>账号</th><th>最近结果</th>'
+    + '<th>上次查询</th><th>下次查询</th></tr></thead><tbody>'
+    + rows.map(r => {
+        const status = r.pending
+          ? '<span class="badge s">已登记 429，交给窗口探针</span>'
+          : '<span class="badge ' + (r.last_result === 'ok' ? 'ok' : 'warn') + '">'
+            + esc(label[r.last_result] || r.last_result || '等待首次查询') + '</span>';
+        const last = Number(r.last_scan) || 0
+          ? (fmtDueSec((Date.now() / 1000) - Number(r.last_scan)) + ' 前')
+          : '尚未查询';
+        return '<tr><td class="mono">' + esc(r.model || '-') + '</td>'
+             + '<td class="mono">' + esc(r.uid8 || '-') + '</td>'
+             + '<td>' + status + '</td><td>' + last + '</td>'
+             + '<td>' + (r.pending ? '-' : fmtDueSec(r.due_in) + ' 后') + '</td></tr>';
+      }).join('')
+    + '</tbody></table>'
+    + '<div style="font-size:12px;color:var(--dim);margin-top:8px">查询周期：每 '
+    + hours + ' 小时；已登记 429 窗口的配额线不再轮询。</div>';
 }
 
 /* ---- API key list: several keys, each bound to an upstream exit ---- */

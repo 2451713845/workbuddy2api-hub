@@ -56,6 +56,7 @@ wb_pricing.py
 wb_probes.py
 wb_prompt.py
 wb_proxy.py
+wb_quota_scan.py
 wb_scheduler.py
 wb_settings.py
 wb_tasks.py
@@ -63,3 +64,4 @@ wb_updates.py
 wb_upstream_pool.py
 wb_webagent.py
 wb_webtools.py
+wb_window_probe.py

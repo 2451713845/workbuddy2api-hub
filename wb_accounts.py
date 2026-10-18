@@ -2474,6 +2474,18 @@ self.balance_until - now, self.breaker_until - now, self.degrade_until - now)
                 self.cooldown_until = 0
                 self.balance_until = 0.0
 
+    def clear_model_cooldown(self, model):
+        """只解除某个模型的限流，账号级状态原样保留。
+
+        额度窗口探针（wb_window_probe）用它：探针证明该模型这条配额线已经
+        重置，但这不等于账号本身恢复——一次网络故障留下的 cooldown_until
+        不该被顺手清掉，否则 60 秒的账号冷却会被探针提前解除。
+        """
+        if not model:
+            return
+        with self._throttle_lock:
+            self.model_cooldowns.pop(model, None)
+
 def _human_delta(seconds):
     if seconds is None: return None
     if seconds <= 0: return "expired"
@@ -2765,6 +2777,13 @@ class CreditsRefresher(threading.Thread):
 # 都被当成「损坏的账号」解析并打一条 error 日志（settings.json 是面板设置，
 # active_realm.json 是区域开关）。
 NON_ACCOUNT_FILES = ("settings.json", "active_realm.json")
+
+
+# 和账号凭证放在同一个目录、但本身不是账号的文件。跳过它们，免得每次启动
+# 都被当成「损坏的账号」解析并打一条 error 日志（settings.json 是面板设置，
+# active_realm.json 是区域开关，model_windows.json 是额度窗口记录，
+# quota_scan.json 是主动额度查询记录）。
+NON_ACCOUNT_FILES = ("settings.json", "active_realm.json", "model_windows.json", "quota_scan.json")
 
 
 class AccountPool(object):

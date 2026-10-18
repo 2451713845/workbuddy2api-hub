@@ -4785,6 +4785,22 @@ def _usage_timeseries_scan(realm, lo, hi, step):
     口径一字未改。
     """
     buckets = {}
+    # 网格原点：日/小时/分钟桶按本地墙上时间对齐（与日桶/小时桶切片同一
+    # 网格——日桶按本地午夜、小时桶按本地整点起算）。面板的「工作回溯」
+    # 传的是 now-366d 这种任意时刻的 since，锚在 since 上会把相邻两天并进
+    # 同一个桶（当天的量画进昨天的格子，见 issue #447）。自定义桶宽没有
+    # 天然格点，仍以窗口起点为锚。
+    if step == 86400:
+        origin = _local_midnight(lo)
+    elif step == 3600:
+        origin = _local_hour_start(lo)
+    elif step == 60:
+        origin = (int(lo) // 60) * 60
+    else:
+        origin = lo
+    # at 的类型跟着 lo 走（切片路径按 lo 的类型对齐存量的整数桶），
+    # 两边的 JSON 字节才与切片逐字节一致（见 _series_slice_minutes）。
+    origin = int(origin) if isinstance(lo, int) else float(origin)
     # 窗口内 credit 前 50 条：大小 50 的最小堆，堆顶是当前的第 50 名。旧实现
     # 把整窗的计费行全 append 进列表、扫完再 sort 整份切前 50——排序的是上万
     # 条，留下的只有 50 条。堆把每行压到一次「比不比堆顶大」的比较，进不了
@@ -4817,9 +4833,9 @@ def _usage_timeseries_scan(realm, lo, hi, step):
                 at = row.get("at") or 0
                 if at < lo or at > hi:
                     continue
-                key = int((at - lo) // step)
+                key = int((at - origin) // step)
                 bucket = buckets.setdefault(key, {
-                    "at": lo + key * step, "requests": 0, "errors": 0,
+                    "at": origin + key * step, "requests": 0, "errors": 0,
                     "prompt_tokens": 0, "completion_tokens": 0,
                     "reasoning_tokens": 0, "cached_tokens": 0,
                     "total_tokens": 0, "credit": 0.0,

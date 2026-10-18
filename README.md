@@ -135,7 +135,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 169 个套件：126 个 Python + 43 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 170 个套件：126 个 Python + 44 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -425,6 +425,9 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **账号列的提醒胶囊改成整行完整显示**：账号列宽 180px，模型冷却胶囊（`模型 · 撞线 X · 恢复 Y`）与按模型达日限额胶囊（`模型 · 今日已用 N / 上限 M token 已达限额`）原本挤在这一列里，`white-space:nowrap` + 省略号让模型名一长（如 `deepseek-v4.1-flash`）就把时刻整段切掉。现在这两类胶囊从账号列拆出，紧跟账号行另起一整行（`colspan` 跨满表头列数，窄屏 grid 下跨满 6 栏），文本自己完整：模型名、撞线 / 恢复时刻、本地时间口径，达限那类还带已用 / 上限数值与 0 点恢复。**悬停提示只保留可见文本没说的部分**——上游判定额度用满（code 6004）/ 临时限流（429）等原因，以及「仅此模型受限，同账号其他模型照常接单」的影响范围；模型名与时刻已画在胶囊上，不再在悬停里重复一遍。这一行是账号行的**续行**，两行之间不画分割线（账号行交出 `td` 默认的 `border-bottom`，续行也不画 `border-top`，窄屏下负 margin 把两张卡片拼成一块），悬停账号行时续行一起高亮，避免「徽章和所属账号像两块」的割裂感。排序仍按账号整体走，账号行 ↔ tbody 行的对应关系不变。
+  Model cooldown and per-model daily-limit pills no longer live in the 180px account column, where `nowrap` + ellipsis cut the timestamps off; they now render as their own full-width row right below the account row (`colspan` spanning every header column, 6 grid columns on narrow screens), carrying the model name, cap and reset times, the "times are local" note, and used-vs-cap counts for daily limits. **The tooltip keeps only what the pill does not already say**: the reason (quota exhausted with code 6004 / temporary 429) and the scope ("only this model is restricted, the account's other models still take traffic"). The model name and timestamps are drawn on the pill, so they are no longer repeated on hover. That row is a **continuation** of the account row: no divider is drawn between them (the account row gives up the `td` default `border-bottom`, the continuation draws no `border-top`, and on narrow screens a negative margin joins the two cards into one), and hovering the account row highlights the continuation too, so the pill never looks detached from the account it belongs to. Sorting still reorders whole account rows, so the account↔row mapping is unchanged.
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.14，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 

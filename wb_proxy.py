@@ -11304,12 +11304,18 @@ def sanitize_tool_calls(tool_calls):
             if isinstance(fn, dict):
                 fn = dict(fn)
                 raw_args = fn.get("arguments")
-                if isinstance(raw_args, dict):
-                    fn["arguments"] = json.dumps(raw_args, ensure_ascii=False)
+                if isinstance(raw_args, str):
+                    fn["arguments"] = sanitize_text(raw_args)
                 elif raw_args is None:
                     fn["arguments"] = "{}"
-                elif isinstance(raw_args, str):
-                    fn["arguments"] = sanitize_text(raw_args)
+                else:
+                    # Upstream Go struct expects a string for function.arguments.
+                    # Clients passing dict, list, int, bool, etc. trigger code 11101
+                    # (cannot unmarshal into field of type string). Serialize to JSON.
+                    try:
+                        fn["arguments"] = json.dumps(raw_args, ensure_ascii=False)
+                    except Exception:
+                        fn["arguments"] = str(raw_args)
                 item["function"] = fn
             out.append(item)
         else:
@@ -11702,6 +11708,13 @@ def _normalize_tool_parameters(fn):
       - `required` set to None or a non-list
     Normalizing ensures `type: "object"` is always present, `properties` is a dict,
     and `required` is a clean list of strings or omitted.
+
+    Note on WB_PRESERVE_REQUEST_CONTRACT (#423):
+      Schema validity normalization is an upstream transport-layer requirement,
+      not an application-level data rewriting (unfixed schemas cause upstream to
+      reject the call with 400 regardless of preservation flags). This fix strictly
+      repairs malformed types without stripping compliant fields or modifying
+      existing semantic parameters.
     """
     if not isinstance(fn, dict):
         return

@@ -110,7 +110,7 @@ check("tools gained", "tools" in obj and len(obj["tools"]) == 1, obj)
 check("legacy_fn parameters normalized", obj["tools"][0]["function"]["parameters"] == {"type": "object", "properties": {}}, obj)
 
 print()
-print("[8] sanitize_tool_calls: dict arguments and None serialized to string")
+print("[8] sanitize_tool_calls: non-string arguments (dict, list, int, bool, None) serialized to string")
 tool_calls = [
     {
         "id": "call_1",
@@ -126,12 +126,30 @@ tool_calls = [
         "id": "call_3",
         "type": "function",
         "function": {"name": "fn3", "arguments": "{\"city\":\"Shanghai\"}"}
+    },
+    {
+        "id": "call_4",
+        "type": "function",
+        "function": {"name": "fn4", "arguments": [1, 2, "a"]}
+    },
+    {
+        "id": "call_5",
+        "type": "function",
+        "function": {"name": "fn5", "arguments": 123}
+    },
+    {
+        "id": "call_6",
+        "type": "function",
+        "function": {"name": "fn6", "arguments": True}
     }
 ]
 res = P.sanitize_tool_calls(tool_calls)
 check("dict arguments converted to JSON string", res[0]["function"]["arguments"] == '{"city": "Beijing"}', res[0]["function"]["arguments"])
 check("None arguments converted to empty JSON object", res[1]["function"]["arguments"] == "{}", res[1]["function"]["arguments"])
 check("string arguments untouched", res[2]["function"]["arguments"] == '{"city":"Shanghai"}', res[2]["function"]["arguments"])
+check("list arguments converted to JSON string", res[3]["function"]["arguments"] == '[1, 2, "a"]', res[3]["function"]["arguments"])
+check("int arguments converted to JSON string", res[4]["function"]["arguments"] == '123', res[4]["function"]["arguments"])
+check("bool arguments converted to JSON string", res[5]["function"]["arguments"] == 'true', res[5]["function"]["arguments"])
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

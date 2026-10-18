@@ -5812,6 +5812,20 @@ def recent_usage(limit=100, realm=None, page=1):
         "rows": page_rows
     }
 POOL = None
+
+# Pinned-account routes (/u/<ref>/v1/...): the handler strips the prefix and
+# resolves the ref before dispatching. One thread serves one connection at a
+# time, so resetting at the start of every request is enough to keep a
+# keep-alive connection from leaking the previous request's pin.
+_PINNED = threading.local()
+
+
+def pinned_ref():
+    return getattr(_PINNED, "ref", None)
+
+
+def pinned_account():
+    return getattr(_PINNED, "account", None)
 SCHEDULER = None
 PRICING = None
 CREDITS_REFRESHER = None
@@ -12776,6 +12790,20 @@ def inject_prompt_cache_key(body, uid, conversation):
     out = dict(body)
     out["prompt_cache_key"] = "wb2a-%s-%s" % (uid8, digest)
     return out
+class PinnedAccountError(Exception):
+    """A /u/<ref> request cannot use the account it was pinned to.
+
+    Deliberately not rotated to another account: the caller asked for this
+    one, so the failure has to be reported instead of silently changing it.
+    """
+
+    def __init__(self, status, message, account_uid=None):
+        self.status = int(status)
+        self.message = str(message)
+        self.account_uid = account_uid
+        super().__init__(self.message)
+
+
 class ContentRejected(Exception):
     """Upstream content review rejected this request (403 / code 11140).
 
@@ -13453,6 +13481,16 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             remaining_schedule_weights() if remaining_priority_enabled() else None)
     realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
     model = str(payload.get("model") or "")
+    pinned = pinned_account()
+    if pinned is not None:
+        if pinned.realm != realm:
+            raise PinnedAccountError(
+                409, "pinned account '%s' belongs to realm %s, request targets %s"
+                % (pinned_ref(), pinned.realm, realm), pinned.uid)
+        if not pinned.ready(model=model):
+            raise PinnedAccountError(
+                503, "pinned account '%s' is not usable right now: %s"
+                % (pinned_ref(), pinned.unavailable_reason(model)), pinned.uid)
     # 连坐保护：同一区域刚有账号被上游风控限制，整池暂停派发。这里直接快速
     # 失败、一个上游请求都不发——继续打只会把同一台设备上的其他账号也送走。
     hold = restriction_hold_remaining(realm)
@@ -13481,7 +13519,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # 每请求新生成（见 wb_identity.new_turn_request_id）。生成在重试循环外，
     # 循环里只把它传给身份构造；桌面端 / VSCode 分支不消费它，行为不变。
     turn_request_id = wb_identity.new_turn_request_id()
-    total = max(1, POOL.count_ready(realm, model=model)) if POOL else 1
+    total = (1 if pinned is not None else
+             (max(1, POOL.count_ready(realm, model=model)) if POOL else 1))
     tried = set()
     # 这一轮请求已经记过账的账号：重试轮（transient_hits 后 tried.clear() 整池
     # 重轮）会把同一个账号再挑一遍，若每次都记，一次请求就能给同一个账号记上
@@ -13515,7 +13554,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # Read once per request, not per attempt: this is a panel setting, and a
     # settings read on every retry would be pure overhead.
     auto_switch = (auto_switch_product_enabled()
-                   if allow_product_switch else False)
+                   if allow_product_switch and pinned is None else False)
     # Panel parity: header/idle timeouts are read once per request, not
     # once per retry, so a settings read never lands in the retry loop.
     header_timeout, idle_timeout = upstream_timeouts()
@@ -13535,7 +13574,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             egress_wait[key] = wb_egress.note_transient(key)
         return egress_wait[key]
 
-    max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
+    max_attempts = (1 if pinned is not None else
+                    max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0))
     # 官方 VSCode 扩展的 X-Conversation-ID 是 32hex、会话稳定；网关没有会话
     # 映射，至少保证同一次 open_upstream（含换号重试）里是同一个 id。桌面端 /
     # CLI 分支保持原行为（每次尝试各自新生成带连字符的 UUID），不受影响。
@@ -13544,9 +13584,12 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # 忘掉整段对话：重选时优先回到还留着这段前缀的暖号（见 SessionAffinity），
     # 一次大 prompt 的冷启动比重选一次账号贵得多。
     for _attempt in range(max_attempts):
-        account = POOL.pick_for_session(realm=realm, session_key=session_key,
-                                        exclude=tried, model=model,
-                                        page=affinity_page) if POOL else None
+        if pinned is not None:
+            account = pinned if pinned.uid not in tried else None
+        else:
+            account = POOL.pick_for_session(realm=realm, session_key=session_key,
+                                            exclude=tried, model=model,
+                                            page=affinity_page) if POOL else None
         if account is None:
             if transient_hits and _attempt < max_attempts - 1:
                 tried.clear()
@@ -17166,7 +17209,47 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/agents"):
             return True
         return False
+    def _strip_pinned_prefix_only(self):
+        """Strip /u/<ref> from self.path; returns False for a malformed ref."""
+        _PINNED.ref = None
+        _PINNED.account = None
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if not path.startswith("/u/"):
+            return True
+        rest = path[3:]
+        ref, sep, tail = rest.partition("/")
+        ref = urllib.parse.unquote(ref).strip()
+        if not ref or not sep:
+            return False
+        _PINNED.ref = ref
+        self.path = "/" + tail + (("?" + parsed.query) if parsed.query else "")
+        return True
+
+    def _apply_pinned_route(self):
+        """Validate the pinned ref and resolve it to exactly one account."""
+        if not self._strip_pinned_prefix_only():
+            self._error(404, "pinned account route must be /u/<ref>/v1/...",
+                        "invalid_request_error")
+            return False
+        ref = pinned_ref()
+        if not ref:
+            return True
+        if POOL is None:
+            self._error(503, "pinned account '%s' is not usable: account pool is not ready" % ref,
+                        "invalid_request_error")
+            return False
+        account, why = POOL.find_unique(ref)
+        if account is None:
+            status = 409 if why == "is ambiguous" else 404
+            self._error(status, "pinned account '%s' %s" % (ref, why),
+                        "invalid_request_error")
+            return False
+        _PINNED.account = account
+        return True
+
     def do_OPTIONS(self):
+        self._strip_pinned_prefix_only()
         self.send_response(204)
         if cors_origin_allowed(self.path):
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -17175,6 +17258,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
     def do_GET(self):
+        if not self._apply_pinned_route():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
@@ -17350,6 +17435,11 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
         data = [model_entry(mid, meta) for mid, meta in entries]
+        pinned = pinned_account()
+        if pinned is not None:
+            # 定址路由宣告的是「这个账号实际能接的模型」：该账号禁用的模型
+            # 不出现在清单里，客户端按账号拆 provider 时才不会选到必失败的项。
+            data = [m for m in data if not pinned.model_disabled(m.get("id"))]
         payload = {"object": "list", "data": data,
                    "realm": req_realm or CURRENT_REALM}
         # 来源说明（面板展示用）：这批清单是上游 API 实时取的，还是读的
@@ -19645,6 +19735,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, key_blocked, "invalid_request_error")
             upstream, account, effort = open_upstream(
                 chat_req, session_key=session_key, target_realm=req_realm)
+        except PinnedAccountError as exc:
+            record_error(model, exc.status, exc.message[:200],
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         account=exc.account_uid, key=self._key_id())
+            return self._error(exc.status, exc.message, "invalid_request_error")
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -19867,6 +19962,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._anthropic_error(400, key_blocked, "invalid_request_error")
             upstream, account, effort = open_upstream(
                 chat_req, session_key=session_key, target_realm=req_realm)
+        except PinnedAccountError as exc:
+            record_error(model, exc.status, exc.message[:200],
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         account=exc.account_uid, key=self._key_id())
+            return self._anthropic_error(exc.status, exc.message)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -19997,6 +20097,8 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def do_POST(self):
+        if not self._apply_pinned_route():
+            return
         path = self.path.split("?")[0]
         if path == "/console/toggle":
             # Panel-only management write: 收起/唤出本进程自己的控制台窗口，
@@ -20220,6 +20322,11 @@ class Handler(BaseHTTPRequestHandler):
             upstream, account, effort = open_upstream(
                 payload, session_key=session_key, target_realm=req_realm,
                 prebuilt_body=forwarded)
+        except PinnedAccountError as exc:
+            record_error(model, exc.status, exc.message[:200],
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         account=exc.account_uid, key=self._key_id())
+            return self._error(exc.status, exc.message, "invalid_request_error")
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),

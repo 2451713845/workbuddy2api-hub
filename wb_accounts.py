@@ -3684,6 +3684,36 @@ class AccountPool(object):
                 if account.access_token: return account
             return candidates[0] if candidates else None
 
+    def find_unique(self, ref):
+        """Resolve a pinned-route ref to exactly one account.
+
+        Order: exact uid, unique nickname, unique uid prefix. A tier with more
+        than one match is ambiguous; the caller must report it, never guess.
+        Returns (account, reason) where reason is "" on success or a short
+        message fragment such as "was not found" / "is ambiguous".
+        """
+        ref = str(ref or "").strip()
+        if not ref:
+            return None, "was not found"
+        with self._lock:
+            accounts = list(self.accounts)
+        exact = [a for a in accounts if str(a.uid or "") == ref]
+        if len(exact) == 1:
+            return exact[0], ""
+        if len(exact) > 1:
+            return None, "is ambiguous"
+        named = [a for a in accounts if str(a.nickname or "").strip() == ref]
+        if len(named) == 1:
+            return named[0], ""
+        if len(named) > 1:
+            return None, "is ambiguous"
+        prefixed = [a for a in accounts if str(a.uid or "").startswith(ref)]
+        if len(prefixed) == 1:
+            return prefixed[0], ""
+        if len(prefixed) > 1:
+            return None, "is ambiguous"
+        return None, "was not found"
+
     def start_login(self, realm="intl", platform="CLI"):
         cfg = get_realm_config(realm)
         url = "%s%s?platform=%s" % (cfg["chat_upstream"], AUTH_STATE_PATH, urllib.parse.quote(str(platform)))

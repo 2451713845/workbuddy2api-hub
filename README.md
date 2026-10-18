@@ -417,6 +417,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- **修复账号表 6004 短标签在冷却到期后不消失**（#454）：模型级 429 的 `lastError` 是历史记录，冷却到期后 `pills` 已空，面板仍把它画成账号级 `HTTP 429 · code:6004`；现在该哨兵值不再进入账号级错误标签，冷却期间仍由 `coolPills` 显示「撞线 / 恢复」。
 - **后台排程时段可配置**（#456）：`accounts/settings.json` 新增 `schedule` 段（`checkin` / `travel` / `keepalive` / `cat`，24 小时制，支持数组或逗号串），缺省 / 非法 / 越界 / 空逐项回落旧默认（09:00/21:00、22:00、01:00），按 mtime 缓存免重启生效；`/scheduler` 的 `mode` / `mode_cn` / `mode_intl` 按实际时段生成。
 - **修复 Anthropic `tool_result` 图片被拍平成文本**（#452）：`/v1/messages` 的工具结果里带图片时，base64 data URL 以前被当普通文本发给上游，按约 1 token/字符计费，一张截图就能把长上下文顶到 11115；现在含图时保留结构化 `image_url` 数组，纯文本仍折叠成字符串。实测同一张 31KB PNG 从约 3 万 input tokens 降到 665。
 - **修复函数参数 Schema 结构缺陷与工具参数反序列化失败导致上游 400 拦截**：针对客户端（如 Hermes Agent、各类 OpenAI 兼容 SDK 等）声明无参工具时发送 `"parameters": {}`（缺失顶层 `type: "object"`）触发上游 Go struct 校验拒绝报 `code 11129 invalid function call parameters` 的问题，网关层自动补齐 `type: "object"` 与 `properties: {}` 并清洗非法的 `required` 字段；同步修复历史对话消息中 `tool_calls[].function.arguments` 为字典对象导致上游反序列化失败（`code 11101`）的缺陷。

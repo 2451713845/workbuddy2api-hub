@@ -7306,7 +7306,9 @@ function accountRow(a){
   // 拉宽、也读不出重点。
   const errFull = a.lastErrorDetail || a.lastError || '';
   let err = '';
-  if (a.lastError && !(pills && a.lastError === 'HTTP 429 (model throttled)')) {
+  // 模型级 429（6004）由 coolPills 画「撞线 / 恢复」；lastError 只是那次的
+  // 历史记录，冷却到期后 pills 为空，不能把旧记录再画成账号级错误（#454）。
+  if (a.lastError && a.lastError !== 'HTTP 429 (model throttled)') {
     const httpM = String(a.lastError).match(/HTTP\s+(\d{3})/);
     const codeM = String(errFull).match(/"code"\s*:\s*(\d+)/);
     const label = httpM

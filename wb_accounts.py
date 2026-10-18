@@ -476,6 +476,12 @@ except (TypeError, ValueError):
 DEGRADE_THRESHOLD = 5           # consecutive unknown failures before degrading
 DEGRADE_COOLDOWN = 600.0        # first degrade window: 10 minutes
 DEGRADE_COOLDOWN_MAX = 7200.0   # ... doubling up to 2 hours
+# 上游账号级风控限制（HTTP 403 / code 11140「账号存在异常行为，已被限制使用」）
+# 的冷却时长。上游按小时到工作日计：社区复盘里官方工单给的口径是「临时风控
+# 1-3 个工作日自动解除」，期间官方客户端同样报这个错，所以这不是内容审核、
+# 也不能靠换提示词或换号解决。取 2 小时作第一档，到期再试一次即可。
+# 与其它冷却不同，这个期限是**持久化**的（见 note_restricted）。
+RESTRICTED_ACCOUNT_COOLDOWN = 7200.0
 
 
 def _exponential_backoff(count, base, cap, offset):
@@ -594,6 +600,16 @@ class Account(object):
         self.cooldown_until = 0.0
         # 运行时标记：上游返回 401 或 token 为空时置为 True，提示需重新登录
         self.token_expired = bool(not self.access_token)
+        # 上游账号级风控限制（403 / code 11140「账号存在异常行为，已被限制
+        # 使用」）的解除时刻。与上面那些节流窗口不同，这一条**持久化**：上游的
+        # 限制按小时到工作日计，网关重启 / 换身分 / 刷新 token 都不能让它重新
+        # 入池——否则同一台设备上的账号会被一个个送进风控（见 note_restricted
+        # 与社区复盘「解封前严禁换号继续打同一设备」）。
+        self.restricted_until = 0.0
+        try:
+            self.restricted_until = max(0.0, float(data.get("restrictedUntil") or 0))
+        except (TypeError, ValueError):
+            self.restricted_until = 0.0
         # Per-model throttling. Upstream rate limits (code 6004 "usage exceeds
         # frequency limit") apply to ONE model for one account, not to the whole
         # account: other models keep working. Cooldown the offending model only,
@@ -742,6 +758,10 @@ class Account(object):
             "disabledModels": list(self.disabled_models),
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
+            # 持久化：上游风控限制按小时到工作日计，重启后仍然成立（见
+            # note_restricted）。导出的文档会带上它供查看，导入侧
+            # normalise_import_row() 不认这个字段，换机器不会把账号一起停掉。
+            "restrictedUntil": self.restricted_until,
             "credits": self.credits,
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
@@ -755,7 +775,10 @@ class Account(object):
         with self._throttle_lock:
             error = self.last_error
             detail = self.last_error_detail
-            deadline = max(self.cooldown_until, self.balance_until, self.breaker_until, self.degrade_until)
+            deadline = max(self.cooldown_until, self.balance_until,
+                           self.breaker_until, self.degrade_until,
+                           self.restricted_until)
+            restricted = self.restricted_until
             active = [(model, until) for model, until in self.model_cooldowns.items()
                       if until > now]
         active.sort(key=lambda pair: (pair[1], pair[0]))
@@ -772,7 +795,7 @@ class Account(object):
             if self.cap_until(model, now) > 0:
                 entry["cappedAt"] = int(self.model_caps[model]["at"])
             models.append(entry)
-        return error, deadline, models, detail
+        return error, deadline, models, detail, restricted
 
     def model_cooldowns_snapshot(self):
         """Active model cooldowns, ordered by recovery time (epoch seconds)."""
@@ -782,7 +805,8 @@ class Account(object):
         exp = self.expires_at or jwt_exp(self.access_token)
         now = time.time()
         is_token_expired = bool(getattr(self, "token_expired", False) or (exp and exp <= now) or not self.access_token)
-        last_error, deadline, models, last_error_detail = self._throttle_snapshot(now)
+        last_error, deadline, models, last_error_detail, restricted = \
+            self._throttle_snapshot(now)
         return {
             "uid": self.uid,
             "nickname": self.nickname or (self.uid[:8] if self.uid else "?"),
@@ -807,6 +831,9 @@ class Account(object):
             "lastErrorDetail": last_error_detail or None,
             "inCooldown": deadline > now,
             "cooldownFor": round(max(0.0, deadline - now)) or None,
+            # 上游账号级风控限制（403 / 11140）：面板据此把账号标成「风控限制」
+            # 而不是普通冷却，并提示去官方渠道申诉而不是换号重试。
+            "restrictedFor": round(max(0.0, restricted - now)) or None,
             "modelCooldowns": models,
             "softStreak": int(self.soft_streak),
             "unscopedStreak": int(self.unscoped_streak),
@@ -1200,7 +1227,8 @@ class Account(object):
         # 四种惩罚的到期时间各走各的，谁把时间推得最远就报谁：只报「冷却」
         # 会让人往 429 的方向查，而实际可能是上游连续断连触发的熔断（30 分钟
         # 起，与账号本身无关），或者余额保护这类完全不同的原因。
-        penalties = [("熔断", self.breaker_until), ("降权", self.degrade_until),
+        penalties = [("上游风控限制", self.restricted_until),
+                     ("熔断", self.breaker_until), ("降权", self.degrade_until),
                      ("余额保护", self.balance_until), ("软限流冷却", self.cooldown_until)]
         if model:
             penalties.append(("模型 %s 冷却" % model, self.model_cooldowns.get(model, 0.0)))
@@ -1306,6 +1334,11 @@ class Account(object):
         按会话稳定、X-Conversation-Request-ID 一轮 user send 内复用），由
         open_upstream 传进来；桌面端 / VSCode 分支不吃这两个参数，行为不变。
 
+        X-Device-Token 只在**国内版**发送：国内版客户端确实带真实的 Turing
+        Shield 设备 token，国际版客户端则没有这个头（三轮抓包与 5.7.6 / 5.8.4
+        二进制构造器都不含它）。发给国际版账号既是伪造头，也是把多个账号串到
+        同一台设备的关联键（#448）。CLI 身份无论哪个区域都不发。
+
         billing 标头仍带 X-Machine-ID / X-Session-ID，但两个都必须按账号派生：
         网关是一个进程冒充几十台设备，一旦取进程级的值，全部账号就会共用同一个
         session id，那是一条把它们串起来的关联键（与每账号一台设备的隔离口径
@@ -1348,12 +1381,12 @@ class Account(object):
             realm=self.realm,
             uid=self.uid,
             token=self.access_token,
+            conversation_id=conversation_id,
             enterprise_id=self.enterprise_id,
             tenant_id=self.enterprise_id,
             session_key=session_key,
             turn_request_id=turn_request_id,
             model=model,
-            conversation_id=conversation_id,
         )
         if self.is_cli_identity():
             # 官方 CLI 的 chat 请求由 OpenAI Node SDK 发出：浏览器头一个都没有
@@ -1373,7 +1406,11 @@ class Account(object):
                 "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
             }
         headers.update(identity)
-        device_token = self._device_token() if not self.is_cli_identity() else ""
+        # 国际版不发 X-Device-Token（#448）；国内版保留真实 token 语义。
+        # VSCode 非企业号仍按官方 token || error 的失败态发占位（#431）。
+        device_token = (self._device_token()
+                        if self.realm == "cn" and not self.is_cli_identity()
+                        else "")
         if device_token:
             headers["X-Device-Token"] = device_token
         elif (self.product == wb_identity.PRODUCT_VSCODE
@@ -2360,6 +2397,32 @@ class Account(object):
             actual_cooldown = 3 if single_account else cooldown
             self.cooldown_until = time.time() + actual_cooldown
 
+    def note_restricted(self, detail="", cooldown=None):
+        """上游账号级风控限制（403 / code 11140）：按小时冷却，且不随重启消失。
+
+        实测正文：{"code":11140,"msg":"request illegal",...,"displayMsg":
+        「账号存在异常行为，已被限制使用」}。官方客户端同样报这个错，说明是
+        账号级标记而不是请求内容（magpie #1849 的对照：同一请求同一套头，有的
+        账号 200、有的 403）。社区复盘（Zhengyuuuui/workbuddy2api 封禁事件）
+        给出的处置口径是：看到 11140 立即停手，解封前严禁换号继续打同一台设备，
+        否则设备指纹会连坐。
+
+        与普通冷却的区别：
+        - 固定 2 小时（可用 cooldown 覆盖），不吃 single_account 的 3 秒兜底——
+          把被限制的账号每 3 秒再试一次，只会继续喂上游风控；
+        - 持久化到凭据档（restrictedUntil）：重启 / 刷新 token / 换身分 /
+          「一键测试」都不会把它清掉，只有真正成功一次（说明上游已解除）才清。
+        """
+        now = time.time()
+        wait = RESTRICTED_ACCOUNT_COOLDOWN if cooldown is None else float(cooldown)
+        with self._throttle_lock:
+            self.last_error = "HTTP 403 (account restricted)"
+            self.last_error_detail = str(detail)[:2000] if detail else ""
+            # 第一次命中才起算：反复探测/重试不该把 2 小时越推越长。
+            if self.restricted_until <= now:
+                self.restricted_until = now + max(1.0, wait)
+        return self.restricted_until
+
     def note_balance_cooled(self, message="insufficient credits"):
         """402 / out of credits: park until the next local 04:00.
 
@@ -2474,7 +2537,13 @@ class Account(object):
         return self.degrade_until
 
     def note_success(self, model=None):
-        """A served request clears every account-level penalty."""
+        """A served request clears every account-level penalty.
+
+        That includes a persisted upstream restriction: a request that actually
+        succeeded is the one piece of evidence that the vendor lifted it. (In
+        normal dispatch a restricted account is never picked, so this only fires
+        from a manual test.)
+        """
         with self._throttle_lock:
             if model:
                 self.model_cooldowns.pop(model, None)
@@ -2487,6 +2556,7 @@ class Account(object):
             self.last_soft_at = 0.0
             self.breaker_until = 0.0
             self.degrade_until = 0.0
+            self.restricted_until = 0.0
             self.last_error = ""
             self.last_error_detail = ""
             self.cooldown_until = 0.0
@@ -2498,7 +2568,8 @@ class Account(object):
         now = time.time()
         with self._throttle_lock:
             wait = max(0.0, self.cooldown_until - now,
-self.balance_until - now, self.breaker_until - now, self.degrade_until - now)
+                       self.balance_until - now, self.breaker_until - now,
+                       self.degrade_until - now, self.restricted_until - now)
             if model:
                 wait = max(wait, max(0.0, self.model_cooldowns.get(model, 0.0) - now))
         return wait
@@ -2531,6 +2602,9 @@ self.balance_until - now, self.breaker_until - now, self.degrade_until - now)
                 self.last_error_detail = ""
                 self.cooldown_until = 0
                 self.balance_until = 0.0
+            # 上游账号级风控限制（restricted_until）故意不在这里清：它不是本机
+            # 记的限流窗口，而是上游对账号的标记；换身分 / 重试 / 刷新都不该把
+            # 它放回池子（见 note_restricted）。
 
     def clear_model_cooldown(self, model):
         """只解除某个模型的限流，账号级状态原样保留。

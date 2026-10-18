@@ -462,35 +462,16 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
   `createCustomFetch` 压缩），本版启用；非企业号没有真实设备 token 时按官方
   失败态发 `X-Device-Token-Error: sdk_not_initialized`（不伪造 token）。
 - **阿里云 systemd 部署支持手动安装稳定版**：设置页可从配置的 fork Release 安装新版本；更新包必须通过 `SHA256SUMS` 与 `release-manifest.json` 校验，账号与用量目录列为保护路径。网关只提交版本号，root-owned systemd 更新服务负责备份、替换、重启与健康检查；失败会恢复程序文件。每日检查仍默认关闭，打开后也只检查、不自动安装。
+- **风控限制 403（code 11140）不再换号连坐：默认停手、限制持久化、整池暂停**（#422、#425）：上游对国际版账号的风控在 2026-10-15/16 之后明显收紧，账号级限制的正文是 `403 {"code":11140,"msg":"request illegal","displayMsg":"账号存在异常行为，已被限制使用"}`；社区复盘（[Zhengyuuuui/workbuddy2api](https://github.com/Zhengyuuuui/workbuddy2api/blob/main/doc/incident-postmortem-and-hardening-checklist.md)）给出的处置红线是「看到 11140 立即停手，解封前严禁换号继续打同一设备——设备指纹会连坐」。旧实现在 11140 上冷却该号后立刻换下一个号继续同一请求，一个请求最多遍历整个池子（#422 用户实测 7 个号在一次任务里全被封），而且冷却只存在内存里，重启 / 刷新 token / 「一键测试」都会把它清掉。现在：
+  - **默认不再跨号重试**：第一个账号被限制就停手，把原因交给客户端，下一次请求自然落到别的账号；需要旧行为时设 `WB_RESTRICTED_403_ROTATE_MAX`（默认 0）。
+  - **限制期限持久化**：账号档案新增 `restrictedUntil`（2 小时），重启 / 换身分 / 刷新凭证 / 一键测试都不再把它放回池子；只有真正成功一次（说明上游已解除）才清。
+  - **整池连坐暂停**：同一区域在 `WB_RESTRICTION_WAVE_WINDOW`（默认 900 秒）内被限制 `WB_RESTRICTION_WAVE_MIN`（默认 2）个账号，就暂停该区域派发 `WB_RESTRICTION_HOLD_SECONDS`（默认 1800 秒），期间一个上游请求都不发、直接返回 429 与申诉指引；设 `WB_RESTRICTION_HOLD_SECONDS=0` 关闭暂停。
+  - 后台巡检 / 打卡会跳过受限账号与暂停中的区域；「一键测试」识别到 11140 也按账号级限制记账，不再用 60 秒冷却覆盖。
+  - `tests/_test_restricted_403.py` 扩到 14 项（默认不换号 / 开关恢复旧行为 / 单号场景 / 连坐暂停 / 关闭暂停 / 持久化与清冷却 / 内容审核 403 不变）。
+- **国际版 chat 不再发送 `X-Device-Token`**：国内版客户端带真实 Turing Shield 设备 token，国际版客户端没有这个头（Zhengyuuuui 三轮抓包与 5.7.6 / 5.8.4 二进制构造器都不含）；网关配置的是全局单值，发给国际版账号既是伪造头、又把多个账号串到同一台设备上。billing 路径与国内版 chat 维持原行为。
+- **`X-Conversation-ID` 按会话稳定**：官方客户端同一会话复用同一个会话 id（主对话是 UUIDv4），网关此前每个请求都新生成，等于把一次多轮对话拆成上千个「一次性会话」。现在 chat 路径用 `wb_identity.conversation_id_for(uid, session_key)` 按「账号 + 会话键」稳定派生，不同账号 / 会话互不相同；客户端没带会话键时保持每请求新生成。
 
-- **CLI 身份对齐官方 CodeBuddy CLI 2.168.2**：`X-IDE-Version` 与 UA 升到
-  `2.168.2`（`CLI/2.168.2 CodeBuddy/2.168.2`；官方 adapter 会删掉 SDK 的
-  user-agent，CLI 也没有 userAgentExtension，所以是两段）；补齐官方 CLI 的
-  `X-Agent-Purpose` / `X-Agent-Type` / `X-Agent-Runtime`、`X-Private-Data`
-  （个人号 false、企业号 true）、四段 b3 链路头族（含 `X-B3-ParentSpanId`）
-  与 OpenAI Node SDK 6.25.0 的 `x-stainless-*` 指纹头（OS/arch/node 版本默认取
-  宿主，可用 `WB_IDENTITY_OS` / `WB_IDENTITY_ARCH` /
-  `WB_IDENTITY_NODE_VERSION` 覆盖）。`X-Conversation-ID`
-  按（账号, 会话键）稳定、`X-Conversation-Request-ID` 在一轮 user send 的
-  所有重试/换号里复用同一个值，`X-Request-ID` 仍等于
-  `X-Conversation-Message-ID`，`X-Root-Request-ID` = 本轮
-  `X-Conversation-Request-ID`。chat 请求去掉 Origin / Referer /
-  X-CodeBuddy-Request / X-Requested-With / Accept-Language，`Accept` 改为
-  `application/json`；请求体 gzip 并注入 `cache_retention=long`，CLI 身份
-  不再发 `X-Device-Token`。桌面端 / VSCode 身份行为不变。国际版端点仍是
-  `www.workbuddy.ai`（官方 CLI 用 `www.codebuddy.ai`，解析不了，属已知差异，
-  本版不改）。
-- **VSCode 身份对齐官方扩展 4.12.39997873**：UA 改为
-  `VSCode/1.119.0 CodeBuddy/4.12.39997873`（productName=CodeBuddy、扩展版本
-  4.12.39997873），补 `X-Product-Version` / `X-Model-ID` / `X-Agent-Type` /
-  `X-Private-Data`（仅 intl）/ B3 链路头族（含 `X-B3-ParentSpanId` 与四段 b3）/
-  `X-Request-Trace-Id` / `monitor_*` 时间戳；`X-Request-ID` 与
-  `X-Conversation-Request-ID` 同值、`X-Conversation-Message-ID` 独立，
-  `X-Conversation-ID` 为 32 位 hex（宿主 VSCode 版本默认 1.119.0，可用
-  `WB_VSCODE_IDE_VERSION` 覆盖）。桌面端 / CLI 身份行为不变。官方主 chat
-  默认请求体 gzip（`RequestBodyGzip=true` → `executeByMode` →
-  `createCustomFetch` 压缩），本版启用；非企业号没有真实设备 token 时按官方
-  失败态发 `X-Device-Token-Error: sdk_not_initialized`（不伪造 token）。
+已发布版本的完整记录（v1.4.5 ~ v1.7.13，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.13，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 

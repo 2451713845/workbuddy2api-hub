@@ -56,6 +56,7 @@ code 11-128（`conversation id missing`）。ID 形态按 5.8.4 实测：会话 
 """
 
 import gzip
+import hashlib
 import io
 import os
 import platform
@@ -237,6 +238,29 @@ def new_conversation_id():
     return str(uuid7())
 
 
+def conversation_id_for(uid, session_key):
+    """按「账号 + 会话键」稳定派生一个会话 id（带连字符的 UUID）。
+
+    官方客户端在同一个会话里始终复用同一个 X-Conversation-ID（抓包里主对话
+    是 UUIDv4、辅助请求是 v7，两种都被接受）；网关以前每个请求都现生成一个，
+    等于把一次多轮对话拆成上千个「一次性会话」，与人类客户端的画像不符。
+    这里按账号 + 会话键做稳定派生：同一账号的同一会话多轮复用同一个 id，
+    不同账号 / 不同会话互不相同——既贴近官方语义，又不会成为跨账号关联键
+    （把同一段会话的 id 发给多个账号才是关联键）。
+
+    没有会话键（客户端没带）时返回空串，调用方保持原来的「每请求新生成」。
+    """
+    key = str(session_key or "").strip()
+    if not key:
+        return ""
+    digest = hashlib.sha256(("%s|%s" % (uid or "", key)).encode("utf-8")).hexdigest()
+    h = list(digest[:32])
+    h[12] = "4"          # UUID 版本位
+    h[16] = "a"          # RFC 4122 变体位
+    h = "".join(h)
+    return "%s-%s-%s-%s-%s" % (h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+
+
 def new_message_id():
     """X-Request-ID / X-Conversation-Message-ID / -Request-ID / -Root-Request-ID：
     32 位无连字符 hex（5.8.4 实测形态）。"""
@@ -259,26 +283,6 @@ def new_turn_request_id():
 #: 会话换新值（进程重启换新也符合「每进程一个会话」的官方语义）。网关按
 #: (账号 uid, 会话键) 映射成同一个 id，进程内缓存复用——绝不能每请求现生成，
 #: 那会把每次请求都变成一次「一次性会话」，是反作弊眼里最明显的非人类形态。
-#: 上限只为兜住长驻进程的内存：超过就丢最早的一条，旧会话自然换新 id。
-_CONVERSATION_IDS = {}
-_CONVERSATION_IDS_MAX = 4096
-_CONVERSATION_IDS_LOCK = threading.Lock()
-
-
-def conversation_id_for(uid, session_key=None):
-    """这一账号这个会话的 X-Conversation-ID（同键稳定、跨账号/跨会话隔离）。"""
-    key = (str(uid or "anonymous"), str(session_key or ""))
-    with _CONVERSATION_IDS_LOCK:
-        conv = _CONVERSATION_IDS.get(key)
-        if conv:
-            return conv
-        conv = new_conversation_id()
-        if len(_CONVERSATION_IDS) >= _CONVERSATION_IDS_MAX:
-            _CONVERSATION_IDS.pop(next(iter(_CONVERSATION_IDS)))
-        _CONVERSATION_IDS[key] = conv
-        return conv
-
-
 def gzip_body(data):
     """把已经序列化好的 chat 请求体 gzip 掉（官方 RequestBodyGzip 行为）。
 
@@ -356,12 +360,14 @@ def build_identity_headers(product, realm, uid, token,
                            model=None, session_key=None, turn_request_id=None):
     """回传这一轮要用的身分标头。product = 'workbuddy' (桌面端), 'vscode' 或 'cli'。
 
-    conversation_id 只用于显式指定：留空（网关的常态）就每次请求新生成一个。
-    形态按身分区分：桌面端 / CLI 是带连字符的 UUIDv7（5.8.4 抓包形态），
-    VSCode 是 32 位无连字符 hex（官方 BaseAgent 的
-    `uuidv4().replace(/-/g, "")`）。上游不拿这个 id 存历史——抓包后的实测里，
-    同一 id 连发两轮、第二轮只带 system+user，模型仍答不出上一轮；换个新 id
-    结果一样。所以网关不需要在会话维度上维护映射。
+    conversation_id 由调用方显式指定时优先使用；留空时按身分处理：
+      - CLI 身份按 (uid, session_key) 稳定派生（conversation_id_for），官方
+        客户端同一会话复用同一个 id；
+      - 桌面端 / VSCode 每次请求新生成（桌面端 UUIDv7，VSCode 是 32 位无连
+        字符 hex，官方 BaseAgent 的 `uuidv4().replace(/-/g, "")`）。
+    上游不拿这个 id 存历史——抓包后的实测里，同一 id 连发两轮、第二轮只带
+    system+user，模型仍答不出上一轮；换个新 id 结果一样。所以稳定与否不影响
+    模型行为，只影响出站请求「像不像官方客户端」。
 
     CLI 身份按官方语义处理（session_key / turn_request_id 只对它生效，桌面端 /
     VSCode 分支不受影响）：
@@ -388,7 +394,9 @@ def build_identity_headers(product, realm, uid, token,
         # 官方 CLI 的两处会话标识（见 docstring）。桌面端 / VSCode 不吃这两个
         # 参数，保持它们原有的「每请求现生成」行为。
         if not str(conversation_id or "").strip():
-            conv = conversation_id_for(uid, session_key)
+            derived = conversation_id_for(uid, session_key)
+            if derived:
+                conv = derived
         conv_req_id = str(turn_request_id or "").strip() or new_message_id()
 
     if product == PRODUCT_DESKTOP:

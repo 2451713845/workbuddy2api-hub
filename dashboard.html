@@ -1811,6 +1811,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '暂无账号用量数据': 'No account usage data yet',
     '暂无数据（需要账号先有用量或撞线记录）': 'No data yet (needs usage or a cap on record)',
     '暂无预算样本：等某个账号把某个模型的窗口用满（撞线）后自动出现。': 'No budget samples yet: they appear once an account fills a model\'s window (hits the cap).',
+    '撞线样本': 'Cap samples',
+    '逐个窗口的原始值（先按账号，再跨账号汇总）': 'Raw values per window (averaged per account first, then across accounts)',
+    '复制为征集格式': 'Copy as collection format',
+    '暂无撞线样本。': 'No cap samples yet.',
     '更新时间:': 'Updated:',
     '更新时间: -': 'Updated: -',
     '最低保留积分': 'Minimum reserved credits',
@@ -2893,6 +2897,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "点击编辑备注": "點擊編輯備註",
     "点击添加备注，比如「批量」/「自用」": "點擊新增備註，例如「批量」/「自用」",
     "按「剩余用量估算」优先调度：某 (账号 × 模型) 的估计剩余越接近耗尽，分到的请求越多——先把快用完的额度用掉，等它到点重置。剩余不到 30% 开始加权、5% 以内权重最高；没有预算样本、或剩余为 0 / 冷却中的组合不参与。默认关闭。": "按「剩餘用量估算」優先排程：某 (帳號 × 模型) 的估計剩餘越接近耗盡，分到的請求越多——先把快用完的額度用掉，等它到點重置。剩餘不到 30% 開始加權、5% 以內權重最高；沒有預算樣本、或剩餘為 0 / 冷卻中的組合不參與。預設關閉。",
+    "撞线样本": "撞線樣本",
+    "逐个窗口的原始值（先按账号，再跨账号汇总）": "逐個視窗的原始值（先按帳號，再跨帳號彙總）",
+    "复制为征集格式": "複製為徵集格式",
+    "暂无撞线样本。": "暫無撞線樣本。",
     "注意：估算由撞线样本反推的预算与本地用量得出，本身有误差；开启后接近耗尽的账号会明显多接流量，也可能更早撞到上游限额（撞线后该模型停用到上游给出的恢复时刻）。": "注意：估算由撞線樣本反推的預算與本地用量得出，本身有誤差；開啟後接近耗盡的帳號會明顯多接流量，也可能更早撞到上游限額（撞線後該模型停用到上游給出的恢復時刻）。",
     "启用优先调度": "啟用優先排程",
     "已启用：剩余用量接近耗尽的组合优先调度": "已啟用：剩餘用量接近耗盡的組合優先排程",
@@ -4160,6 +4168,13 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
               <tbody id="remainingTbodyCn"></tbody>
             </table>
           </div>
+        </div>
+        <div id="remainingSamplesBlock" style="margin-top:18px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+            <div><b>撞线样本</b><span style="font-size:12px;color:var(--dim);margin-left:6px">逐个窗口的原始值（先按账号，再跨账号汇总）</span></div>
+            <button class="sec mini" onclick="copyRemainingSamples()">复制为征集格式</button>
+          </div>
+          <div id="remainingSamplesBody" style="font-size:12px;color:var(--dim)">暂无撞线样本。</div>
         </div>
       </div>
       </div>
@@ -13563,8 +13578,48 @@ const emptyRow = '<tr><td colspan="6" style="text-align:center;color:var(--dim)"
         + '</tr>';
     }).join('');
   });
+  const sampleBody = document.getElementById('remainingSamplesBody');
+  if(sampleBody){
+    const groups = budgets.filter(b => Array.isArray(b.samples_list) && b.samples_list.length);
+    if(!groups.length){
+      sampleBody.textContent = '暂无撞线样本。';
+    } else {
+      sampleBody.innerHTML = groups.map(b => {
+        const rows = b.samples_list.map(s =>
+          '<div style="margin-left:12px">'
+          + esc((s.at_iso || '').slice(5, 16)) + ' · '
+          + esc((s.account || '').slice(0, 8)) + ' · '
+          + fmtTok(s.sample) + ' tok</div>').join('');
+        return '<div style="margin:6px 0"><b>'
+          + esc(b.realm === 'cn' ? '国内版' : '国际版') + ' / ' + esc(b.model)
+          + '</b> <span style="color:var(--dim)">n=' + b.n
+          + ' · ' + fmtTok(b.min) + ' ~ ' + fmtTok(b.max) + '</span>'
+          + rows + '</div>';
+      }).join('');
+    }
+  }
     applyTableSort('remainingUsageTableIntl');
     applyTableSort('remainingUsageTableCn');
+}
+
+function remainingSamplesText(){
+  const budgets = (lastRemainingData && lastRemainingData.budgets) || [];
+  const lines = [];
+  budgets.forEach(b => {
+    const rows = b.samples_list || [];
+    if(!rows.length) return;
+    const vals = rows.map(s => fmtTok(s.sample)).join(' / ');
+    lines.push((b.realm === 'cn' ? '国内版' : '国际版') + ' / ' + b.model + ' / ' + vals);
+  });
+  return lines.join('\n');
+}
+
+function copyRemainingSamples(){
+  const text = remainingSamplesText();
+  if(!text){ toast('暂无撞线样本', 'warn'); return; }
+  writeClipboard(text).then(() => {
+    toast('已复制 ' + text.split('\n').length + ' 组样本', 'ok');
+  }).catch(e => toast('复制失败: ' + e.message, 'bad'));
 }
 
 function loadUsageSeries(){

@@ -2804,6 +2804,26 @@ def _remaining_budgets(events, realm_of, now, daily):
     return budgets
 
 
+def _remaining_sample_rows(events, realm, model):
+    """Per-window raw samples for one (realm, model), oldest first."""
+    rows = []
+    for event in events or []:
+        if event.get("realm") != realm or event.get("model") != model:
+            continue
+        at = float(event.get("at") or 0)
+        reset = float(event.get("reset") or 0)
+        rows.append({
+            "account": str(event.get("account") or ""),
+            "at": at,
+            "at_iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(at)) if at else "",
+            "reset": reset,
+            "reset_iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(reset)) if reset else "",
+            "sample": int(event.get("sample") or 0),
+        })
+    rows.sort(key=lambda row: (row["at"], row["account"]))
+    return rows
+
+
 def _remaining_payload(now=None, accounts=None):
     """Per-account remaining usage against the estimated per-model budget.
 
@@ -3033,7 +3053,8 @@ def _remaining_payload_locked(state, now, accounts, realm_of, daily):
         "activity_floor": floor,
         "activity_floor_iso": iso_at(floor),
         "budgets": [dict(budget, realm=realm, model=model,
-                         active=(realm, model) in active)
+                         active=(realm, model) in active,
+                         samples_list=_remaining_sample_rows(state["events"], realm, model))
                     for (realm, model), budget in sorted(budgets.items())],
         "models": sorted(totals.values(),
                          key=lambda m: (m["total_remaining"] is None,

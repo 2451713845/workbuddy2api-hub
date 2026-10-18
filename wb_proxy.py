@@ -11301,9 +11301,15 @@ def sanitize_tool_calls(tool_calls):
         if isinstance(tc, dict):
             item = dict(tc)
             fn = item.get("function")
-            if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+            if isinstance(fn, dict):
                 fn = dict(fn)
-                fn["arguments"] = sanitize_text(fn["arguments"])
+                raw_args = fn.get("arguments")
+                if isinstance(raw_args, dict):
+                    fn["arguments"] = json.dumps(raw_args, ensure_ascii=False)
+                elif raw_args is None:
+                    fn["arguments"] = "{}"
+                elif isinstance(raw_args, str):
+                    fn["arguments"] = sanitize_text(raw_args)
                 item["function"] = fn
             out.append(item)
         else:
@@ -11681,9 +11687,55 @@ def normalize_tool_choice(obj):
             obj.pop("tool_choice", None)
     else:
         obj.pop("tool_choice", None)
+def _normalize_tool_parameters(fn):
+    """Ensure function parameters comply with strict upstream schema (avoids code 11129).
+
+    The upstream Go struct schema validator rejects function definitions whose
+    parameters are empty dicts ({}) or missing `type: "object"`:
+        upstream 400: {"code":11129,"msg":"invalid function call parameters"}
+        extError: {"code":"invalid_function_parameters", ...}
+        displayMsg: {"zh":"工具定义不合规，请新建任务重试"}
+
+    Common client shapes that trigger 11129:
+      - zero-argument tools where clients send `parameters: {}`
+      - schemas that specify `properties` but omit `type: "object"`
+      - `required` set to None or a non-list
+    Normalizing ensures `type: "object"` is always present, `properties` is a dict,
+    and `required` is a clean list of strings or omitted.
+    """
+    if not isinstance(fn, dict):
+        return
+    params = fn.get("parameters")
+    if params is None or not isinstance(params, dict):
+        fn["parameters"] = {"type": "object", "properties": {}}
+        return
+    p = dict(params)
+    if p.get("type") != "object":
+        p["type"] = "object"
+    if "properties" not in p or not isinstance(p.get("properties"), dict):
+        p["properties"] = {}
+    if "required" in p:
+        req = p["required"]
+        if isinstance(req, list):
+            p["required"] = [str(x) for x in req if x is not None]
+        elif isinstance(req, str):
+            p["required"] = [req]
+        else:
+            p.pop("required", None)
+    fn["parameters"] = p
+
+
 def normalize_tools(obj):
+    # Older clients might still send root-level `functions`
+    if "functions" in obj and "tools" not in obj:
+        funcs = obj.pop("functions")
+        if isinstance(funcs, list):
+            obj["tools"] = [{"type": "function", "function": f} for f in funcs if isinstance(f, dict)]
+
     tools = obj.get("tools")
     if not tools or not isinstance(tools, list):
+        if "tools" in obj:
+            obj.pop("tools", None)
         return
     norm = []
     for t in tools:
@@ -11698,10 +11750,19 @@ def normalize_tools(obj):
             }
             if "strict" in t:
                 fn["strict"] = t["strict"]
+            _normalize_tool_parameters(fn)
             norm.append({"type": "function", "function": fn})
         else:
-            norm.append(t)
-    obj["tools"] = norm
+            item = dict(t)
+            if "function" in item and isinstance(item["function"], dict):
+                fn = dict(item["function"])
+                _normalize_tool_parameters(fn)
+                item["function"] = fn
+            norm.append(item)
+    if norm:
+        obj["tools"] = norm
+    else:
+        obj.pop("tools", None)
 # ---------------------------------------------------------------------------
 # Stop Sequence Normalization (avoids code 11101 on a string stop)
 # ---------------------------------------------------------------------------

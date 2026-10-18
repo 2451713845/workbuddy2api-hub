@@ -587,6 +587,8 @@ class Account(object):
         # it has always had; never persisted, never exported.
         self.last_error_detail = ""
         self.cooldown_until = 0.0
+        # 运行时标记：上游返回 401 或 token 为空时置为 True，提示需重新登录
+        self.token_expired = bool(not self.access_token)
         # Per-model throttling. Upstream rate limits (code 6004 "usage exceeds
         # frequency limit") apply to ONE model for one account, not to the whole
         # account: other models keep working. Cooldown the offending model only,
@@ -774,6 +776,7 @@ class Account(object):
     def public(self):
         exp = self.expires_at or jwt_exp(self.access_token)
         now = time.time()
+        is_token_expired = bool(getattr(self, "token_expired", False) or (exp and exp <= now) or not self.access_token)
         last_error, deadline, models, last_error_detail = self._throttle_snapshot(now)
         return {
             "uid": self.uid,
@@ -791,7 +794,9 @@ class Account(object):
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy,
             "expiresAt": exp,
-            "expiresIn": _human_delta(exp - time.time()) if exp else None,
+            "expiresIn": "expired" if is_token_expired else (_human_delta(exp - time.time()) if exp else None),
+            "tokenExpired": is_token_expired,
+            "needRelogin": is_token_expired,
             "hasRefreshToken": bool(self.refresh_token),
             "lastError": last_error,
             "lastErrorDetail": last_error_detail or None,
@@ -1180,6 +1185,8 @@ class Account(object):
             return "已停用"
         if not self.access_token:
             return "无凭证"
+        if getattr(self, "token_expired", False):
+            return "凭证已过期"
         # 与 ready() 同序：人工黑名单排在所有「暂时不可用」之前，所以
         # 「所有账号都禁用了这个模型」时，池子抽干的报错里会逐个号写明原因。
         if self.model_disabled(model):
@@ -1228,7 +1235,7 @@ class Account(object):
         return str(model).strip().lower() in self.disabled_models
 
     def ready(self, model=None):
-        if not self.enabled or not self.access_token:
+        if not self.enabled or not self.access_token or getattr(self, "token_expired", False):
             return False
         # 人工黑名单排在最前：它是静态配置（最便宜），而且在语义上优先于所有
         # 「暂时不可用」的判断 —— 被禁用的模型不该因为账号恰好恢复了就漏进来。
@@ -1388,6 +1395,7 @@ class Account(object):
 
     def _refresh_locked(self):
         if not self.refresh_token:
+            self.token_expired = True
             self._set_last_error("no refresh token; sign in again")
             return False
         cfg = get_realm_config(self.realm)
@@ -1412,17 +1420,24 @@ class Account(object):
             payload = http_json(url, data=b"{}", method="POST", headers=headers, timeout=30,
                                 proxy=self.proxy)
         except Exception as exc:
-            self._set_last_error("refresh failed: %s" % exc)
+            err_msg = str(exc)
+            if "401" in err_msg or "Authorization" in err_msg or "Unauthorized" in err_msg:
+                self.token_expired = True
+                self._set_last_error("登录已过期 (HTTP 401)，请重新登录")
+            else:
+                self._set_last_error("refresh failed: %s" % exc)
             return False
         data = (payload.get("data") or {})
         data = data.get("data") or data
         token = data.get("accessToken")
         if not token:
+            self.token_expired = True
             self._set_last_error("refresh returned no token (%s)" % payload.get("msg"))
             return False
         self.access_token = token
         self.refresh_token = data.get("refreshToken") or self.refresh_token
         self.expires_at = jwt_exp(token) or self.expires_at
+        self.token_expired = False
         with self._throttle_lock:
             self.last_error = ""
             self.cooldown_until = 0
@@ -1898,8 +1913,28 @@ class Account(object):
 
         # 1. 套餐概览
         summary_url = base_billing + RESOURCE_SUMMARY_PATH
-        s_res = http_json(summary_url, data=b"{}", method="POST", headers=headers,
-                          timeout=15, proxy=self.proxy)
+        try:
+            s_res = http_json(summary_url, data=b"{}", method="POST", headers=headers,
+                              timeout=15, proxy=self.proxy)
+        except Exception as exc:
+            err_str = str(exc)
+            if "401" in err_str or "Authorization" in err_str or "Unauthorized" in err_str:
+                if self.refresh_token and self.refresh():
+                    headers = self.headers(purpose="billing")
+                    headers["X-Client-Platform"] = "web"
+                    try:
+                        s_res = http_json(summary_url, data=b"{}", method="POST", headers=headers,
+                                          timeout=15, proxy=self.proxy)
+                    except Exception:
+                        self.token_expired = True
+                        self._set_last_error("登录已过期，请重新登录")
+                        return {"ok": False, "error": "登录已过期，请在账号管理页重新扫码登录", "need_relogin": True}
+                else:
+                    self.token_expired = True
+                    self._set_last_error("登录已过期，请重新登录")
+                    return {"ok": False, "error": "登录已过期，请在账号管理页重新扫码登录", "need_relogin": True}
+            else:
+                raise
         if s_res.get("code") != 0:
             return {"ok": False, "error": s_res.get("msg") or f"code {s_res.get('code')}"}
         s_data = s_res.get("data") or {}
@@ -2032,7 +2067,22 @@ class Account(object):
             res = http_json(url, data=json.dumps(body).encode(), method="POST", headers=headers,
                             timeout=30, proxy=self.proxy)
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            err_str = str(exc)
+            if "401" in err_str or "Authorization" in err_str or "Unauthorized" in err_str:
+                if self.refresh_token and self.refresh():
+                    try:
+                        headers = self.headers(purpose="billing")
+                        res = http_json(url, data=json.dumps(body).encode(), method="POST", headers=headers,
+                                        timeout=30, proxy=self.proxy)
+                    except Exception:
+                        self.token_expired = True
+                        self._set_last_error("登录已过期，请重新登录")
+                        return {"ok": False, "error": "登录已过期，请在账号管理页重新扫码登录", "need_relogin": True}
+                else:
+                    self.token_expired = True
+                    self._set_last_error("登录已过期，请重新登录")
+                    return {"ok": False, "error": "登录已过期，请在账号管理页重新扫码登录", "need_relogin": True}
+            return {"ok": False, "error": err_str}
         data = res.get("data", {}).get("Response", {}).get("Data", {})
         accounts = data.get("Accounts") or []
         packages = []
@@ -2206,6 +2256,14 @@ class Account(object):
                             return ent
                 if res.get("ok"):
                     return res
+                # 若详细接口明确返回认证失败，直接上报，不再尝试 fallback
+                # （fallback 使用相同 token，会得到同样的 401）。
+                err = res.get("error", "")
+                if err and ("401" in err or "登录" in err or "Authorization" in err
+                            or "Unauthorized" in err or "token" in err.lower()):
+                    self.token_expired = True
+                    self._set_last_error("登录已过期，请重新登录")
+                    return res
             except Exception:
                 pass
             if self.is_enterprise():
@@ -2230,6 +2288,8 @@ class Account(object):
             # The visible label keeps its existing truncation; `detail` carries the
             # untouched upstream body so the panel can show it on hover.
             self.last_error_detail = str(detail)[:2000] if detail else ""
+            if "401" in str(message) or "Authorization" in str(message) or "unauthorized" in str(message).lower() or "token" in str(message).lower():
+                self.token_expired = True
             if model:
                 # Model-scoped throttle: keep the account usable for every other model.
                 wait = max(1.0, float(until) - time.time()) if until else (
@@ -2686,6 +2746,11 @@ class CreditsRefresher(threading.Thread):
             "logs": self.logs[-10:],
         }
 
+# 和账号凭证放在同一个目录、但本身不是账号的文件。跳过它们，免得每次启动
+# 都被当成「损坏的账号」解析并打一条 error 日志（settings.json 是面板设置，
+# active_realm.json 是区域开关）。
+NON_ACCOUNT_FILES = ("settings.json", "active_realm.json")
+
 
 class AccountPool(object):
     def __init__(self, directory, log=None):
@@ -2721,7 +2786,7 @@ class AccountPool(object):
             self.accounts = []
             if not os.path.isdir(self.dir): return self.accounts
             for name in sorted(os.listdir(self.dir)):
-                if not name.endswith(".json"): continue
+                if not name.endswith(".json") or name in NON_ACCOUNT_FILES: continue
                 path = os.path.join(self.dir, name)
                 try:
                     with open(path, encoding="utf-8") as fh:
@@ -2779,6 +2844,10 @@ class AccountPool(object):
                     account.proxy_slot = existing.proxy_slot
                 if not account.proxy_legacy and existing.proxy_legacy:
                     account.proxy_legacy = existing.proxy_legacy
+                account.token_expired = False
+                with account._throttle_lock:
+                    account.last_error = ""
+                    account.last_error_detail = ""
                 self.accounts[self.accounts.index(existing)] = account
             else:
                 self.accounts.append(account)

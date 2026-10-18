@@ -432,6 +432,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
   - 记录落在 `accounts/quota_scan.json`（原子写，**重启后仍保留每个组合的上次查询时刻**），重启不会让所有模型重新查一遍；一次性勾上一堆模型时，首次查询会自动错峰（相邻组合相隔 15 秒），不会在同一瞬间把请求全打上去。
   - 默认**不勾选任何模型**（即关闭），勾了才会发请求——每次查询都会真的消耗该账号极少量额度。设置页能看到每个「账号 + 模型」的最近结果与下次查询时间，也可以点「立即查询」跳过等待；已经有 429 记录、或正在冷却中的组合不会被额外撞一次。
 - 新增 `tests/_test_quota_scan.py`（16 项）：钉住未勾选时什么都不做、查通之后要等满一个间隔、429 时既记冷却又登记窗口且之后停止轮询、失败不算查过并按短间隔重试、连续失败到上限才推迟到下一周期、持久化与重启视角、停用/无凭证/冷却中的组合被跳过、首次登记错峰与批次上限。
+- **出站 chat 请求：头名保真 + 按账号隔离连接 + 紧凑 JSON**：出站头名此前被 `urllib` / 连接池统一改写大小写（`X-Request-ID` → `X-Request-Id`、`X-IDE-*` → `X-Ide-*`、`traceparent` / `b3` → `Traceparent` / `B3`），与官方客户端代码里的写法不是同一字节串；现在 chat / 每日活跃 / 面板探活三条路径按原名原样发送，billing / 登录 / 签到等未传有序头的路径行为不变。连接池键新增凭据摘要（`Authorization` / `X-Refresh-Token` / `X-User-Id` 的 sha256 前 16 位）：同一出口上的不同账号不再共用同一条 TCP/TLS 连接（同一账号仍复用；`egress_key` 与退避 / 熔断口径不变）。chat 请求体改为紧凑 JSON（与 Node `JSON.stringify` 一致）。测试：`tests/_test_upstream_pool.py` 新增 [17] 头名保真 / [18] 按账号分池，`tests/_test_upstream_repairs.py` 新增 [6] 紧凑 JSON。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.13，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 

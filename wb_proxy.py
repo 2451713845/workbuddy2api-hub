@@ -15281,6 +15281,48 @@ def _anthropic_block_text(block):
     return ""
 
 
+def _anthropic_tool_result_content(value, is_error=None):
+    """Build a tool body without flattening images into base64 text.
+
+    A tool_result containing an image must keep the structured image_url
+    part: upstream bills a data URL as text at roughly one token per
+    character, so one screenshot can push a long context past the limit
+    (code 11115). Pure-text results still collapse to one string, which is
+    the cheapest form and the existing behaviour.
+    """
+    if not isinstance(value, list):
+        return _anthropic_content_to_text(value, is_error)
+    parts = []
+    has_image = False
+    for item in value:
+        if not isinstance(item, dict):
+            if isinstance(item, str):
+                parts.append({"type": "text", "text": item})
+            continue
+        typ = str(item.get("type") or "")
+        if typ == "image":
+            part = _anthropic_image_part(item)
+            url = (part.get("image_url") or {}).get("url")
+            if url:
+                has_image = True
+                parts.append(part)
+            else:
+                parts.append({"type": "text", "text": "[image omitted: no data]"})
+        elif typ == "document":
+            parts.append({"type": "text", "text": _anthropic_document_text(item)})
+        else:
+            text = _anthropic_block_text(item)
+            if text:
+                parts.append({"type": "text", "text": text})
+    if not has_image:
+        joined = "".join(p.get("text", "") for p in parts
+                         if p.get("type") == "text")
+        return ("error: " + joined) if is_error is True else joined
+    if is_error is True:
+        parts.insert(0, {"type": "text", "text": "error:"})
+    return parts
+
+
 def _anthropic_image_part(block):
     source = block.get("source") if isinstance(block, dict) else None
     url = ""
@@ -15438,8 +15480,8 @@ def _anthropic_blocks_to_messages(role, blocks):
             tool_messages.append({
                 "role": "tool",
                 "tool_call_id": _anthropic_text(block.get("tool_use_id")),
-                "content": _anthropic_content_to_text(block.get("content"),
-                                                      block.get("is_error")),
+                "content": _anthropic_tool_result_content(block.get("content"),
+                                                          block.get("is_error")),
             })
             continue
         if typ == "image":

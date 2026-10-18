@@ -11693,21 +11693,115 @@ def normalize_tool_choice(obj):
             obj.pop("tool_choice", None)
     else:
         obj.pop("tool_choice", None)
+# ---------------------------------------------------------------------------
+# Tool Schema Parameters Normalization (avoids code 11129)
+# ---------------------------------------------------------------------------
+_SCHEMA_TYPE_MAP = {
+    "str": "string",
+    "text": "string",
+    "int": "integer",
+    "bool": "boolean",
+    "dict": "object",
+    "list": "array",
+    "float": "number",
+}
+_SCHEMA_VALID_TYPES = {"string", "number", "integer", "boolean", "array", "object", "null"}
+
+
+def _deep_normalize_schema(s):
+    """Recursively clean and normalize JSON Schema for upstream Go validator."""
+    if not isinstance(s, dict):
+        return s
+
+    # 1. Strip metadata fields with null/None values (upstream strictly rejects null description/title)
+    for k in list(s.keys()):
+        if s[k] is None and k in ("description", "title", "format", "pattern", "items", "default"):
+            s.pop(k, None)
+
+    # 2. Normalize type declarations
+    if "type" in s:
+        typ = s["type"]
+        if isinstance(typ, str):
+            typ_lower = typ.strip().lower()
+            if typ_lower in _SCHEMA_TYPE_MAP:
+                s["type"] = _SCHEMA_TYPE_MAP[typ_lower]
+            elif typ_lower not in _SCHEMA_VALID_TYPES:
+                if "properties" in s:
+                    s["type"] = "object"
+                elif "items" in s:
+                    s["type"] = "array"
+                else:
+                    s.pop("type", None)
+            else:
+                s["type"] = typ_lower
+        elif isinstance(typ, list):
+            s["type"] = [_SCHEMA_TYPE_MAP.get(str(t).lower(), str(t).lower()) for t in typ if t]
+
+    # 3. Ensure object types always have a properties dictionary
+    if s.get("type") == "object" or ("properties" in s and s.get("type") is None):
+        if s.get("type") is None:
+            s["type"] = "object"
+        if "properties" not in s or not isinstance(s.get("properties"), dict):
+            s["properties"] = {}
+
+    # 4. Clean required list: drop None, empty strings, ensure list of strings
+    if "required" in s:
+        req = s["required"]
+        if isinstance(req, list):
+            cleaned_req = [str(x) for x in req if x is not None and str(x).strip()]
+            if cleaned_req:
+                s["required"] = cleaned_req
+            else:
+                s.pop("required", None)
+        elif isinstance(req, str) and req.strip():
+            s["required"] = [req.strip()]
+        else:
+            s.pop("required", None)
+
+    # 5. Handle array items: unpack tuple schema into dict, recursively normalize
+    if "items" in s:
+        items = s["items"]
+        if isinstance(items, list):
+            first_dict = next((it for it in items if isinstance(it, dict)), None)
+            s["items"] = _deep_normalize_schema(dict(first_dict)) if first_dict is not None else {"type": "string"}
+        elif isinstance(items, dict):
+            _deep_normalize_schema(items)
+        elif items is None:
+            s.pop("items", None)
+
+    # 6. Recursively normalize properties
+    if "properties" in s and isinstance(s["properties"], dict):
+        for prop_name, prop_val in list(s["properties"].items()):
+            if isinstance(prop_val, dict):
+                _deep_normalize_schema(prop_val)
+
+    # 7. Recursively normalize definitions / $defs
+    for def_key in ("$defs", "definitions"):
+        if def_key in s and isinstance(s[def_key], dict):
+            for d_name, d_val in list(s[def_key].items()):
+                if isinstance(d_val, dict):
+                    _deep_normalize_schema(d_val)
+
+    # 8. Recursively normalize composition keywords (anyOf, oneOf, allOf)
+    for comb_key in ("anyOf", "oneOf", "allOf"):
+        if comb_key in s and isinstance(s[comb_key], list):
+            for sub in s[comb_key]:
+                if isinstance(sub, dict):
+                    _deep_normalize_schema(sub)
+
+    return s
+
+
 def _normalize_tool_parameters(fn):
     """Ensure function parameters comply with strict upstream schema (avoids code 11129).
 
-    The upstream Go struct schema validator rejects function definitions whose
-    parameters are empty dicts ({}) or missing `type: "object"`:
-        upstream 400: {"code":11129,"msg":"invalid function call parameters"}
-        extError: {"code":"invalid_function_parameters", ...}
-        displayMsg: {"zh":"工具定义不合规，请新建任务重试"}
-
-    Common client shapes that trigger 11129:
-      - zero-argument tools where clients send `parameters: {}`
-      - schemas that specify `properties` but omit `type: "object"`
-      - `required` set to None or a non-list
-    Normalizing ensures `type: "object"` is always present, `properties` is a dict,
-    and `required` is a clean list of strings or omitted.
+    Upstream Go schema validator expects function parameters to have:
+      - `type: "object"`
+      - `properties: {...}` (a dictionary, even if empty)
+      - `required` as a list of strings without nulls
+      - valid JSON schema types (converting aliases like 'str'/'int'/'dict' to 'string'/'integer'/'object')
+      - no null values in metadata fields like description/title
+    This function recursively normalizes nested parameters, properties, items, and definitions.
 
     Note on WB_PRESERVE_REQUEST_CONTRACT (#423):
       Schema validity normalization is an upstream transport-layer requirement,
@@ -11727,14 +11821,7 @@ def _normalize_tool_parameters(fn):
         p["type"] = "object"
     if "properties" not in p or not isinstance(p.get("properties"), dict):
         p["properties"] = {}
-    if "required" in p:
-        req = p["required"]
-        if isinstance(req, list):
-            p["required"] = [str(x) for x in req if x is not None]
-        elif isinstance(req, str):
-            p["required"] = [req]
-        else:
-            p.pop("required", None)
+    _deep_normalize_schema(p)
     fn["parameters"] = p
 
 
@@ -11755,7 +11842,7 @@ def normalize_tools(obj):
         if not isinstance(t, dict):
             continue
         # Wrap top-level name tool definition into Chat Completions function schema
-        if "name" in t and "function" not in t and t.get("type") == "function":
+        if "name" in t and "function" not in t:
             fn = {
                 "name": t.get("name") or "",
                 "description": t.get("description") or "",
@@ -11767,6 +11854,8 @@ def normalize_tools(obj):
             norm.append({"type": "function", "function": fn})
         else:
             item = dict(t)
+            if item.get("type") != "function":
+                item["type"] = "function"
             if "function" in item and isinstance(item["function"], dict):
                 fn = dict(item["function"])
                 _normalize_tool_parameters(fn)

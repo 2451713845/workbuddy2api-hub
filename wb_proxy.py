@@ -57,7 +57,6 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-import subprocess
 import wb_accounts
 import wb_activity
 import wb_atrest
@@ -260,78 +259,12 @@ def install_console_close_handler():
         return None
 
 # ---------------------------------------------------------------------------
-# 日志终端查看器（双进程模型）
+# 日志窗口
 #
-# 服务进程以 pythonw 静默后台运行（无窗口、关闭任何窗口都不停）。用户看到的
-# "终端"是一个独立的 console_tail.py 进程——它只连本地 /logs 接口实时打印日志，
-# 关掉它不影响服务。启动脚本会弹一个；面板眼睛按钮可以再开/关一个。
+# 面板的眼睛按钮改为在新窗口打开运行日志页（?tab=logs）。服务端不再 spawn
+# 任何进程：容器 / Linux 上没有窗口可开，Windows 上也不需要第二个 python 进程
+# （#427）。启动脚本仍可单独拉起 console_tail.py，那是命令行通道，与本按钮无关。
 # ---------------------------------------------------------------------------
-CONSOLE_VIEWER_PROC = None
-_LISTEN_PORT = 8788
-
-def _console_python():
-    """Find a console (windowed) python next to the running interpreter.
-
-    The service is launched with pythonw (GUI subsystem, no console), so
-    sys.executable is pythonw.exe. To open a visible viewer window we need the
-    console sibling (python.exe) in the same directory.
-    """
-    exe = sys.executable or "python"
-    d = os.path.dirname(exe)
-    cand = os.path.join(d, "python.exe")
-    if os.path.exists(cand):
-        return cand
-    if exe.lower().endswith("pythonw.exe"):
-        cand2 = exe[: -len("pythonw.exe")] + "python.exe"
-        if os.path.exists(cand2):
-            return cand2
-    return exe
-
-def _console_viewer_running():
-    return bool(CONSOLE_VIEWER_PROC and CONSOLE_VIEWER_PROC.poll() is None)
-
-def _launch_console_viewer():
-    """Launch console_tail.py in its own NEW console window.
-
-    Returns True on launch, False if already running, None if the script is
-    missing. A server-generated panel token is passed so the viewer works even
-    if the panel password was changed from the default.
-    """
-    global CONSOLE_VIEWER_PROC
-    if _console_viewer_running():
-        return False
-    here = os.path.dirname(os.path.abspath(__file__))
-    script = os.path.join(here, "console_tail.py")
-    if not os.path.exists(script):
-        return None
-    py = _console_python()
-    try:
-        token = PANEL.create()
-    except Exception:
-        token = ""
-    try:
-        proc = subprocess.Popen(
-            [py, "-u", script, "--port", str(_LISTEN_PORT), "--token", token],
-            creationflags=0x00000010,  # CREATE_NEW_CONSOLE
-            stdin=subprocess.DEVNULL,
-        )
-        CONSOLE_VIEWER_PROC = proc
-        return True
-    except Exception:
-        return None
-
-def _kill_console_viewer():
-    global CONSOLE_VIEWER_PROC
-    if _console_viewer_running():
-        try:
-            CONSOLE_VIEWER_PROC.terminate()
-        except Exception:
-            pass
-        CONSOLE_VIEWER_PROC = None
-        return True
-    CONSOLE_VIEWER_PROC = None
-    return False
-
 UPSTREAM = "https://www.workbuddy.ai"
 CHAT_PATH = "/v2/chat/completions"
 MODELS_PATH = "/v2/enterprises/personal/models"
@@ -902,6 +835,11 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         row["account"] = account
     acc = POOL.get(account) if (account and POOL) else None
     row["realm"] = acc.realm if acc else CURRENT_REALM
+    # The refresher visits one account per tick, so on a large pool the cached
+    # balance can be hours old; subtract this request's real cost at once so
+    # reserve_credits keeps working between refreshes (#442).
+    if acc and fields.get("credit"):
+        acc.consume_credit(fields["credit"])
     # Always written, even when the caller presented no key. The empty value is
     # what separates "ran without a key" from rows written before the field
     # existed; the dashboard reports those as two different buckets, and a
@@ -9995,7 +9933,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.12",
+        "version": "1.7.13",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -16159,7 +16097,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.12"
+    server_version = "wb-proxy/1.7.13"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -16753,10 +16691,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, info)
 
     def _get_console_state(self):
-        return self._json(200, {
-            "supported": True,
-            "visible": _console_viewer_running(),
-        })
+        # 按钮不再 spawn 进程，而是在新窗口打开运行日志页。这样 Windows /
+        # macOS / 容器走同一条路，不存在「当前环境开不了窗口」的伪状态（#427）。
+        return self._json(200, {"supported": True, "mode": "web", "visible": False})
 
     def _route_console_toggle(self):
         # 按钮请求均携带 `{}` body 但不解析：必须把残留字节读掉，否则同一条
@@ -16765,27 +16702,17 @@ class Handler(BaseHTTPRequestHandler):
         # Expect: 100-continue，否则排空会等待一个永远不会发出的 body。
         self._handle_expect_continue()
         self._discard_body()
-        if _console_viewer_running():
-            _kill_console_viewer()
-            visible = False
-        else:
-            launched = _launch_console_viewer()
-            visible = bool(launched)
-        return self._json(200, {"ok": True, "visible": visible})
+        # 兼容旧面板：新面板直接 window.open，不再请求这里。
+        return self._json(200, {"ok": True, "mode": "web",
+                                "url": "/dashboard?tab=logs", "visible": False})
 
     def _route_shutdown(self):
         # 同 toggle：按钮的 `{}` body 不解析也必须排空，否则它会污染同一条
         # keep-alive 连接上的下一个请求（连点触发 501）。
         self._handle_expect_continue()
         self._discard_body()
-        # 先关掉日志终端窗口：服务一旦退出，查看器轮询 /logs 会持续报
-        # 「上游拒绝连接」。先把窗口结束掉，用户就看不到任何报错。
-        # 然后回响应、延迟退出：0.4s 让 _json 的 body 先 flush 到
-        # socket；端口随进程释放，下次启动走原来的启动脚本。
-        try:
-            _kill_console_viewer()
-        except Exception:
-            pass
+        # 回响应、延迟退出：0.4s 让 _json 的 body 先 flush 到 socket；端口
+        # 随进程释放，下次启动走原来的启动脚本。
         def _bye():
             time.sleep(0.4)
             try:
@@ -19829,9 +19756,7 @@ def running_version():
     return Handler.server_version.split("/", 1)[-1]
 
 def main():
-    global _LISTEN_PORT
     args = _parse_cli_args()
-    _LISTEN_PORT = args.port
     _apply_cli_overrides(args)
     if _probe_running_instance(args):
         return

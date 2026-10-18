@@ -135,7 +135,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 172 个套件：127 个 Python + 45 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 173 个套件：128 个 Python + 45 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -436,6 +436,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 ### Unreleased
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.16，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
+
+- **面板与日志出口统一脱敏账号手机号**（#415 跟进）：账号昵称常被设成手机号，此前面板 JSON、日志看板、stderr、`/logs/export` 与账号导出文档一律明文。现在 66 处面板出口走新增的 `_json_panel` / `_json_cached_panel` 封装（LLM 的 `/v1` 生成路由保持 `_json`，模型输出一字不动，有源码级用例钉住）；日志在 level/tag 推断之后才掩码，分类不受掩码影响；账号导出两条路（`?download=1` 与内联）共用一次脱敏。匹配只认整值 11 位手机号与文本内三段分组形态（容忍空格/点/中点等常见分隔符），数字边界保护 26 位订单号、10 位时间戳不被误切；掩码幂等、copy-on-write，不污染共享 TTL 缓存。新增 `tests/_test_nickname_privacy.py`（34 例）。
 
 ## 七、致谢与引用声明 (Credits & References)
 

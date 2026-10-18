@@ -242,6 +242,11 @@ class TestAllRouteTests(unittest.TestCase):
     def _call(self, payload, rows, network):
         handler = types.SimpleNamespace(
             _json=lambda code, body: {"code": code, "body": body})
+        # 本仓库的账号类面板出口统一走 _json_panel（`_redact_account_names` + `_json`）。
+        # 桩里补上同一语义，才能让「一键测试」的返回体走与生产一致的路径；断言本身
+        # 不看手机号，脱敏对这里的昵称是恒等变换。
+        handler._json_panel = lambda code, body: {
+            "code": code, "body": P._redact_account_names(body)}
         with mock.patch.object(P, "probe_account", lambda acc, model=None, timeout=30: dict(rows[0])), \
                 mock.patch.object(P, "probe_local_network", lambda realm: dict(network)):
             return P.Handler._route_accounts_test_all(handler, payload)

@@ -74,11 +74,16 @@ global.confirm = () => true;
 global.console.log = () => {};
 
 // ---- capture every request the page makes ---------------------------------
+// 「网关模型清单」的勾选态：一键配置只把勾选中的模型写进客户端。
+const SELECTED = {models: ['model-a', 'model-b']};
 const requests = [];
 global.fetch = url => {
-  const payload = String(url).includes('/agents')
-    ? {clients: [], keys: [], models: [], gateway: {base_url: 'http://127.0.0.1:8788/v1'}}
-    : {rows: [], total: 0, accounts: [], slots: [], data: [], results: [], byAccount: []};
+  const u = String(url);
+  const payload = u.includes('/agents/model-selection')
+    ? {configured: true, selected_models: SELECTED.models.slice()}
+    : u.includes('/agents')
+      ? {clients: [], keys: [], models: [], gateway: {base_url: 'http://127.0.0.1:8788/v1'}}
+      : {rows: [], total: 0, accounts: [], slots: [], data: [], results: [], byAccount: []};
   return Promise.resolve({
     status: 200, ok: true,
     json: () => Promise.resolve(payload),
@@ -97,7 +102,9 @@ const api = new Function(script + `
   window.__restoreAgent = restoreAgent;
   window.__loadAgents = loadAgents;
   window.__setAgents = function(data, models){ AGENTS_DATA = data; AGENT_MODELS = models; };
+  window.__setSelection = list => { AGENT_MODEL_SELECTION = new Set((list || []).map(String)); };
   return { applyAgent, restoreAgent, loadAgents, setAgents: window.__setAgents,
+           setSelection: window.__setSelection,
            loadAgentsAvailability, switchMainTab,
            agentsAvailable: function(){ return AGENTS_AVAILABLE; },
            currentTab: function(){ return currentMainTab; } };`)();
@@ -119,8 +126,14 @@ const check = (label, cond, extra) => {
 };
 
 (async () => {
-  api.setAgents({clients: CLIENTS, keys: [], models: MODELS,
-                 gateway: {base_url: 'http://127.0.0.1:8788/v1'}}, MODELS);
+  const seed = () => api.setAgents({
+    clients: CLIENTS, keys: [], models: MODELS,
+    gateway: {base_url: 'http://127.0.0.1:8788/v1'},
+    model_embedding_clients: ['dsh'],
+  }, MODELS);
+  const select = list => { SELECTED.models = list; api.setSelection(list); };
+  seed();
+  select(['model-a', 'model-b']);
 
   // The regression that reached the user: an undeclared identifier inside
   // applyAgent() must not escape as a runtime error.
@@ -156,10 +169,65 @@ const check = (label, cond, extra) => {
   check('the restore payload carries client_id too',
         restoreBody.client_id === 'claude-code', JSON.stringify(restoreBody));
 
+  // 勾选功能带来的新契约：写进客户端的清单 = 勾选集合 ∩ 当前模型目录。
+  // 每次 apply 前都要重新喂卡片数据：applyAgent 的 finally 会 loadAgents()，
+  // 而第一个 fetch stub 把 clients 返回成空。
+  select(['model-b']);
+  requests.length = 0;
+  seed();
+  await api.applyAgent('claude-code', null);
+  const partialReq = requests.find(r => r.url.indexOf('/agents/apply') !== -1);
+  const partialBody = JSON.parse((partialReq && partialReq.opts.body) || '{}');
+  check('只勾选一个时 payload 只带那一个模型',
+        Array.isArray(partialBody.models) && partialBody.models.length === 1
+          && partialBody.models[0] === 'model-b',
+        JSON.stringify(partialBody.models));
+
+  CLIENTS.push({id: 'dsh', label: 'DeepSeek Harness', desc: 'DSH desktop',
+                protocol: 'openai', config_paths: ['/home/u/.dsh/settings.yaml'],
+                installed: true, applied: null});
+  // 先证明 dsh 被认成了客户端：有勾选时它照常发请求（否则下面的"被挡下"可能因别的
+  // 早退分支假通过）
+  select(['model-a']);
+  requests.length = 0;
+  seed();
+  await api.applyAgent('dsh', null);
+  check('有勾选时写模型清单的客户端照常发 /agents/apply',
+        !!requests.find(r => r.url.indexOf('/agents/apply') !== -1),
+        JSON.stringify(requests.map(r => r.url)));
+
+  // 一个都没勾：把模型清单写进自身配置的客户端（DSH / OpenCode / Crush / ZCode，
+  // 由后端 /agents 的 model_embedding_clients 声明）必须被挡下且不发请求；
+  // 不读这份清单的 Claude Code 照发，带空数组。
+  select([]);
+  requests.length = 0;
+  seed();
+  await api.applyAgent('dsh', null);
+  check('空勾选时嵌入模型清单的客户端被挡下，不发 /agents/apply',
+        !requests.some(r => r.url.indexOf('/agents/apply') !== -1),
+        JSON.stringify(requests.map(r => r.url)));
+
+  requests.length = 0;
+  seed();
+  await api.applyAgent('claude-code', null);
+  const noneReq = requests.find(r => r.url.indexOf('/agents/apply') !== -1);
+  const noneBody = JSON.parse((noneReq && noneReq.opts.body) || '{}');
+  check('不读模型清单的客户端不受影响，带空清单发出',
+        !!noneReq && Array.isArray(noneBody.models) && noneBody.models.length === 0,
+        JSON.stringify(noneBody.models));
+  CLIENTS.pop();   // 上面临时加的 dsh 卡片不留给后面的渲染断言
+  select(['model-a', 'model-b']);
+
   // The render path must run against a real /agents answer without throwing
   // and must actually fill the card grid and the model picker.
   global.fetch = (url, opts) => {
     if (String(url).indexOf('/agents') !== -1) {
+      if (String(url).indexOf('/agents/model-selection') !== -1) {
+        const sel = {configured: true, selected_models: SELECTED.models.slice()};
+        requests.push({url: String(url), opts: opts || {}});
+        return Promise.resolve({status: 200, ok: true,
+          json: () => Promise.resolve(sel), text: () => Promise.resolve(JSON.stringify(sel))});
+      }
       const payload = {
         clients: CLIENTS.concat([{
           id: 'codex', label: 'Codex CLI', desc: 'OpenAI Codex CLI',

@@ -663,21 +663,28 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 /* ===== Phone: ≤640px ===== */
 @media (max-width: 640px){
   header{padding:10px 12px;gap:8px}
-  .header-left{width:auto;flex:1;gap:8px;min-width:0}
-  .header-right{display:flex;align-items:center;gap:6px;order:2}
-  h1{font-size:15px;flex:1;min-width:0}
+  /* 让 header-left / header-right 的子项直接参与 header 的 flex 排布：标题、
+     GitHub、语言、主题四个都待在顶部同一行（order 1-4），顶层页签（order 5）
+     独占下一整行、摆不下横向滚动，状态行（order 6）最后。display:contents 只在
+     本断点生效，宽屏 header-left / header-right 的两栏布局不受影响。 */
+  .header-left,.header-right{display:contents!important}
+  /* 真机上标题文字渲染比桌面模拟更宽：h1 必须可收缩（min-width:0 + 允许省略号），
+     否则它的 min-content 会把 GitHub/语言/主题挤到下一行。 */
+  h1{font-size:15px;flex:1 1 0%;min-width:0;order:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   h1 span{font-size:11px;margin-left:6px}
-  .gh-link{width:36px;height:36px;flex-shrink:0}
+  .gh-link{width:36px;height:36px;flex-shrink:0;order:2}
+  .lang-btn{flex-shrink:0;order:3}
+  .theme-dropdown-wrap{flex-shrink:0;order:4}
   .theme-btn{width:36px;height:36px}
   /* 窄屏下主 Tab 一排摆不下就横向滚动，而不是把行内容顶出导航条：5 个 Tab 的
      min-content 和已经超过这段留给导航的宽度（右侧按钮组占了 84px），继续用
      flex:1 平分只会把按钮压到 min-content 并溢出（issue #246 实测 320px 溢出
      59px、414px 起就不等宽）。做法与 .page-nav 在 ≤860px 时一致：按钮保持
      可读宽度，摆不下就滚动；放得下时仍然平分整行。 */
-  .main-nav{display:flex;width:100%;gap:2px;padding:3px;order:3;overflow-x:auto;
+  .main-nav{display:flex;width:100%;flex-basis:100%;gap:2px;padding:3px;order:5;overflow-x:auto;
     -webkit-overflow-scrolling:touch;scrollbar-width:thin}
   .main-nav-btn{flex:1;justify-content:center;padding:8px 2px;font-size:12px;min-height:36px;white-space:nowrap}
-  .meta{width:100%;text-align:left;font-size:11px;line-height:1.5;order:4}
+  .meta{width:100%;text-align:left;font-size:11px;line-height:1.5;order:6}
   .meta .meta-secondary{display:none}
   /* Table → card */
   .table-wrap{overflow:visible}

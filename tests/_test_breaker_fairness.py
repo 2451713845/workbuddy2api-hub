@@ -104,6 +104,38 @@ class StrikeWindowTests(unittest.TestCase):
 
 
 class LocalNetworkClassifierTests(unittest.TestCase):
+    def test_wrapped_windows_transport_errors_are_transient(self):
+        for code in (10053, 10054, 10060):
+            for reason in (OSError(code, "连接已中断"),
+                           "[WinError %d] 连接已中断" % code):
+                exc = urllib.error.URLError(reason)
+                with self.subTest(code=code, reason=repr(reason)):
+                    self.assertFalse(P.looks_like_local_network(exc))
+                    self.assertTrue(P.is_transient(exc))
+        exc = urllib.error.URLError(ConnectionResetError("连接已中断"))
+        self.assertTrue(P.is_transient(exc))
+
+    def test_connection_refused_is_not_transient(self):
+        # Refused means nothing is listening (typically a dead per-account
+        # proxy): it must keep the cooldown path, not the retry path.
+        for reason in (ConnectionRefusedError(10061, "目标计算机积极拒绝"),
+                       ConnectionRefusedError(111, "Connection refused"),
+                       "[WinError 10061] 目标计算机积极拒绝"):
+            exc = urllib.error.URLError(reason)
+            with self.subTest(reason=repr(reason)):
+                self.assertFalse(P.looks_like_local_network(exc))
+                self.assertFalse(P.is_transient(exc))
+
+    def test_numeric_network_codes_match_whole_numbers(self):
+        for code in (100, 101, 113, 10050, 10051, 10065, 11001):
+            exc = urllib.error.URLError(OSError(code, "网络不可达"))
+            with self.subTest(local_code=code):
+                self.assertTrue(P.looks_like_local_network(exc))
+        for code in (1000, 10054, 100540, 1010, 1130, 13):
+            exc = urllib.error.URLError(OSError(code, "error"))
+            with self.subTest(other_code=code):
+                self.assertFalse(P.looks_like_local_network(exc))
+
     def test_host_side_failures_are_recognised(self):
         cases = [
             socket.gaierror(-3, "Temporary failure in name resolution"),

@@ -347,6 +347,9 @@ table.account-cards tr.cool-row .cool-pill{display:inline-block;width:auto;max-w
 /* 账号列（accountRow）：账号名 + 备注 chip 一行、次要信息一行、报错一行。
    次要信息与报错的完整值都在 data-tip 悬浮气泡里。 */
 .acct-name-row{display:flex;align-items:center;gap:6px;min-width:0}
+/* 移动端专用徽章组：桌面表格视图隐藏（版本/状态有自己的两列）。 */
+.acct-mobile-badges{display:none}
+.acct-mobile-badges .badge,.acct-mobile-badges .realm-badge-intl,.acct-mobile-badges .realm-badge-cn{flex-shrink:0}
 .credit-summary{white-space:nowrap}
 .credit-kind{font-size:11px;font-weight:500;color:var(--dim)}
 .credit-stack{display:flex;flex-direction:column;align-items:flex-start;gap:3px;white-space:nowrap;min-width:0}
@@ -701,12 +704,15 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
      内容；居中会让它看起来是表格的一条汇总横幅。 */
   table.account-cards tr.cool-row td{justify-content:flex-start;text-align:left!important}
   /* Account card: grouped layout */
-  table.account-cards td:nth-child(1){order:1;grid-column:span 3;justify-content:flex-start}
+  /* 版本 / 状态两列在手机卡里不单独占位：徽章收进账号名右侧同一行（acct-name-row
+     内的 .acct-mobile-badges），省掉两行空白。 */
+  table.account-cards td:nth-child(1){display:none}
+  table.account-cards td:nth-child(3){display:none}
+  .acct-mobile-badges{display:inline-flex;align-items:center;gap:4px;margin-left:auto;flex-shrink:0}
   table.account-cards td:nth-child(1)::before,
   table.account-cards td:nth-child(2)::before,
   table.account-cards td:nth-child(3)::before{content:none}
-  table.account-cards td:nth-child(2){order:3;grid-column:span 6;flex-direction:column;align-items:flex-start;gap:2px}
-  table.account-cards td:nth-child(3){order:2;grid-column:span 3;justify-content:flex-end}
+  table.account-cards td:nth-child(2){order:1;grid-column:span 6;flex-direction:column;align-items:flex-start;gap:2px}
   table.account-cards td:nth-child(4){order:4;grid-column:span 6;flex-direction:column;align-items:stretch;gap:4px}
   table.account-cards td:nth-child(4)::before{font-size:10px}
   table.account-cards td:nth-child(5){order:5;grid-column:span 6}
@@ -7397,6 +7403,11 @@ function accountRow(a){
   const realmBadge = a.realm === 'cn'
     ? '<span class="realm-badge-cn">国内版</span>'
     : '<span class="realm-badge-intl">国际版</span>';
+  // 移动端卡片视图：版本列与状态列隐藏，徽章改在账号名右侧同行显示（见 ≤640px 块），
+  // 桌面表格视图仍用上面的 realmBadge / state 两列，行为不变。
+  const realmBadgeMobile = a.realm === 'cn'
+    ? '<span class="realm-badge-cn acct-mobile-badge">国内版</span>'
+    : '<span class="realm-badge-intl acct-mobile-badge">国际版</span>';
   // Inline handlers embed these in an HTML attribute, so they must survive
   // both the attribute and the quoted JS string. uid comes from an upstream
   // JWT; treat it as untrusted and keep it to a safe charset.
@@ -7491,6 +7502,8 @@ function accountRow(a){
     +     (a.note
           ? '<span class="note-chip has" title="点击编辑备注" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">' + esc(a.note) + '</span>'
           : '<span class="note-chip" title="点击添加备注，比如「批量」/「自用」" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">+ 备注</span>')
+    // 移动端专用：版本 + 状态徽章靠右同行（桌面隐藏，用表格自己的两列）。
+    +     '<span class="acct-mobile-badges">' + realmBadgeMobile + state + '</span>'
     +   '</div>'
     // 次要信息收成一行：值截断到几个字符，完整值走悬浮气泡（data-tip）。
     +   '<div class="acct-meta mono">'

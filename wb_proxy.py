@@ -13047,7 +13047,11 @@ def _network_error_details(exc):
     errors = (exc, getattr(exc, "reason", None))
     text = " ".join("%s %s" % (type(error).__name__, error)
                     for error in errors if error is not None).lower()
+    # HTTPError inherits OSError, but its missing attributes may be delegated
+    # to an absent/closed response on Python 3.9. HTTP status is not an OS
+    # error code, so never probe errno/winerror on that response wrapper.
     codes = {getattr(error, attr, None) for error in errors
+             if not isinstance(error, urllib.error.HTTPError)
              for attr in ("errno", "winerror")}
     # Some urllib callers only retain a string. Match the complete number:
     # the old substring "errno 100" also matched Windows ECONNRESET (10054).

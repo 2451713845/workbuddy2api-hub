@@ -136,6 +136,26 @@ class LocalNetworkClassifierTests(unittest.TestCase):
             with self.subTest(other_code=code):
                 self.assertFalse(P.looks_like_local_network(exc))
 
+    def test_http_errors_without_response_are_not_os_failures(self):
+        # HTTPError delegates missing attributes to its response on Python
+        # 3.9. With fp=None, probing errno/winerror used to raise KeyError.
+        class DelegatingHTTPError(urllib.error.HTTPError):
+            # Model that Linux 3.9 lookup on every test platform, including
+            # Windows versions whose OSError slots return None instead.
+            def __getattribute__(self, name):
+                if name in ("errno", "winerror"):
+                    raise KeyError("file")
+                return super().__getattribute__(name)
+
+        for error_type in (urllib.error.HTTPError, DelegatingHTTPError):
+            for status in (401, 429, 502):
+                error = error_type("https://up", status, "HTTP failure", {}, None)
+                for exc in (error, urllib.error.URLError(error)):
+                    with self.subTest(status=status, error_type=error_type.__name__,
+                                      wrapped=exc is not error):
+                        self.assertFalse(P.looks_like_local_network(exc))
+                        self.assertEqual(P.is_transient(exc), status >= 500)
+
     def test_host_side_failures_are_recognised(self):
         cases = [
             socket.gaierror(-3, "Temporary failure in name resolution"),

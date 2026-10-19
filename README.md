@@ -435,6 +435,9 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- **日志通道不再能打死请求**：`log()` 原先裸写 `sys.stderr`，而 `send_response()` 会先触发访问日志——启动用的终端被回收、stderr 的读端消失后，每条需要记日志的请求都会在**响应头发出之前**抛异常断开，只剩 `/health`、`/realm`、`/panel/status` 这几个静默白名单端点照常 200（看起来"服务健在"，实际 `/v1/*` 全部不可用）。现在写失败一律吞掉，日志坏了最多少一行。
+- **静默启动会告知"已有实例在运行"**：pythonw 的 stdout/stderr 指向空设备，"已有一个反代在 8788 端口运行，无需重复启动"这句话用户永远看不到，双击只表现为"启动失败"。启动脚本改为先在本窗口用 `wb_proxy.py --probe-only` 跑同一段探测（退出码 0=已有实例／端口被别的服务占用，3=端口空闲可启动），已有实例时把原因打印出来并停住等按键；`start-wb-proxy.bat` 与 `start-wb-proxy-lan.bat` 都已接入。
+
 已发布版本的完整记录（v1.4.5 ~ v1.7.16，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
 ## 七、致谢与引用声明 (Credits & References)

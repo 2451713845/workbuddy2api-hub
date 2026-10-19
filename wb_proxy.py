@@ -10267,8 +10267,16 @@ def add_log_entry(msg, level=None, tag=None):
     return entry
 
 def log(msg, level=None, tag=None):
-    sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {msg}\n")
-    sys.stderr.flush()
+    # 日志通道绝不能打死请求。send_response() 会先调 log_request()，所以 stderr 写
+    # 失败一旦抛出，异常发生在响应头发出之前：客户端只看到连接被掐、日志库里一条
+    # 不留，而 /health /realm /panel/status 因为在 log_message 静默白名单里照常
+    # 200，看起来"服务健在"（2026-10-19 线上网关的启动终端被回收后实测只剩这
+    # 三个端点能答，其余全部空响应）。
+    try:
+        sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {msg}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
     add_log_entry(msg, level=level, tag=tag)
 
 # 本地网路工具的多引擎轮换、冷却与失败分类写进看板日志（tag=webtools）
@@ -20644,6 +20652,13 @@ def running_version():
 def main():
     args = _parse_cli_args()
     _apply_cli_overrides(args)
+    if args.probe_only:
+        # 启动脚本先在本机窗口里跑一次这个检查再拉起了。静默模式下服务进程是
+        # pythonw，stdout/stderr 全指向空设备，"已有一个反代在运行、所以什么都不
+        # 用起"这句决定用户永远看不到，双击只表现为"启动失败"。
+        # 退出码就是给 cmd.exe 的判断条件：0 = 已有实例（或端口被别的服务占着，
+        # 那条错误由 _probe_running_instance 自己打印），3 = 端口是空的，可以起。
+        raise SystemExit(0 if _probe_running_instance(args) else 3)
     if _probe_running_instance(args):
         return
     api_key_generated = _bootstrap_runtime(args)
@@ -20675,6 +20690,10 @@ def _parse_cli_args():
                     help="import the desktop app credential as an account, then exit")
     ap.add_argument("--panel-password", default=None,
                     help="set the web panel password on startup (default: admin)")
+    ap.add_argument("--probe-only", action="store_true",
+                    help="only check whether a proxy already listens on the port and "
+                         "print what the launcher should say, then exit "
+                         "(0 = one is running, 3 = the port is free)")
     args = ap.parse_args()
     return args
 

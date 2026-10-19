@@ -142,6 +142,13 @@ def agents_client_allowed(client_address):
     return addr in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
 
+# 会把模型清单写进自身配置的客户端（wb_agents 里 OpenCode / DSH / Crush /
+# ZCode 的 apply 都读 ctx["models"]）：空清单会生成一个没有任何模型的
+# provider，所以空勾选要在入口拒绝。Claude Code / Codex 不读 models，空清单
+# 对它们无害，不拦。
+MODEL_EMBEDDING_CLIENTS = frozenset({"opencode", "dsh", "crush", "zcode"})
+
+
 def enrich_agent_models(models, specs):
     """把只有 id 的模型条目补上网关自己的目录规格。
 
@@ -17412,6 +17419,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_settings_reveal(query)
         if path == "/agents":
             return self._get_agents()
+        if path == "/agents/model-selection":
+            return self._get_agents_model_selection()
         if path == "/agents/available":
             # 看板启动时用这个廉价判定决定要不要显示入口：不 import
             # wb_agents、不做任何探测（issue #246）。
@@ -18801,14 +18810,31 @@ class Handler(BaseHTTPRequestHandler):
                     })
         except Exception:
             keys = []
+        selection = wb_settings.agent_model_selection(ACCOUNTS_DIR)
         return self._json(200, {
             "enabled": True,
             "clients": list(wb_agents.overview(ACCOUNTS_DIR).values()),
             "models": self._agents_models(),
+            # 「网关模型清单」里勾选的模型：一键配置只把这些写进客户端。
+            # None（从未保存）时给空列表，由 models_configured 区分「没选过」
+            # 与「选了 0 个」——前者 apply 退回完整目录，后者 apply 拒绝。
+            "selected_models": selection or [],
+            "models_configured": selection is not None,
+            # 哪些客户端会把模型清单写进自身配置（前端据此决定「一个都没勾」
+            # 时要不要在发请求前拦下来；Claude Code / Codex 不读清单）。
+            "model_embedding_clients": sorted(MODEL_EMBEDDING_CLIENTS),
             "keys": keys,
             "global_key_set": bool(API_KEY),
             "auth_required": auth_required(),
             "gateway": {"base_url": self._agents_base_url_hint()},
+        })
+
+    def _get_agents_model_selection(self):
+        """面板在「网关模型清单」勾选的模型（一键配置写进客户端的清单）。"""
+        selection = wb_settings.agent_model_selection(ACCOUNTS_DIR)
+        return self._json(200, {
+            "configured": selection is not None,
+            "selected_models": selection or [],
         })
 
     def _agents_resolve_key(self, payload, warnings):
@@ -18849,11 +18875,14 @@ class Handler(BaseHTTPRequestHandler):
                 "invalid_request_error")
         model = str(payload.get("model") or "").strip() or None
         models = payload.get("models")
-        if not models:
-            # Fall back to the gateway's discovered catalog so clients that embed
-            # model definitions (OpenCode, DSH, Crush, ZCode) receive the full
-            # model list even when the front-end omitted the field.
-            models = self._agents_models()
+        if models is None:
+            # 前端没带清单（老看板 / 直接调接口）：优先用「网关模型清单」里
+            # 勾选的模型；从未保存过勾选（升级前的老安装）才退回完整目录。
+            selection = wb_settings.agent_model_selection(ACCOUNTS_DIR)
+            if selection is None:
+                models = self._agents_models()
+            else:
+                models = [{"id": mid} for mid in selection]
         if not isinstance(models, list):
             return self._error(400, "models must be a list",
                                "invalid_request_error")
@@ -18877,6 +18906,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             specs = {}
         cleaned_models = enrich_agent_models(cleaned_models, specs)
+        if not cleaned_models and client_id in MODEL_EMBEDDING_CLIENTS:
+            return self._error(
+                400,
+                "请先在「网关模型清单」中勾选至少一个模型：只有勾选的模型"
+                "才会写入客户端配置",
+                "invalid_request_error")
         warnings = []
         try:
             api_key = self._agents_resolve_key(payload, warnings)
@@ -18918,6 +18953,23 @@ class Handler(BaseHTTPRequestHandler):
         log("agents restore: client=%s files=%d"
             % (client_id, len(result.get("restored") or [])), tag="agents")
         return self._json(200, result)
+
+    def _handle_agents_model_selection(self, payload):
+        """保存「网关模型清单」里勾选的模型；空列表是合法输入（全部取消）。"""
+        models = payload.get("models")
+        if models is None:
+            return self._error(400, "models is required", "invalid_request_error")
+        if not isinstance(models, list):
+            return self._error(400, "models must be a list",
+                               "invalid_request_error")
+        selection = wb_settings.set_agent_model_selection(ACCOUNTS_DIR, models)
+        log("agents model selection: %d model(s)" % len(selection),
+            tag="agents")
+        return self._json(200, {
+            "ok": True,
+            "configured": True,
+            "selected_models": selection,
+        })
 
     def _handle_panel(self, path):
         """Panel login, logout and the settings screen (password + API key)."""
@@ -20257,20 +20309,25 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             return self._handle_proxy_slots(path, payload)
-        if path in ("/agents/apply", "/agents/restore"):
+        if path in ("/agents/apply", "/agents/restore",
+                    "/agents/model-selection"):
             if not self._panel_ok():
                 return self._error(
                     401, "panel password required", "invalid_request_error"
                 )
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            # 勾选清单只是数据、不碰本机配置目录，所以远程看板也能保存；
+            # apply / restore 改的是网关所在机器的配置文件，只允许本机操作。
+            if path == "/agents/model-selection":
+                return self._handle_agents_model_selection(payload)
             if not self._agents_client_allowed():
                 return self._error(
                     403,
                     "agent config is only available from the machine running the gateway",
                     "invalid_request_error",
                 )
-            payload = self._payload_or_error()
-            if payload is None:
-                return
             if path == "/agents/apply":
                 return self._handle_agents_apply(payload)
             return self._handle_agents_restore(payload)

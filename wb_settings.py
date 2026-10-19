@@ -1028,6 +1028,61 @@ def set_section_max_height(accounts_dir, value):
     return number
 
 
+# 一键配置写进客户端的模型清单（DSH / OpenCode / Crush / ZCode 会把这份清单
+# 抄进自己的配置）。键不存在表示「从未选过」：面板默认全部不勾选，一键配置
+# 退回完整目录；显式保存空列表表示「用户全部取消」，一键配置会拒绝写空清单
+# ——空清单会生成一个没有模型的 provider，客户端直接不可用。
+AGENT_MODELS_KEY = "agent_models"
+# 清单写进客户端配置后会被逐条展开；200 条已远超任何出口的模型数，上限只挡
+# 手编 settings.json 把客户端配置撑爆。
+MAX_AGENT_MODELS = 200
+
+
+def _clean_agent_models(models):
+    """清洗模型 id 列表：只留非空字符串、去重保序、限量。"""
+    out = []
+    seen = set()
+    if not isinstance(models, (list, tuple)):
+        return out
+    for item in models:
+        if not isinstance(item, str):
+            continue
+        mid = item.strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        out.append(mid)
+        if len(out) >= MAX_AGENT_MODELS:
+            break
+    return out
+
+
+def agent_model_selection(accounts_dir):
+    """面板勾选的模型 id；None 表示还没保存过（与空列表语义不同）。
+
+    None 让一键配置退回完整目录（升级前的老安装行为）；[] 是用户明确全部
+    取消，一键配置会拒绝写一个空的模型清单。
+    """
+    with _lock:
+        data = load(accounts_dir)
+    raw = data.get(AGENT_MODELS_KEY)
+    if not isinstance(raw, list):
+        # 手编坏了的键（字符串 / 对象 / null）按「没保存过」处理：宁可按老行为
+        # 退回完整目录，也不要因为一条脏数据让一键配置永远拒绝写模型清单。
+        return None
+    return _clean_agent_models(raw)
+
+
+def set_agent_model_selection(accounts_dir, models):
+    """保存勾选并返回清洗后的列表；空列表也会落盘（它的语义是「全不勾」）。"""
+    cleaned = _clean_agent_models(models)
+    with _lock:
+        data = load(accounts_dir)
+        data[AGENT_MODELS_KEY] = cleaned
+        save(accounts_dir, data)
+    return cleaned
+
+
 def _clamp_refresh_minutes(value):
     """A month is well past "often enough"; the cap keeps a typo from parking
     the next refresh beyond any horizon the panel can show."""

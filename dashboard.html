@@ -4621,7 +4621,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           <div>
             <h2 style="margin:0">模型价格估算 <em id="setPricingEnabledState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              按 OpenRouter 上同名模型的价格，把每条请求的 token 折算成人民币，供面板的「OpenRouter 价估算」列与「API 等价花费」卡片使用。<b>默认开启</b>；关闭后不再向 OpenRouter 取价，也不再折算任何金额，相关列、卡片与取价控件一并隐藏（只留这个开关）。<b>重新打开会补算关闭期间的请求</b>：那段请求按之后第一次取到的价折算并标 <code>*</code>，所以关掉再打开不会丢数。
+              按 OpenRouter 上同名模型的价格，把每条请求的 token 折算成人民币，供面板的「OpenRouter 价估算」列与「API 等价花费」卡片使用。OpenRouter 的模型级价取的是 top provider 的价，多 provider 模型通常接近最低档，因此这是参考价，不等于 WorkBuddy 官方价或结算价。<b>默认开启</b>；关闭后不再向 OpenRouter 取价，也不再折算任何金额，相关列、卡片与取价控件一并隐藏（只留这个开关）。<b>重新打开会补算关闭期间的请求</b>：那段请求按之后第一次取到的价折算并标 <code>*</code>，所以关掉再打开不会丢数。
             </div>
             <div id="pricingOffNote" style="display:none;font-size:12px;color:var(--dim);margin-top:4px">
               价估算已关闭：不再取价、不再折算金额，价格列与「API 等价花费」卡片一并隐藏；重新打开后会补算关闭期间的请求。

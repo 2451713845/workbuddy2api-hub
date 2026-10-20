@@ -197,7 +197,7 @@ python tests/run_all.py realm      # 只跑名字里含 realm 的
 
 - **总开关**（「设置 → 模型价格估算」，默认开启）：关掉后价格列、「API 等价花费」卡片、取价控件与未定价清单一起隐藏，后端也不再取价与折算；重新打开会立刻抓一次价并**补算关闭期间的请求**（历史日志一个字不改，金额始终是读时算的）。
 - **计价口径**：输入按缓存命中 / 未命中两档单价拆分，输出单独单价，乘 token 数再按汇率折算；输出的 token 数取上游 `completion_tokens`（已包含推理 token，不另计）。按条件定价的模型（按输入长度或按 UTC 时段）按每条请求取最紧的那一档。
-- **定价来源**：OpenRouter 模型目录的**模型级公布价**（对应它默认路由的那家 provider）。每份价格按内容存成一条「定价策略」，每条请求只记引用了哪条策略，所以之后调价不会改写历史数字；`wb_pricing.py` 另内嵌一份快照作出厂价。
+- **定价来源**：OpenRouter 模型目录的**模型级公布价**。OpenRouter 把它定义为该模型 top provider 的价——对多 provider 模型通常就是最低档（实测 `deepseek-v4.1-flash` 的模型级价只比 34 家 provider 的最低价高 5%）。这组数字只用于「这些 token 放在 OpenRouter 上值多少钱」的参考估算，**不等于 WorkBuddy 官方价，也不能用于结算**。每份价格按内容存成一条「定价策略」，每条请求只记引用了哪条策略，所以之后调价不会改写历史数字；`wb_pricing.py` 另内嵌一份快照作出厂价。
 - **刷新**：「设置 → 定价刷新」默认每 5 分钟一次（填 0 关闭）；只有价格真的变了才写策略与时间轴，价格不动时每轮只是一次 HTTP GET。面板可看当前生效策略、上次 / 下次取价时间与失败原因，也能点「立即取价」。
 - **新增模型自动取价**：候选清单 = 内置目录 ∪ 网关实时目录，上游新上架的名字 5 分钟内进入取价；两次取价之间就被调用也会按需补价（请求路径不发网络请求）。匹配顺序：面板手填覆盖 → 人工覆盖表 → 同名唯一命中 → 变体后缀继承（剥 `-lkeap` / `-taiji` / `-volc` / `-sg` 等，仍要求唯一命中），继承可在设置里整体关掉。
 - **未定价可见**：`/pricing` 列出未定价模型及分类（别名 / OpenRouter 无对应 / 剥后缀后无唯一基准）与相似候选（仅建议，不自动采用），可在「设置 → 定价刷新」为某条手填 OpenRouter id 并登记（写 `pricing-overrides.json`，不改源码，登记后立即取价）。
@@ -442,6 +442,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **写清 OpenRouter 估价的口径**（#514）：OpenRouter 的模型级价是它 top provider 的价，多 provider 模型通常就是最低档——实测 `deepseek-v4.1-flash` 的模型级价只比 34 家最低价高 5%。README、设置页说明与定价策略备注统一改为「参考价，不等于 WorkBuddy 官方价或结算价」；按 credit 计价与 provider 区间价仍待产品决策。
 
 - **Codex 一键配置不再依赖环境变量**（#513）：Codex 0.163 在启动时解析 `env_key`，从图形界面启动时没有继承 `OPENAI_API_KEY` 就直接报 `Missing environment variable`，写进 `auth.json` 也不再兜底。现在 provider 表直接写 `experimental_bearer_token`，并顺手移除旧的 `env_key` / `env_key_instructions`；重复点一次「一键配置」就会把旧配置迁过来，`auth.json` 仍照写以兼容旧版本。
 

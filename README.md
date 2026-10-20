@@ -81,6 +81,16 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/ardeyouxipiany
 
 NAS（如飞牛 fnOS）普通用户没有 Docker 权限时，把结尾的 `bash` 换成 `sudo bash`。再次运行同一条命令即平滑升级，账号与用量数据不受影响。
 
+**部署模式**：默认 `lan`（`8788:8788`，局域网内可访问）。部署到公网服务器、或只想本机能连时，把环境变量放在管道后的 `bash` 前面：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ardeyouxipianyi/workbuddy2api-hub/main/quick-deploy.sh | WB_DEPLOY_MODE=public bash
+```
+
+- `local` / `public` 只把宿主端口绑到 `127.0.0.1`，容器内仍是 `HOST=0.0.0.0`（Docker 转发需要）；
+- `public` 请再套 Nginx / Caddy / Cloudflare Tunnel 并加 TLS，不要把 8788 直接开到公网；
+- 已经存在的 `docker-compose.yml` 不会被自动改写端口映射，脚本只提示手动调整。
+
 **方式二：NAS / 面板单文件 Compose**
 
 在 NAS 或面板的 Compose 界面新建项目并粘贴以下内容保存启动，无需拉取源码：
@@ -135,7 +145,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 181 个套件：134 个 Python + 47 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 182 个套件：135 个 Python + 47 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -442,6 +452,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **一键部署区分部署模式**（#512）：新增 `WB_DEPLOY_MODE=local|lan|public`（默认 `lan`，保持原行为）。`local`/`public` 只把宿主 8788 绑到 `127.0.0.1`，公网机需要再套反向代理；容器内 `HOST` 仍是 `0.0.0.0`。已有部署不自动改写 compose，只提示手动调整。
 
 - **写清 OpenRouter 估价的口径**（#514）：OpenRouter 的模型级价是它 top provider 的价，多 provider 模型通常就是最低档——实测 `deepseek-v4.1-flash` 的模型级价只比 34 家最低价高 5%。README、设置页说明与定价策略备注统一改为「参考价，不等于 WorkBuddy 官方价或结算价」；按 credit 计价与 provider 区间价仍待产品决策。
 

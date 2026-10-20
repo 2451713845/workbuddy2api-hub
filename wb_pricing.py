@@ -61,7 +61,7 @@ _JSON = r'''
     "sources": {
       "openrouter": "https://openrouter.ai/api/v1/models"
     },
-    "note": "单价均为「每百万 token」的美元价，取自 OpenRouter 公布的模型级价（同一模型可能由多家 provider 承接，取它默认路由那家的公布价，不是各家最低价）；按 usd_cny 折算成人民币；按条件定价的模型（输入长度阈值或 UTC 时段）另带 bands，按每条请求的输入长度与时间取档。OpenRouter 的缓存写入价与音频价，本地 usage 日志没有对应的 token 数，未计入。"
+    "note": "单价均为「每百万 token」的美元价，取自 OpenRouter 公布的模型级价（OpenRouter 定义为该模型 top provider 的价，多 provider 模型通常接近最低档；它是参考价，不等于 WorkBuddy 官方价或结算价）；按 usd_cny 折算成人民币；按条件定价的模型（输入长度阈值或 UTC 时段）另带 bands，按每条请求的输入长度与时间取档。OpenRouter 的缓存写入价与音频价，本地 usage 日志没有对应的 token 数，未计入。"
   },
   "models": {
     "deepseek-v4.1-flash": {
@@ -1054,11 +1054,11 @@ WEEKDAY_KEYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
 WEEKDAY_SHORT = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 _NOTE = ("单价均为「每百万 token」的美元价，取自 OpenRouter 公布的模型级价"
-         "（同一模型可能由多家 provider 承接，取它默认路由那家的公布价，"
-         "不是各家最低价）；按 usd_cny 折算成人民币；按条件定价的模型"
-         "（输入长度阈值或 UTC 时段）另带 bands，按每条请求的输入长度与"
-         "时间取档。OpenRouter 的缓存写入价与音频价，本地 usage 日志没有"
-         "对应的 token 数，未计入。")
+         "（OpenRouter 定义为该模型 top provider 的价，多 provider 模型"
+         "通常接近最低档；它是参考价，不等于 WorkBuddy 官方价或结算价）；"
+         "按 usd_cny 折算成人民币；按条件定价的模型（输入长度阈值或 UTC "
+         "时段）另带 bands，按每条请求的输入长度与时间取档。OpenRouter 的"
+         "缓存写入价与音频价，本地 usage 日志没有对应的 token 数，未计入。")
 
 
 def per_million(value):

@@ -1499,6 +1499,42 @@ def set_auto_switch_products(accounts_dir, products):
     return clean
 
 
+#: X-Private-Data is the official client's "may this conversation train the
+#: model" declaration. auto keeps the per-identity value the gateway already
+#: sends; true/false override it for every identity (issue #516).
+IDENTITY_KEY = "identity"
+IDENTITY_PRIVATE_DATA_VALUES = ("auto", "true", "false")
+
+
+def identity_private_data(accounts_dir):
+    """The configured X-Private-Data override: auto, true or false."""
+    raw = load(accounts_dir).get(IDENTITY_KEY)
+    if not isinstance(raw, dict):
+        return "auto"
+    value = str(raw.get("private_data") or "auto").strip().lower()
+    return value if value in IDENTITY_PRIVATE_DATA_VALUES else "auto"
+
+
+def identity_config(accounts_dir):
+    return {"private_data": identity_private_data(accounts_dir)}
+
+
+def set_identity_private_data(accounts_dir, value):
+    """Persist the X-Private-Data override. Returns the normalized value."""
+    value = str(value or "auto").strip().lower()
+    if value not in IDENTITY_PRIVATE_DATA_VALUES:
+        raise ValueError("identity.private_data must be auto, true or false")
+    with _lock:
+        data = load(accounts_dir)
+        identity = data.get(IDENTITY_KEY)
+        if not isinstance(identity, dict):
+            identity = {}
+        identity["private_data"] = value
+        data[IDENTITY_KEY] = identity
+        save(accounts_dir, data)
+    return value
+
+
 def remaining_priority_enabled(accounts_dir):
     """Whether pairs close to their estimated remaining quota are served first.
 

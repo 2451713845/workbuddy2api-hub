@@ -2241,6 +2241,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '能量': 'energy',
     '自': 'from',
     '自动切换出站身份': 'Auto-switch outbound identity',
+    '数据用途声明': 'Data usage declaration',
+    '跟随官方默认 (auto)': 'Follow official default (auto)',
+    '允许参与模型优化 (true)': 'Allow model optimization (true)',
+    '不参与模型优化 (false)': 'Do not train on this data (false)',
     '自动发现 mihomo 端口': 'Auto-discover mihomo ports',
     '自动发现失败:': 'Auto-discovery failed:',
     '自动滚屏: 关': 'Auto-scroll: off',
@@ -3865,7 +3869,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   <!-- 版本模型库与能力清单 -->
   <section>
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-      <h2 style="margin:0">网关模型清单<em id="modelsRealmTag" style="color:var(--dim);font-weight:500"></em><em id="availModelCount"></em><span id="modelPickActions" style="font-weight:400;margin-left:10px;white-space:nowrap"><button class="sec mini" onclick="applyModelPickAction('all')" title="把当前清单里的模型全部勾上（与「从未改过勾选」的默认态等价）">全选</button><button class="sec mini" onclick="applyModelPickAction('none')" title="取消全部勾选：DSH 等读取模型清单的客户端会被拦下，不会写出一份空清单">全不选</button><button class="sec mini" onclick="applyModelPickAction('invert')" title="按当前勾选状态取反：只想排除个别模型时比逐个点快">反选</button></span></h2>
+      <h2 style="margin:0">网关模型清单<em id="modelsRealmTag" style="color:var(--dim);font-weight:500"></em><em id="availModelCount"></em><span id="modelPickActions" class="page-nav-exclude" style="font-weight:400;margin-left:10px;white-space:nowrap"><button class="sec mini" onclick="applyModelPickAction('all')" title="把当前清单里的模型全部勾上（与「从未改过勾选」的默认态等价）">全选</button><button class="sec mini" onclick="applyModelPickAction('none')" title="取消全部勾选：DSH 等读取模型清单的客户端会被拦下，不会写出一份空清单">全不选</button><button class="sec mini" onclick="applyModelPickAction('invert')" title="按当前勾选状态取反：只想排除个别模型时比逐个点快">反选</button></span></h2>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="font-size:12px;color:var(--dim)">展示当前视图下官方对话大模型、上下文容量、推理/视觉能力、思考控制、默认采样参数及在售倍率</div>
         <!-- 手动刷新：强制走一次上游 /v3/config（只在当前视图的版本上，用该
@@ -4617,7 +4621,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           <div>
             <h2 style="margin:0">模型价格估算 <em id="setPricingEnabledState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              按 OpenRouter 上同名模型的价格，把每条请求的 token 折算成人民币，供面板的「OpenRouter 价估算」列与「API 等价花费」卡片使用。<b>默认开启</b>；关闭后不再向 OpenRouter 取价，也不再折算任何金额，相关列、卡片与取价控件一并隐藏（只留这个开关）。<b>重新打开会补算关闭期间的请求</b>：那段请求按之后第一次取到的价折算并标 <code>*</code>，所以关掉再打开不会丢数。
+              按 OpenRouter 上同名模型的价格，把每条请求的 token 折算成人民币，供面板的「OpenRouter 价估算」列与「API 等价花费」卡片使用。OpenRouter 的模型级价取的是 top provider 的价，多 provider 模型通常接近最低档，因此这是参考价，不等于 WorkBuddy 官方价或结算价。<b>默认开启</b>；关闭后不再向 OpenRouter 取价，也不再折算任何金额，相关列、卡片与取价控件一并隐藏（只留这个开关）。<b>重新打开会补算关闭期间的请求</b>：那段请求按之后第一次取到的价折算并标 <code>*</code>，所以关掉再打开不会丢数。
             </div>
             <div id="pricingOffNote" style="display:none;font-size:12px;color:var(--dim);margin-top:4px">
               价估算已关闭：不再取价、不再折算金额，价格列与「API 等价花费」卡片一并隐藏；重新打开后会补算关闭期间的请求。
@@ -4747,6 +4751,28 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
               </label>
             </div>
             <button onclick="saveAutoSwitchProduct(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">数据用途声明 <em id="setPrivateDataState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              X-Private-Data 会随每次模型请求发送，声明这段对话是否允许参与模型优化。auto 保持三套出站身份各自的官方默认；true / false 无条件覆盖。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              这是对上游的数据用途声明，只影响 X-Private-Data 头，不改变请求内容。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <select id="setPrivateData" style="min-width:240px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+              <option value="auto">跟随官方默认 (auto)</option>
+              <option value="true">允许参与模型优化 (true)</option>
+              <option value="false">不参与模型优化 (false)</option>
+            </select>
+            <button onclick="savePrivateData(this)">保存</button>
           </div>
         </div>
       </section>
@@ -5373,8 +5399,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
             <div class="realm-filter" style="margin:0">
-              <button type="button" class="active" data-filter="all" onclick="filterCreditsPackages('all', this)">全部</button>
-              <button type="button" data-filter="active" onclick="filterCreditsPackages('active', this)">有剩余</button>
+              <button type="button" data-filter="all" onclick="filterCreditsPackages('all', this)">全部</button>
+              <button type="button" class="active" data-filter="active" onclick="filterCreditsPackages('active', this)">有剩余</button>
               <button type="button" data-filter="expiring" onclick="filterCreditsPackages('expiring', this)">即将到期</button>
               <button type="button" data-filter="exhausted" onclick="filterCreditsPackages('exhausted', this)">已用完/过期</button>
             </div>
@@ -8777,13 +8803,13 @@ async function scanDesktop(btn){
 /* --------------------------- credits detail modal --------------------------- */
 let CURRENT_CREDIT_DETAIL_UID = null;
 let CURRENT_CREDITS_DATA = null;
-let CURRENT_PKG_FILTER = 'all';
+let CURRENT_PKG_FILTER = 'active';
 let CURRENT_PKG_SEARCH = '';
 let CURRENT_PKG_SORT = 'expiry_asc';
 
 async function openCreditsDetail(uid, forceRefresh = false){
   CURRENT_CREDIT_DETAIL_UID = uid;
-  CURRENT_PKG_FILTER = 'all';
+  CURRENT_PKG_FILTER = 'active';
   CURRENT_PKG_SEARCH = '';
   CURRENT_PKG_SORT = 'expiry_asc';
 
@@ -8971,6 +8997,7 @@ function renderCreditsDetail(credits, acct){
     if(!ep && Array.isArray(credits.packages)){
       const candidates = [];
       credits.packages.forEach(p => {
+        if(p.no_expiry) return;
         const rem = Number(p.remain ?? p.CycleCapacityRemain) || 0;
         const eStr = p.cycle_end_time || p.cycleEndTime || p.CycleEndTime || p.expired_time || p.ExpiredTime || '';
         if(rem > 0 && eStr && eStr !== '-'){
@@ -9065,8 +9092,12 @@ function renderCreditsPackagesTable(){
     const endTime = p.cycle_end_time || p.cycleEndTime || p.CycleEndTime || p.expired_time || p.ExpiredTime || '';
     const startTime = p.cycle_start_time || p.cycleStartTime || p.CycleStartTime || '';
 
+    // no_expiry：上游的抵扣截止时间远超真实周期，CycleEndTime 只是每月
+    // 计费边界。这种包不能拿周期结束算倒计时，否则表格会显示「剩 12 天」
+    // 而最近到期卡片又正确地不认它（#474）。
+    const noExpiry = !!p.no_expiry;
     let days = (p.days_left !== undefined && p.days_left !== null) ? Number(p.days_left) : null;
-    if(days === null && endTime && endTime !== '-'){
+    if(days === null && !noExpiry && endTime && endTime !== '-'){
       try {
         const cleanStr = endTime.replace(/-/g, '/').replace('T', ' ');
         const endTs = new Date(cleanStr).getTime();
@@ -9091,6 +9122,7 @@ function renderCreditsPackagesTable(){
       cycle_start_time: startTime,
       cycle_end_time: endTime,
       days_left: days,
+      no_expiry: noExpiry,
       is_expired: isExpired
     };
   });
@@ -9171,6 +9203,8 @@ function renderCreditsPackagesTable(){
       } else {
         expiryBadge = '<span class="badge mini">长期有效</span>';
       }
+    } else if(p.no_expiry){
+      expiryBadge = '<span class="badge mini">长期有效</span>';
     } else if(p.cycle_end_time){
       expiryBadge = '<span class="badge mini">正常</span>';
     }
@@ -9212,7 +9246,7 @@ function renderCreditsPackagesTable(){
       + '</td>'
       + '<td style="text-align:center;padding:8px 10px">'
       +   (expiryBadge ? ('<div style="margin-bottom:3px">' + expiryBadge + '</div>') : '')
-      +   '<div class="mono" style="font-size:11px;color:var(--fg)" title="到期时间">' + esc(cycleEndTimeStr) + '</div>'
+      +   '<div class="mono" style="font-size:11px;color:var(--fg)" title="' + (p.no_expiry ? '计费周期结束（积分不过期）' : '到期时间') + '">' + esc(cycleEndTimeStr) + '</div>'
       +   (cycleStartTimeStr ? ('<div class="mono" style="font-size:10px;color:var(--dim)" title="生效时间">自 ' + esc(cycleStartTimeStr.slice(0, 10)) + '</div>') : '')
       + '</td>'
       + '<td style="text-align:right;padding:8px 10px;font-weight:600">' + fmt(pSize) + '</td>'
@@ -9945,7 +9979,10 @@ function pageNavLabel(section, index){
   const h2 = section.querySelector('h2');
   if(h2){
     const clone = h2.cloneNode(true);
-    clone.querySelectorAll('em').forEach(el => el.remove());
+    // em 是计数/版本这类附属标注；.page-nav-exclude 是标题里那些不该进导航的
+    // 控件（例如「网关模型清单」标题里的 全选 / 全不选 / 反选 按钮）——它们
+    // 只是摆在同一行，不是标题文本，混进来会让导航项和锚点 id 都带上按钮名。
+    clone.querySelectorAll('em, .page-nav-exclude').forEach(el => el.remove());
     const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
     if(text) return text;
   }
@@ -10704,6 +10741,16 @@ async function loadSettings(showToast){
         const input = document.getElementById(pair[0]);
         if(input) input.checked = autoSwitchProducts.indexOf(pair[1]) >= 0;
       });
+      const privateData = (data.identity && data.identity.private_data) || 'auto';
+      const privateDataInput = document.getElementById('setPrivateData');
+      if(privateDataInput) privateDataInput.value = privateData;
+      const privateDataState = document.getElementById('setPrivateDataState');
+      if(privateDataState){
+        privateDataState.textContent = privateData === 'auto'
+          ? '(跟随身份默认)' : ('(' + privateData + ')');
+        privateDataState.style.color = privateData === 'auto'
+          ? 'var(--dim)' : 'var(--accent2)';
+      }
       const dailyWeb = data.daily_chat_web !== false;
       const dailyWebInput = document.getElementById('setDailyChatWeb');
       if(dailyWebInput) dailyWebInput.checked = dailyWeb;
@@ -11355,6 +11402,22 @@ async function saveAutoSwitchProduct(btn){
     await postJSON('/settings/save', {auto_switch_product: value,
                                       auto_switch_products: products});
     toast(value ? '已启用：429 时自动切换出站身份' : '已关闭自动切换出站身份', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function savePrivateData(btn){
+  const el = document.getElementById('setPrivateData');
+  const value = el ? el.value : 'auto';
+  if(['auto', 'true', 'false'].indexOf(value) < 0) return;
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {identity: {private_data: value}});
+    toast('已保存数据用途声明: ' + value, 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

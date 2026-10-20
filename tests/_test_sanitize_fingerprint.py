@@ -58,6 +58,51 @@ class FingerprintSanitizationTests(unittest.TestCase):
         self.assertIn(clean, sanitized[3]["content"])
         self.assertNotIn("from OhMyOpenCode", sanitized[3]["content"])
 
+class DshHarnessChannelFingerprintTests(unittest.TestCase):
+    """DSH（DeepSeek Harness）系统提示首句的渠道指纹（与 #382 / #506 同类）。
+
+    上游对连续短语做大小写不敏感的渠道校验，命中即 400 / code 11128。逐句二分
+    确认：整句触发，拆词或单独 ``DeepSeek Harness`` 都不触发；只插入一个 "the"
+    改变短语结构后即不再命中。
+    """
+
+    FP = "You are an AI agent powered by DeepSeek Harness."
+    CLEAN = "You are an AI agent powered by the DeepSeek Harness."
+
+    def test_exact_phrase_rewritten(self):
+        self.assertEqual(P.sanitize_text(self.FP), self.CLEAN)
+
+    def test_case_insensitive(self):
+        self.assertEqual(P.sanitize_text(self.FP.upper()), self.CLEAN)
+        self.assertEqual(P.sanitize_text(self.FP.lower()), self.CLEAN)
+
+    def test_embedded_in_system_prompt(self):
+        text = self.FP + "\n\nYou are a coding agent."
+        out = P.sanitize_text(text)
+        self.assertEqual(out, self.CLEAN + "\n\nYou are a coding agent.")
+        self.assertFalse(P.has_fingerprint(out))
+
+    def test_idempotent(self):
+        once = P.sanitize_text(self.FP)
+        self.assertEqual(P.sanitize_text(once), once)
+
+    def test_partial_phrases_untouched(self):
+        # 只有连续整句是已确认的指纹；单独的词组不触碰。
+        for text in ("DeepSeek Harness", "You are an AI agent.",
+                     "powered by DeepSeek Harness"):
+            self.assertEqual(P.sanitize_text(text), text)
+            self.assertFalse(P.has_fingerprint(text))
+
+    def test_sanitize_messages_covers_system_role(self):
+        messages = [
+            {"role": "system", "content": self.FP},
+            {"role": "user", "content": "hi"},
+        ]
+        out = P.sanitize_messages(messages)
+        self.assertEqual(out[0]["content"], self.CLEAN)
+        self.assertEqual(out[1]["content"], "hi")
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -457,6 +457,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 - **修复「数据用途声明」文案反了**（#528）：`X-Private-Data` 是「数据私有」声明，`true` = 不参与模型优化、`false` = 允许参与；下拉选项与英文词条此前正好相反，用户按文案选择会得到相反的效果。已交换两处文案，并加 4 项断言。
 
 - **修复模型清单「消费倍率」列截断**（#527）：带「免费账号不可用」胶囊的行在 1366/1440/1512 宽度下被 `nowrap` 裁掉第二枚胶囊；该列改用 `rate-cell` 类允许换行，不再依赖会被 i18n 翻译的 `data-label` 选择器。
+- **网页活跃定时可单独设置（分钟级）**：`schedule.daily_chat` 支持 1–24 个 `HH:MM` 时段，设置页的「每日活跃定时」输入框可直接编辑，改完 30 秒内生效、无需重启。留空时保持旧行为（跟随签到整点 09:00/21:00）；填写后每日活跃只在这些时刻触发。新增 14 项单测。 / The web activity can now have its own minute-level slots: `schedule.daily_chat` takes 1–24 `HH:MM` times, editable from the settings page and picked up within 30 seconds without a restart. Empty keeps the old behaviour (the checkin hours); with slots set, the activity only runs at those times. Covered by 14 new tests.
 
 - **修复全量刷新积分在默认间隔下崩溃**：`_credits_sweep()` 在账号间使用 `random.uniform(0.8, 1.2)` 做拟人间隔，但 `wb_proxy.py` 漏了 `import random`，多账号点「一键刷新积分」会以 `NameError` 中断，单账号与 `WB_CREDITS_SWEEP_GAP_MS=0` 不受影响。补上导入，并新增 1 项回归测试，实际走默认 800~1200ms 抖动路径。 / Fix the full credit sweep crashing at the default pacing: `_credits_sweep()` used `random.uniform(0.8, 1.2)` between accounts, but `wb_proxy.py` never imported `random`, so "refresh all credits" failed with `NameError`; single-account refreshes and `WB_CREDITS_SWEEP_GAP_MS=0` were unaffected. Add the import and one regression test that exercises the default 800-1200 ms jitter path.
 - **成长任务补充「无畏契约拼豆专家」**：`WorkBuddy_Valorant` 登记为专家任务，事件固定使用真实专家 id `ex_xQHHD1u5Jkua`，不再走通用专家池；一键做任务时自动推进并领奖。实测一个国内版账号上报后进度 0→1，领奖 +100 积分、+5 能量。

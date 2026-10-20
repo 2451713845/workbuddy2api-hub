@@ -972,7 +972,9 @@ def set_schedule_hours(accounts_dir, value):
         current = data.get("schedule")
         if not isinstance(current, dict):
             current = {}
-        merged = {}
+        # Keep keys this function does not own (schedule.daily_chat), so
+        # editing the hourly grid cannot silently drop the web-activity times.
+        merged = dict(current)
         for key in SCHEDULE_KEYS:
             if key in value:
                 hours = _normalize_hours(value.get(key))
@@ -985,6 +987,82 @@ def set_schedule_hours(accounts_dir, value):
         data["schedule"] = merged
         save(accounts_dir, data)
     return merged
+
+
+#: 网页活跃（国际版每日活跃）的独立时段，HH:MM。空表示跟随 checkin 整点，
+#: 与旧版行为一致。24 个时段已经覆盖一整天的每个小时。
+DAILY_CHAT_TIMES_MAX = 24
+
+
+def _normalize_times(value):
+    """Coerce a list / comma string into sorted unique HH:MM strings, or None.
+
+    Full-width colons are accepted (the panel and a Chinese keyboard produce
+    them); anything that is not a two-part clock time is dropped. None means
+    "no valid entry", which the caller treats as a validation error on write
+    and as "unset" on read.
+    """
+    if isinstance(value, str):
+        raw = re.split(r"[,，\s]+", value.strip()) if value.strip() else []
+    elif isinstance(value, (list, tuple)):
+        raw = list(value)
+    else:
+        return None
+    out = set()
+    for item in raw:
+        text = str(item or "").strip().replace("：", ":")
+        if not text:
+            continue
+        parts = text.split(":")
+        if len(parts) != 2:
+            continue
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1])
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            out.add("%02d:%02d" % (hour, minute))
+    return sorted(out)[:DAILY_CHAT_TIMES_MAX] if out else None
+
+
+def daily_chat_times(accounts_dir):
+    """The web-activity slots; [] means "follow the checkin hours"."""
+    raw = load(accounts_dir).get("schedule")
+    if not isinstance(raw, dict):
+        return []
+    return _normalize_times(raw.get("daily_chat")) or []
+
+
+def set_daily_chat_times(accounts_dir, value):
+    """Persist the web-activity slots; an empty value clears them.
+
+    Returns the normalized list. Invalid non-empty input raises ValueError so
+    the caller can answer 400 instead of storing a schedule that does nothing.
+    """
+    empty = False
+    if isinstance(value, str):
+        empty = not value.strip()
+    elif isinstance(value, (list, tuple)):
+        empty = not value
+    if empty:
+        times = []
+    else:
+        times = _normalize_times(value)
+        if times is None:
+            raise ValueError("schedule.daily_chat must be HH:MM times")
+    with _lock:
+        data = load(accounts_dir)
+        current = data.get("schedule")
+        if not isinstance(current, dict):
+            current = {}
+        if times:
+            current["daily_chat"] = times
+        else:
+            current.pop("daily_chat", None)
+        data["schedule"] = current
+        save(accounts_dir, data)
+    return times
 
 
 def section_max_height(accounts_dir):

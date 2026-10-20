@@ -10109,6 +10109,8 @@ def runtime_settings_view():
         "pricing_refresh_minutes": wb_settings.pricing_refresh_minutes(ACCOUNTS_DIR),
         "credits_refresh_hours": wb_settings.credits_refresh_hours(ACCOUNTS_DIR),
         "section_max_height": wb_settings.section_max_height(ACCOUNTS_DIR),
+        "schedule": dict(wb_settings.schedule_hours(ACCOUNTS_DIR),
+                         daily_chat=wb_settings.daily_chat_times(ACCOUNTS_DIR)),
         "ui_language": wb_settings.ui_language(ACCOUNTS_DIR),
         "pricing_variant_inherit": wb_settings.pricing_variant_inherit(ACCOUNTS_DIR),
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
@@ -18770,6 +18772,26 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             reply["section_max_height"] = \
                 wb_settings.set_section_max_height(ACCOUNTS_DIR, number)
+        if "schedule" in payload:
+            raw = payload.get("schedule")
+            if not isinstance(raw, dict):
+                return self._error(400, "schedule must be an object",
+                                   "invalid_request_error")
+            if "daily_chat" in raw:
+                try:
+                    wb_settings.set_daily_chat_times(ACCOUNTS_DIR,
+                                                     raw.get("daily_chat"))
+                except ValueError as exc:
+                    return self._error(400, str(exc), "invalid_request_error")
+            hours_patch = {k: v for k, v in raw.items() if k != "daily_chat"}
+            if hours_patch:
+                try:
+                    wb_settings.set_schedule_hours(ACCOUNTS_DIR, hours_patch)
+                except ValueError as exc:
+                    return self._error(400, str(exc), "invalid_request_error")
+            reply["schedule"] = dict(
+                wb_settings.schedule_hours(ACCOUNTS_DIR),
+                daily_chat=wb_settings.daily_chat_times(ACCOUNTS_DIR))
         if "ui_language" in payload:
             # Instance-wide default language. The dashboard overrides this per
             # browser with localStorage; this value is the fallback when no

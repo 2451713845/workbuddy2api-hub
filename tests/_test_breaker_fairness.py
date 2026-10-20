@@ -13,6 +13,7 @@
 
     python tests/_test_breaker_fairness.py
 """
+import io
 import json
 import os
 import socket
@@ -231,6 +232,35 @@ class ChatPathTests(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             self._run(urllib.error.HTTPError("https://up", 502, "bad gateway", {}, None))
         self.assertNotIsInstance(ctx.exception, P.LocalNetworkError)
+        self.assertGreaterEqual(self.account.fails, 1)
+
+    def test_model_scoped_500_does_not_charge_the_account(self):
+        body = io.BytesIO(
+            b'{"code":11134,"msg":"the model provider is temporarily unavailable"}')
+        failure = urllib.error.HTTPError(
+            "https://up", 500, "Internal Server Error", {}, body)
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._run(failure)
+        self.assertEqual(self.account.fails, 0, "模型级 5xx 不该记在账号头上")
+        self.assertEqual(self.account.breaker_until, 0.0)
+        self.assertIn("11134",
+                      P.read_http_error(ctx.exception).decode("utf-8"))
+
+    def test_plain_500_still_charges_the_account(self):
+        body = io.BytesIO(b'{"code":99999,"msg":"boom"}')
+        failure = urllib.error.HTTPError(
+            "https://up", 500, "Internal Server Error", {}, body)
+        with self.assertRaises(urllib.error.HTTPError):
+            self._run(failure)
+        self.assertGreaterEqual(self.account.fails, 1)
+
+    def test_model_scoped_penalty_escape_hatch(self):
+        body = io.BytesIO(b'{"code":11134,"msg":"model unavailable"}')
+        failure = urllib.error.HTTPError(
+            "https://up", 500, "Internal Server Error", {}, body)
+        with mock.patch.dict(os.environ, {"WB_MODEL_SCOPED_ERRORS_PENALIZE": "1"}):
+            with self.assertRaises(urllib.error.HTTPError):
+                self._run(failure)
         self.assertGreaterEqual(self.account.fails, 1)
 
     def test_generic_failure_is_logged_with_the_account(self):

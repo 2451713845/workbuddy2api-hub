@@ -19463,11 +19463,16 @@ class Handler(BaseHTTPRequestHandler):
             if len(new) < 4:
                 return self._error(400, "new password must be at least 4 characters", "invalid_request_error")
             wb_settings.set_panel_password(ACCOUNTS_DIR, new)
+            log("panel      : password changed")
             if new != wb_settings.DEFAULT_PANEL_PASSWORD:
                 # Rotating the password invalidates every other browser session.
                 PANEL.revoke_all()
             token = PANEL.create()
-            return self._json(200, {"ok": True, "token": token})
+            return self._json(200, {
+                "ok": True, "token": token,
+                "using_default_password":
+                    new == wb_settings.DEFAULT_PANEL_PASSWORD,
+            })
         return self._error(404, "not found", "invalid_request_error")
     def _handle_accounts(self, path, payload):
         """Account-management endpoints (dashboard uses these)."""

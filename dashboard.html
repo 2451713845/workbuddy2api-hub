@@ -10961,9 +10961,12 @@ async function savePanelPassword(btn){
     document.getElementById('setPwdNew').value = '';
     toast('面板密码已更新', 'ok');
     const pwdState = document.getElementById('setPwdState');
+    // 以服务端返回为准：如果保存落到另一个实例，界面上不能假装已生效。
+    const usingDefault = (data.using_default_password !== undefined)
+      ? !!data.using_default_password : (nw === 'admin');
     if(pwdState){
-      pwdState.textContent = (nw === 'admin') ? '(当前为默认密码)' : '(已自定义)';
-      pwdState.style.color = (nw === 'admin') ? 'var(--warn)' : 'var(--accent2)';
+      pwdState.textContent = usingDefault ? '(当前为默认密码)' : '(已自定义)';
+      pwdState.style.color = usingDefault ? 'var(--warn)' : 'var(--accent2)';
     }
   } catch(e) {
     toast('修改失败: ' + e.message, 'bad');

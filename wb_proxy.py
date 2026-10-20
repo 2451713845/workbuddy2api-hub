@@ -20,6 +20,7 @@ import calendar
 import errno
 import hashlib
 import heapq
+import http.client
 import io
 import ipaddress
 from collections import deque
@@ -13819,7 +13820,8 @@ def _free_model_credit_fallback_enabled():
 
 
 def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None,
-                  allow_credit_fallback=True, allow_product_switch=True):
+                  allow_credit_fallback=True, allow_product_switch=True,
+                  pin_account=None, defer_egress_success=False):
     # Refresh the daily guards before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
@@ -13836,7 +13838,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             remaining_schedule_weights() if remaining_priority_enabled() else None)
     realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
     model = str(payload.get("model") or "")
-    pinned = pinned_account()
+    pinned = pin_account if pin_account is not None else pinned_account()
     if pinned is not None:
         if pinned.realm != realm:
             raise PinnedAccountError(
@@ -14034,9 +14036,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                                        proxy=account.proxy)
             _apply_stream_idle_timeout(resp, idle_timeout)
             account.note_success(model=model)
-            if egress_backoff:
+            if egress_backoff and not defer_egress_success:
                 # This outbound path just served a request, so its transient
                 # streak is over (same rule as the account's note_success).
+                # Callers that read the body afterwards defer this to the end
+                # of the read: a stream that dies mid-body is not a success.
                 wb_egress.note_success(
                     wb_upstream_pool.egress_key(chat_url, account.proxy))
             reset_switch_counter(account, model)
@@ -14627,6 +14631,13 @@ def iter_sse_lines(source, block_size=SSE_READ_BLOCK, before_read=None):
             before_read()
         chunk = read1(block_size)
         if not chunk:
+            # http.client.read1() returns b"" when the peer closes early and
+            # does not raise for a Content-Length response; without this check
+            # a truncated stream looks like a clean EOF and the retry path in
+            # _chat_stream_response never sees it (issue #522).
+            remaining = getattr(source, "length", 0) or 0
+            if remaining > 0:
+                raise http.client.IncompleteRead(b"", remaining)
             break
         buf += chunk
         if b"\n" not in buf:
@@ -20910,7 +20921,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, key_blocked, "invalid_request_error")
             upstream, account, effort = open_upstream(
                 payload, session_key=session_key, target_realm=req_realm,
-                prebuilt_body=forwarded)
+                prebuilt_body=forwarded, defer_egress_success=True)
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -20961,21 +20972,32 @@ class Handler(BaseHTTPRequestHandler):
                                    " - add or enable one at the dashboard (/)")
             return self._error(502, f"upstream unreachable: {exc}")
         with upstream:
+            def reopen_stream():
+                # Same account, same egress: only the TCP connection is new.
+                return open_upstream(
+                    payload, session_key=session_key, target_realm=req_realm,
+                    prebuilt_body=forwarded, pin_account=account,
+                    defer_egress_success=True)
             if want_stream:
                 return self._chat_stream_response(
-                    upstream, model, fp, account, t_start, effort=effort)
+                    upstream, model, fp, account, t_start, effort=effort,
+                    reopen=reopen_stream)
             return self._chat_nonstream_response(
                 upstream, model, fp, account, t_start, effort=effort)
 
-    def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None):
-            self.send_response(200)
+    def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None,
+                              reopen=None, headers_sent=False, retried=False):
+            if not headers_sent:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                if cors_origin_allowed(self.path):
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+            # A retry reuses the headers already on the wire; the client has not
+            # seen a single byte, so a fresh chunk id is safe.
             stream_chunk_id = f"chatcmpl-wb-{uuid.uuid4().hex[:16]}"
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "close")
-            if cors_origin_allowed(self.path):
-                self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
             emitted = False
             last_usage = None
             first_ms = None
@@ -20990,6 +21012,15 @@ class Handler(BaseHTTPRequestHandler):
             # 攒到「下一个可能阻塞的读之前」再写，不改变任何延迟：块边界就是
             # socket 里当前已经有的全部字节（见 iter_sse_lines 的 before_read）。
             out_buf = []
+            # Egress accounting is settled when the read finishes, not when the
+            # headers arrive: a stream that dies mid-body must leave a streak
+            # behind (issue #522). retried means this request already had a
+            # failed read; a successful retry does not erase that signal.
+            egress_on = wb_settings.egress_backoff_enabled(ACCOUNTS_DIR)
+            egress_key = None
+            if egress_on:
+                egress_key = wb_upstream_pool.egress_key(
+                    account.chat_base_url() + CHAT_PATH, account.proxy)
 
             def flush_out():
                 if out_buf:
@@ -21082,6 +21113,34 @@ class Handler(BaseHTTPRequestHandler):
                 # Upstream quit mid-stream (timeout, incomplete read, ...).
                 # The client would otherwise get a truncated stream with no
                 # terminal marker, and the traceback reached the HTTP layer.
+                if egress_on and egress_key:
+                    # The egress did not finish the read; record it here instead
+                    # of at header time so the streak can actually grow.
+                    wb_egress.note_transient(egress_key)
+                if not emitted and reopen is not None:
+                    # Nothing reached the client yet, so a transparent retry on
+                    # the same account/egress looks like a TCP reconnect. One
+                    # retry only; the recursive call reuses the sent headers.
+                    try:
+                        upstream.close()
+                    except Exception:
+                        pass
+                    new_upstream = None
+                    try:
+                        new_upstream, new_account, new_effort = reopen()
+                    except Exception:
+                        new_upstream = None
+                    if new_upstream is not None:
+                        try:
+                            return self._chat_stream_response(
+                                new_upstream, model, fp, new_account, t_start,
+                                effort=new_effort, reopen=None,
+                                headers_sent=True, retried=True)
+                        finally:
+                            try:
+                                new_upstream.close()
+                            except Exception:
+                                pass
                 wall = int((time.time() - t_start) * 1000)
                 record_error(model, 502, "stream aborted: %s" % exc,
                              elapsed_ms=wall, account=account.uid,
@@ -21101,6 +21160,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(f"data: {err}\n\n".encode("utf-8"))
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
+            if egress_on and egress_key and emitted and not retried:
+                # A full read (not a retried one) ends the streak.
+                wb_egress.note_success(egress_key)
             wall = int((time.time() - t_start) * 1000)
             if last_usage is None or (last_usage.get("total_tokens") or 0) == 0:
                 full_s = "".join(streamed_text)
@@ -21128,12 +21190,21 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def _chat_nonstream_response(self, upstream, model, fp, account, t_start, effort=None):
+        egress_on = wb_settings.egress_backoff_enabled(ACCOUNTS_DIR)
+        egress_key = None
+        if egress_on:
+            egress_key = wb_upstream_pool.egress_key(
+                account.chat_base_url() + CHAT_PATH, account.proxy)
         try:
             result = aggregate_stream(upstream, model, None)
         except Exception as exc:
+            if egress_on and egress_key:
+                wb_egress.note_transient(egress_key)
             record_error(model, 502, str(exc), elapsed_ms=int((time.time() - t_start) * 1000),
                          account=account.uid, key=self._key_id())
             return self._error(502, f"upstream stream error: {exc}")
+        if egress_on and egress_key:
+            wb_egress.note_success(egress_key)
         wall = int((time.time() - t_start) * 1000)
         first_at = result.get("first_chunk_at")
         # Measured from request arrival so streaming and non-streaming are comparable.

@@ -145,7 +145,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 182 个套件：135 个 Python + 47 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 183 个套件：136 个 Python + 47 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -452,6 +452,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **流式断流：首字节前自动重试一次，出口退避按「读完」记账**（#522）：`open_upstream` 拿到响应头就返回，`IncompleteRead` 发生在 `_chat_stream_response` 读 body 时，回不到重试循环；chat 路径还补一个 `[DONE]` 当作正常结束。现在 `emitted=False`（客户端一个字节都没收到）时在同一账号、同一出口上重开一次，递归复用已经发出的响应头；`iter_sse_lines` 对 Content-Length 提前 EOF 补抛 `IncompleteRead`。出口维度的成功记账从「拿到响应头」挪到「流读完」：读流断掉记 transient，重试成功不抵消这次信号，干净的流才清零。`emitted=True` 的截断仍按原样收尾（可选 error 帧留待后续）。
 
 - **修复把日限额改回 0 不生效**：`apply_daily_guards()` 此前只对「至少一个作用域 > 0」的护栏推送新值，而账号对象上的 `daily_token_limit` / `daily_credit_limit` / `model_daily_token_limit` 只存在于内存（`Account.__init__` 归零、不落盘）。于是「关掉限额」恰好成了唯一推不出去的那次编辑：号上还留着上一次的非零值，面板显示旧限额、账号一直 `dailyLimitBlocked`，直到进程重启才恢复。现在**设置保存路径**（`refresh=True`）会把三条护栏都推一次（值为 0 也推），把旧值覆盖回落；请求热路径仍维持「没配限额就完全不碰池子」的原有契约，不为此多付开销。计数仍只在至少一条护栏开着时才折叠，`stats is None` 时池侧保留上次计数，所以「没配限额 -> 计数未知 -> 永不 park」以及关闭限额的行为都与从前一致。新增 `tests/_test_daily_token_limit.py` 的 `GuardClearTests`（2 例）——走 `apply_daily_guards()` 而非直接调 pool，复现并钉住这条路径。 / Fix turning a daily limit back to 0 having no effect: `apply_daily_guards()` only published a guard when at least one scope was above 0, while the per-account limit fields live in memory only (set to 0 in `Account.__init__`, never persisted). "Turn the limit off" was therefore the one edit that never reached the pool - the accounts kept the last non-zero value and stayed parked until the process restarted. The settings-save path (`refresh=True`) now publishes all three guards even when every value is 0, overwriting the stale ones, while the request hot path keeps its "no limit configured -> do not touch the pool" contract and pays nothing extra. Counters are still folded only when at least one guard is on (`stats is None` keeps the last known counts), leaving the "no limit -> unknown count -> never park" rule untouched. `GuardClearTests` (2 cases) in `tests/_test_daily_token_limit.py` calls `apply_daily_guards()` itself (not the pool directly) to pin it.
 - **一键部署区分部署模式**（#512）：新增 `WB_DEPLOY_MODE=local|lan|public`（默认 `lan`，保持原行为）。`local`/`public` 只把宿主 8788 绑到 `127.0.0.1`，公网机需要再套反向代理；容器内 `HOST` 仍是 `0.0.0.0`。已有部署不自动改写 compose，只提示手动调整。

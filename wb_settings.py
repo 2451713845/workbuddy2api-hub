@@ -1869,6 +1869,73 @@ def set_daily_chat_web_timeout(accounts_dir, seconds):
     return seconds
 
 
+#: 用户自定义提示词的条数上限。内置池已有 300 条，这里只限制额外添加的部分，
+#: 免得一个手滑的粘贴把每次巡检的随机池撑到无意义的大小。
+DAILY_CHAT_WEB_PROMPTS_MAX = 200
+#: 单条提示词的长度上限（UTF-8 字节）。与 Go 版的 200 字节保持一致。
+DAILY_CHAT_WEB_PROMPT_MAX_LEN = 200
+
+
+def _clean_web_prompts(value):
+    """Coerce a list / newline string into deduplicated prompt lines."""
+    if isinstance(value, str):
+        raw = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    elif isinstance(value, (list, tuple)):
+        raw = list(value)
+    else:
+        return []
+    out = []
+    seen = set()
+    for item in raw:
+        prompt = str(item or "").strip()
+        if not prompt:
+            continue
+        if len(prompt.encode("utf-8")) > DAILY_CHAT_WEB_PROMPT_MAX_LEN:
+            continue
+        if prompt in seen:
+            continue
+        seen.add(prompt)
+        out.append(prompt)
+        if len(out) >= DAILY_CHAT_WEB_PROMPTS_MAX:
+            break
+    return out
+
+
+def daily_chat_web_random_prompt(accounts_dir):
+    """Whether the web leg draws a random prompt instead of always sending Hi.
+
+    Off by default: the daily activity is one throwaway turn, and an install
+    that predates the setting keeps sending the same one-word prompt it always
+    did.
+    """
+    return load(accounts_dir).get("daily_chat_web_random_prompt") is True
+
+
+def set_daily_chat_web_random_prompt(accounts_dir, enabled):
+    """Persist the random-prompt toggle. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data["daily_chat_web_random_prompt"] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
+def daily_chat_web_prompts(accounts_dir):
+    """User-added prompts, appended to the built-in pool when the draw runs."""
+    return _clean_web_prompts(load(accounts_dir).get("daily_chat_web_prompts"))
+
+
+def set_daily_chat_web_prompts(accounts_dir, prompts):
+    """Persist the custom prompt lines. Returns the normalized list."""
+    cleaned = _clean_web_prompts(prompts)
+    with _lock:
+        data = load(accounts_dir)
+        data["daily_chat_web_prompts"] = cleaned
+        save(accounts_dir, data)
+    return cleaned
+
+
 def local_web_tools(accounts_dir):
     """Whether the gateway runs web_search / web_fetch calls itself.
 

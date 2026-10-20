@@ -2,6 +2,7 @@ import re
 import base64
 import json
 import os
+import random
 import ssl
 import sys
 import threading
@@ -17,6 +18,7 @@ import wb_identity
 import wb_settings
 import wb_upstream_pool
 import wb_webagent
+import wb_webprompts
 
 # ---------------------------------------------------------------------------
 # 网页版通道（issue #75 / #59 / #90）
@@ -1643,6 +1645,23 @@ class Account(object):
                     return cand
         return candidates[0]
 
+    def daily_chat_web_prompt(self):
+        """The prompt this turn sends on the web channel.
+
+        With the random-prompt setting off (the default) it is the same "Hi"
+        the activity has always sent. With it on, one line is drawn from the
+        built-in 300-line pool plus whatever the operator added, so the daily
+        activity does not look like the same canned request every day.
+        """
+        if not self.path:
+            return DAILY_CHAT_WEB_PROMPT
+        directory = os.path.dirname(self.path)
+        if not wb_settings.daily_chat_web_random_prompt(directory):
+            return DAILY_CHAT_WEB_PROMPT
+        pool = wb_webprompts.builtin_prompts()
+        pool.extend(wb_settings.daily_chat_web_prompts(directory))
+        return random.choice(pool) if pool else DAILY_CHAT_WEB_PROMPT
+
     def daily_chat_web(self, prompt=None, trigger="unknown"):
         """网页通道的每日活跃会话（issue #75 / #59 / #90）。
 
@@ -1710,8 +1729,9 @@ class Account(object):
         if wait_seconds is None:
             wait_seconds = WEB_TURN_TIMEOUT
         model = self.daily_chat_model()
+        chosen_prompt = prompt or self.daily_chat_web_prompt()
         body = {
-            "prompt": prompt or DAILY_CHAT_WEB_PROMPT,
+            "prompt": chosen_prompt,
             "model": model,
             # 网页端建会话时固定带上这两项（抓包所得），保持请求形态一致。
             "conversationOrigin": "workbuddy-app",
@@ -1756,7 +1776,7 @@ class Account(object):
                     "error": "沙箱未就绪（没有 link/token）", "retryable": True}
 
         result = wb_webagent.run_turn(
-            link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
+            link, token, session_id, cwd, chosen_prompt,
             WEB_USER_AGENT,
             poll_status=lambda: self._web_conversation_status(conversation),
             wait_seconds=wait_seconds, proxy=self.proxy,

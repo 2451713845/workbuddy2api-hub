@@ -4832,6 +4832,22 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         <div style="font-size:12px;color:var(--warn);margin-top:4px">
           注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。
         </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <label class="switch">
+            <input id="setDailyChatRandomPrompt" type="checkbox" onchange="saveDailyChatRandomPrompt()">
+            <span class="switch-track"></span>
+            <span>随机提示词</span>
+          </label>
+          <span id="setDailyChatRandomPromptState" style="font-size:12px;color:var(--dim)"></span>
+        </div>
+        <div style="margin-top:8px">
+          <div style="font-size:12px;color:var(--dim);margin-bottom:4px">自定义提示词 <span style="color:var(--dim-light)">(一行一条，最多 200 条；留空只从内置 300 条里抽)</span></div>
+          <textarea id="setDailyChatPrompts" rows="4" placeholder="每行一条提示词" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg);resize:vertical"></textarea>
+          <div style="display:flex;justify-content:flex-end;margin-top:6px"><button onclick="saveDailyChatPrompts(this)">保存提示词</button></div>
+        </div>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          开启后每次网页活跃从内置 300 条短句 + 自定义提示词里随机抽一条；关闭时仍旧只发 Hi。内置池只含不需要联网、不容易引出长答案的小问题。
+        </div>
       </section>
 
       <section>
@@ -10838,6 +10854,21 @@ async function loadSettings(showToast){
           : ('只跑一轮 · ' + dailyWebTimeout + ' 秒');
         dailyWebRetryState.style.color = dailyWebRetry ? 'var(--accent2)' : 'var(--dim)';
       }
+      const dailyWebRandomPrompt = data.daily_chat_web_random_prompt === true;
+      const dailyWebRandomPromptInput = document.getElementById('setDailyChatRandomPrompt');
+      if(dailyWebRandomPromptInput) dailyWebRandomPromptInput.checked = dailyWebRandomPrompt;
+      const dailyWebPrompts = Array.isArray(data.daily_chat_web_prompts)
+        ? data.daily_chat_web_prompts : [];
+      const dailyWebPromptsInput = document.getElementById('setDailyChatPrompts');
+      if(dailyWebPromptsInput) dailyWebPromptsInput.value = dailyWebPrompts.join('\n');
+      const dailyWebRandomPromptState = document.getElementById('setDailyChatRandomPromptState');
+      if(dailyWebRandomPromptState){
+        dailyWebRandomPromptState.textContent = dailyWebRandomPrompt
+          ? ('已启用 · 内置 300 条 + 自定义 ' + dailyWebPrompts.length + ' 条')
+          : '(未启用 · 固定发 Hi)';
+        dailyWebRandomPromptState.style.color = dailyWebRandomPrompt
+          ? 'var(--accent2)' : 'var(--dim)';
+      }
       const localWeb = data.local_web_tools === true;
       const localWebInput = document.getElementById('setLocalWebTools');
       if(localWebInput) localWebInput.checked = localWeb;
@@ -11497,6 +11528,40 @@ async function saveDailyChatWeb(btn){
 
 /* 网页通道失败重试。后端只接受严格布尔，所以这里直接发勾选状态；存失败时
    把开关拨回去，免得界面显示一个其实没落盘的状态。 */
+async function saveDailyChatRandomPrompt(){
+  const el = document.getElementById('setDailyChatRandomPrompt');
+  const value = !!(el && el.checked);
+  try {
+    await postJSON('/settings/save', {daily_chat_web_random_prompt: value});
+    toast(value ? '已启用：网页活跃随机提示词'
+                : '已关闭：网页活跃固定发 Hi', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+    if(el) el.checked = !value;
+  }
+}
+
+async function saveDailyChatPrompts(btn){
+  const el = document.getElementById('setDailyChatPrompts');
+  const prompts = String((el && el.value) || '')
+    .split('\n').map(function(s){ return s.trim(); })
+    .filter(function(s){ return s.length > 0; });
+  if(btn) btn.disabled = true;
+  try {
+    const res = await postJSON('/settings/save', {daily_chat_web_prompts: prompts});
+    const stored = Array.isArray(res && res.daily_chat_web_prompts)
+      ? res.daily_chat_web_prompts : prompts;
+    toast(stored.length ? ('已保存 ' + stored.length + ' 条自定义提示词')
+                        : '已清空自定义提示词，只使用内置 300 条', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function saveDailyChatWebRetry(){
   const el = document.getElementById('setDailyChatWebRetry');
   const value = !!(el && el.checked);

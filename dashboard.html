@@ -879,8 +879,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   transition:border-color .18s ease, box-shadow .18s ease;
 }
 #pageAnalytics .kpi:hover{border-color:var(--line2);box-shadow:var(--shadow-lg)}
-#pageAnalytics .kpi .k{font-size:10px;color:var(--dim);font-weight:600;letter-spacing:.05em;display:flex;align-items:center;gap:5px}
-#pageAnalytics .kpi .k .ic{font-size:10.5px;opacity:.85}
+#pageAnalytics .kpi .k{font-size:10px;color:var(--dim);font-weight:600;letter-spacing:.05em;display:flex;align-items:center;gap:5px;white-space:nowrap;min-width:0}
+#pageAnalytics .kpi .k .ic{font-size:10.5px;opacity:.85;flex-shrink:0}
 #pageAnalytics .kpi .v{
   font-size:18.5px;font-weight:650;letter-spacing:-.015em;margin-top:3px;
   font-variant-numeric:tabular-nums;line-height:1.12;white-space:nowrap;
@@ -895,12 +895,16 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 
 #pageAnalytics .kpi.big .spark{display:block;width:100%;height:44px;margin-top:8px}
 #pageAnalytics .kpi .k .delta{
-  margin-left:auto;font-size:9.5px;font-weight:650;color:var(--dim);
+  font-size:9.5px;font-weight:650;color:var(--dim);
   background:var(--panel2);border-radius:5px;padding:0.5px 5px;
   font-variant-numeric:tabular-nums;letter-spacing:0;white-space:nowrap;
 }
 #pageAnalytics .kpi .k .delta:empty{display:none}
 #pageAnalytics .kpi .k .delta.up{color:var(--accent);background:var(--accent-soft)}
+/* 对比百分比独立一行放在数值下方：标题行不再被它挤压（手机上「请求数」曾被挤成
+   竖排）。空值由上面的 :empty{display:none} 整块不占位，无需 :has()。 */
+#pageAnalytics .kpi .kdelta{line-height:1}
+#pageAnalytics .kpi .kdelta .delta{display:inline-block;margin-top:3px}
 #pageAnalytics .kpi.ringcard{display:flex;flex-direction:column}
 #pageAnalytics .ringwrap{flex:1;display:flex;align-items:center;justify-content:center;padding:4px 0 2px}
 #pageAnalytics .ring{
@@ -1357,6 +1361,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     'API Key 不能为空': 'API Key cannot be empty',
     'API Key 内容': 'API Key value',
     'API 等价花费': 'API-equivalent cost',
+    'API 等价': 'API-equivalent',
     'CNY（策略记录的汇率，': 'CNY (rate recorded with the policy,',
     'GitHub 项目仓库': 'GitHub repository',
     'Key 维度只从本次升级之后开始记录：更早的请求没有这个字段，会一直留在「(切换前)」里且不会再增长。': 'Per-key attribution starts only with this upgrade: earlier requests have no such field, so they stay under (before switch) and never grow.',
@@ -2529,6 +2534,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '猫猫正在旅行途中，请稍后再来查看！': 'The cat is still travelling; check again later!'
   };
   var HANT_PHRASES = {
+    "API 等价花费": "API 等價花費",
+    "API 等价": "API 等價",
     " · 周期已过": " · 週期已過",
     // 撞线（6004）相关：pill 的动态片段 + 禁用总览的列头。
     " · 撞线 ": " · 撞線 ",
@@ -4125,15 +4132,17 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   <!-- ====================== ① KPI（B 版：大卡 + 大面积 sparkline + 环形卡） ====================== -->
   <div class="kpis" id="kpis">
     <div class="kpi big"><div class="accentbar" style="background:var(--accent)"></div>
-      <div class="k"><span class="ic">◆</span>TOKEN 消耗 <span class="delta" id="deltaTokens"></span></div>
+      <div class="k"><span class="ic">◆</span>TOKEN 消耗</div>
       <div class="v" id="kTokens">—</div>
+      <div class="kdelta"><span class="delta" id="deltaTokens"></span></div>
       <div class="s" id="kTokensSub">—</div>
       <div class="tokflow" id="kTokensFlow"></div>
       <canvas class="spark" id="sparkTokens"></canvas>
     </div>
     <div class="kpi big">
-      <div class="k"><span class="ic">⇄</span>请求数 <span class="delta" id="deltaReqs"></span></div>
+      <div class="k"><span class="ic">⇄</span>请求数</div>
       <div class="v" id="kReqs">—</div>
+      <div class="kdelta"><span class="delta" id="deltaReqs"></span></div>
       <div class="s" id="kReqsSub">—</div>
       <canvas class="spark" id="sparkReqs"></canvas>
     </div>
@@ -4144,14 +4153,16 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <canvas class="spark" id="sparkSpeed"></canvas>
     </div>
     <div class="kpi big">
-      <div class="k"><span class="ic">♻</span>缓存命中率 <span class="delta" id="deltaCache"></span></div>
+      <div class="k"><span class="ic">♻</span>缓存命中率</div>
       <div class="v" id="kCache">—</div>
+      <div class="kdelta"><span class="delta" id="deltaCache"></span></div>
       <div class="s" id="kCacheSub">—</div>
       <canvas class="spark" id="sparkCache"></canvas>
     </div>
     <div class="kpi big">
-      <div class="k"><span class="ic">¥</span>API 等价花费 <span class="delta" id="deltaCost"></span></div>
+      <div class="k"><span class="ic">¥</span>API 等价</div>
       <div class="v" id="kCost">—</div>
+      <div class="kdelta"><span class="delta" id="deltaCost"></span></div>
       <div class="s" id="kCostSub">—</div>
       <canvas class="spark" id="sparkCost"></canvas>
     </div>

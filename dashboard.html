@@ -737,6 +737,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   table.account-cards td:nth-child(8){order:6;grid-column:span 2;flex-direction:column-reverse;
     align-items:center;justify-content:center;gap:0;padding:4px 0;
     background:var(--panel2);border-radius:8px}
+  /* 积分格（第 7 列）：column-reverse 会把 ::before 的「积分」列标签排到最底部，
+     与「明细」按钮错行。隐藏列标签，把「积分」并进明细同一行。 */
+  table.account-cards td:nth-child(7)::before{content:none}
+  table.account-cards td:nth-child(7) .credit-meta::before{content:'积分';font-size:10px;color:var(--dim);font-weight:600}
   table.account-cards td:nth-child(6)::before,
   table.account-cards td:nth-child(7)::before,
   table.account-cards td:nth-child(8)::before{font-size:10px}

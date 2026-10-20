@@ -135,7 +135,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 180 个套件：134 个 Python + 46 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 181 个套件：134 个 Python + 47 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -442,6 +442,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **积分包到期显示统一口径**（#474）：个人体验版 / 免费包的 CycleEndTime 只是每月计费边界，真正作废时间在 DeductionEndTime（实测还在 8 年后）。后端已把这类包标为 no_expiry，但前端表格仍用 CycleEndTime 算倒计时，于是出现「表里剩 12 天、最近到期卡片却不认」的矛盾。现在表格与卡片都按 no_expiry 显示「长期有效」；套餐包列表默认选「有剩余」，已用完 / 已过期的包需要时点「全部」或「已用完/过期」查看。
 
 - **身份请求头的 X-Private-Data 可选**（#516）：设置页新增「数据用途声明」，可选 auto / true / false（默认 auto）。auto 保持原三套身份（WB / VSCode / CLI）的默认取值；显式 true/false 会对三套身份都覆盖，包括 VSCode 中国区本来不发该头的分支。保存在 accounts/settings.json 的 identity.private_data，也可 POST /settings/save 传 {"identity":{"private_data":"false"}}，非法值返回 400。
 

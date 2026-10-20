@@ -5399,8 +5399,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
             <div class="realm-filter" style="margin:0">
-              <button type="button" class="active" data-filter="all" onclick="filterCreditsPackages('all', this)">全部</button>
-              <button type="button" data-filter="active" onclick="filterCreditsPackages('active', this)">有剩余</button>
+              <button type="button" data-filter="all" onclick="filterCreditsPackages('all', this)">全部</button>
+              <button type="button" class="active" data-filter="active" onclick="filterCreditsPackages('active', this)">有剩余</button>
               <button type="button" data-filter="expiring" onclick="filterCreditsPackages('expiring', this)">即将到期</button>
               <button type="button" data-filter="exhausted" onclick="filterCreditsPackages('exhausted', this)">已用完/过期</button>
             </div>
@@ -8803,13 +8803,13 @@ async function scanDesktop(btn){
 /* --------------------------- credits detail modal --------------------------- */
 let CURRENT_CREDIT_DETAIL_UID = null;
 let CURRENT_CREDITS_DATA = null;
-let CURRENT_PKG_FILTER = 'all';
+let CURRENT_PKG_FILTER = 'active';
 let CURRENT_PKG_SEARCH = '';
 let CURRENT_PKG_SORT = 'expiry_asc';
 
 async function openCreditsDetail(uid, forceRefresh = false){
   CURRENT_CREDIT_DETAIL_UID = uid;
-  CURRENT_PKG_FILTER = 'all';
+  CURRENT_PKG_FILTER = 'active';
   CURRENT_PKG_SEARCH = '';
   CURRENT_PKG_SORT = 'expiry_asc';
 
@@ -8997,6 +8997,7 @@ function renderCreditsDetail(credits, acct){
     if(!ep && Array.isArray(credits.packages)){
       const candidates = [];
       credits.packages.forEach(p => {
+        if(p.no_expiry) return;
         const rem = Number(p.remain ?? p.CycleCapacityRemain) || 0;
         const eStr = p.cycle_end_time || p.cycleEndTime || p.CycleEndTime || p.expired_time || p.ExpiredTime || '';
         if(rem > 0 && eStr && eStr !== '-'){
@@ -9091,8 +9092,12 @@ function renderCreditsPackagesTable(){
     const endTime = p.cycle_end_time || p.cycleEndTime || p.CycleEndTime || p.expired_time || p.ExpiredTime || '';
     const startTime = p.cycle_start_time || p.cycleStartTime || p.CycleStartTime || '';
 
+    // no_expiry：上游的抵扣截止时间远超真实周期，CycleEndTime 只是每月
+    // 计费边界。这种包不能拿周期结束算倒计时，否则表格会显示「剩 12 天」
+    // 而最近到期卡片又正确地不认它（#474）。
+    const noExpiry = !!p.no_expiry;
     let days = (p.days_left !== undefined && p.days_left !== null) ? Number(p.days_left) : null;
-    if(days === null && endTime && endTime !== '-'){
+    if(days === null && !noExpiry && endTime && endTime !== '-'){
       try {
         const cleanStr = endTime.replace(/-/g, '/').replace('T', ' ');
         const endTs = new Date(cleanStr).getTime();
@@ -9117,6 +9122,7 @@ function renderCreditsPackagesTable(){
       cycle_start_time: startTime,
       cycle_end_time: endTime,
       days_left: days,
+      no_expiry: noExpiry,
       is_expired: isExpired
     };
   });
@@ -9197,6 +9203,8 @@ function renderCreditsPackagesTable(){
       } else {
         expiryBadge = '<span class="badge mini">长期有效</span>';
       }
+    } else if(p.no_expiry){
+      expiryBadge = '<span class="badge mini">长期有效</span>';
     } else if(p.cycle_end_time){
       expiryBadge = '<span class="badge mini">正常</span>';
     }
@@ -9238,7 +9246,7 @@ function renderCreditsPackagesTable(){
       + '</td>'
       + '<td style="text-align:center;padding:8px 10px">'
       +   (expiryBadge ? ('<div style="margin-bottom:3px">' + expiryBadge + '</div>') : '')
-      +   '<div class="mono" style="font-size:11px;color:var(--fg)" title="到期时间">' + esc(cycleEndTimeStr) + '</div>'
+      +   '<div class="mono" style="font-size:11px;color:var(--fg)" title="' + (p.no_expiry ? '计费周期结束（积分不过期）' : '到期时间') + '">' + esc(cycleEndTimeStr) + '</div>'
       +   (cycleStartTimeStr ? ('<div class="mono" style="font-size:10px;color:var(--dim)" title="生效时间">自 ' + esc(cycleStartTimeStr.slice(0, 10)) + '</div>') : '')
       + '</td>'
       + '<td style="text-align:right;padding:8px 10px;font-weight:600">' + fmt(pSize) + '</td>'

@@ -443,6 +443,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- **Codex 一键配置不再依赖环境变量**（#513）：Codex 0.163 在启动时解析 `env_key`，从图形界面启动时没有继承 `OPENAI_API_KEY` 就直接报 `Missing environment variable`，写进 `auth.json` 也不再兜底。现在 provider 表直接写 `experimental_bearer_token`，并顺手移除旧的 `env_key` / `env_key_instructions`；重复点一次「一键配置」就会把旧配置迁过来，`auth.json` 仍照写以兼容旧版本。
+
 - **积分包到期显示统一口径**（#474）：个人体验版 / 免费包的 CycleEndTime 只是每月计费边界，真正作废时间在 DeductionEndTime（实测还在 8 年后）。后端已把这类包标为 no_expiry，但前端表格仍用 CycleEndTime 算倒计时，于是出现「表里剩 12 天、最近到期卡片却不认」的矛盾。现在表格与卡片都按 no_expiry 显示「长期有效」；套餐包列表默认选「有剩余」，已用完 / 已过期的包需要时点「全部」或「已用完/过期」查看。
 
 - **身份请求头的 X-Private-Data 可选**（#516）：设置页新增「数据用途声明」，可选 auto / true / false（默认 auto）。auto 保持原三套身份（WB / VSCode / CLI）的默认取值；显式 true/false 会对三套身份都覆盖，包括 VSCode 中国区本来不发该头的分支。保存在 accounts/settings.json 的 identity.private_data，也可 POST /settings/save 传 {"identity":{"private_data":"false"}}，非法值返回 400。

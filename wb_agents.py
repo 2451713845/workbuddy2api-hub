@@ -555,6 +555,33 @@ def toml_upsert_table(text, table, mapping):
     return "\n".join(lines) + "\n"
 
 
+def toml_drop_table_keys(text, table, keys):
+    """Drop keys from [table], leaving every other line untouched.
+
+    The one-click config used to write env_key; Codex 0.163 resolves that
+    variable at startup and fails hard when the GUI did not inherit it, so the
+    key has to be removed when the provider switches to an inline token.
+    """
+    wanted = set(keys)
+    lines = text.split("\n")
+    idx = 0
+    while idx < len(lines):
+        m = _TOML_TABLE_RE.match(lines[idx])
+        if m and m.group(1) == table:
+            end = idx + 1
+            while end < len(lines) and not _TOML_TABLE_RE.match(lines[end]):
+                end += 1
+            kept = [lines[idx]]
+            for line in lines[idx + 1:end]:
+                km = _TOML_KEY_RE.match(line)
+                if km and km.group(1) in wanted:
+                    continue
+                kept.append(line)
+            return "\n".join(lines[:idx] + kept + lines[end:])
+        idx += 1
+    return text
+
+
 def _toml_upsert_in_range(lines, start, end, mapping):
     remaining = dict(mapping)
     last_content = start
@@ -699,12 +726,19 @@ def _apply_codex(paths, ctx):
     text = toml_upsert_top_key(text, "model_provider", PROVIDER_ID)
     if ctx.get("model"):
         text = toml_upsert_top_key(text, "model", ctx["model"])
+    # Codex 0.163 resolves env_key at startup and aborts with
+    # "Missing environment variable: OPENAI_API_KEY" when the variable is not
+    # in the process environment; auth.json no longer satisfies it. Put the
+    # key on the provider itself, and drop the stale env_key so both are not
+    # present at once (env_key would win and fail again).
     text = toml_upsert_table(text, "model_providers." + PROVIDER_ID, {
         "name": PROVIDER_NAME,
         "base_url": ctx["base_url_v1"],
         "wire_api": "responses",
-        "env_key": "OPENAI_API_KEY",
+        "experimental_bearer_token": ctx["api_key"],
     })
+    text = toml_drop_table_keys(text, "model_providers." + PROVIDER_ID,
+                                ("env_key", "env_key_instructions"))
     auth_path = paths["auth"]
     auth = _load_json(auth_path, "codex auth")
     auth = deep_merge(auth, {"OPENAI_API_KEY": ctx["api_key"]})

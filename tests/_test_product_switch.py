@@ -200,5 +200,63 @@ class AutoSwitchTargetTests(unittest.TestCase):
         self.assertEqual(account.product, "workbuddy")
 
 
+class PrivateDataTests(unittest.TestCase):
+    """X-Private-Data: auto keeps per-identity defaults, true/false overrides."""
+
+    def setUp(self):
+        self.dir = os.path.join(_TMP.name, "private-data")
+        os.makedirs(self.dir, exist_ok=True)
+        try:
+            os.remove(os.path.join(self.dir, "settings.json"))
+        except OSError:
+            pass
+        self._old_dir = proxy.ACCOUNTS_DIR
+        proxy.ACCOUNTS_DIR = self.dir
+
+    def tearDown(self):
+        proxy.ACCOUNTS_DIR = self._old_dir
+
+    def test_auto_keeps_each_identity_default(self):
+        self.assertEqual(proxy.wb_settings.identity_private_data(self.dir), "auto")
+        self.assertEqual(
+            wb_identity.build_identity_headers(
+                "workbuddy", "intl", "u", "t").get("X-Private-Data"), "true")
+        self.assertNotIn(
+            "X-Private-Data",
+            wb_identity.build_identity_headers("vscode", "cn", "u", "t"))
+        self.assertEqual(
+            wb_identity.build_identity_headers(
+                "cli", "intl", "u", "t").get("X-Private-Data"), "false")
+        self.assertEqual(
+            wb_identity.build_identity_headers(
+                "cli", "intl", "u", "t",
+                enterprise_id="ent").get("X-Private-Data"), "true")
+
+    def test_explicit_values_override_every_identity(self):
+        for product in ("workbuddy", "vscode", "cli"):
+            self.assertEqual(
+                wb_identity.build_identity_headers(
+                    product, "cn", "u", "t",
+                    private_data="false").get("X-Private-Data"), "false")
+            self.assertEqual(
+                wb_identity.build_identity_headers(
+                    product, "cn", "u", "t",
+                    private_data="true").get("X-Private-Data"), "true")
+
+    def test_account_headers_read_the_setting(self):
+        proxy.wb_settings.set_identity_private_data(self.dir, "false")
+        account = A.Account(
+            {"uid": "u", "accessToken": "t", "realm": "intl",
+             "product": "workbuddy"},
+            os.path.join(self.dir, "u.json"))
+        self.assertEqual(
+            account.headers(purpose="chat").get("X-Private-Data"), "false")
+
+    def test_invalid_value_is_rejected(self):
+        with self.assertRaises(ValueError):
+            proxy.wb_settings.set_identity_private_data(self.dir, "yes")
+        self.assertEqual(proxy.wb_settings.identity_private_data(self.dir), "auto")
+
+
 if __name__ == "__main__":
     unittest.main()

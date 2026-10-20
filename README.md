@@ -443,6 +443,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- **身份请求头的 X-Private-Data 可选**（#516）：设置页新增「数据用途声明」，可选 auto / true / false（默认 auto）。auto 保持原三套身份（WB / VSCode / CLI）的默认取值；显式 true/false 会对三套身份都覆盖，包括 VSCode 中国区本来不发该头的分支。保存在 accounts/settings.json 的 identity.private_data，也可 POST /settings/save 传 {"identity":{"private_data":"false"}}，非法值返回 400。
+
 - **/v1/responses 不再把「只有 reasoning」当 completed**（#508）：上游偶发把整轮预算花在 reasoning 上、正文为空，之前仍发 response.completed，客户端以为回合正常结束。现在流式发 response.failed，非流式返回 502，usage 行记为 failed；新增 WB_DEFAULT_REASONING_EFFORT（high 默认 / catalog / off），客户端未指定 effort 时可以只按目录默认或完全不注入。
 
 - **模型级 5xx 不再熔断整池**（#499）：`11134`（模型提供方暂不可用）、`11102`、`11150`、`11158`、`11129` 等错误会先解析上游 body 的 `code`；命中时只停手并把上游 500 原样返回，不再给账号记 fails / 熔断。普通 500 仍按账号故障处理；设置 `WB_MODEL_SCOPED_ERRORS_PENALIZE=1` 可恢复旧行为。

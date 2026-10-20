@@ -10100,6 +10100,7 @@ def runtime_settings_view():
         "free_model_credit_fallback": wb_settings.free_model_credit_fallback(ACCOUNTS_DIR),
         "enable_anthropic_messages": wb_settings.enable_anthropic_messages(ACCOUNTS_DIR),
         "filter_models_by_key": wb_settings.filter_models_by_key(ACCOUNTS_DIR),
+        "identity": wb_settings.identity_config(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
         "daily_chat_web_attempts":
@@ -18734,6 +18735,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "filter_models_by_key must be true or false", "invalid_request_error")
             wb_settings.set_filter_models_by_key(ACCOUNTS_DIR, raw)
             reply["filter_models_by_key"] = raw
+        if "identity" in payload:
+            raw = payload.get("identity")
+            if not isinstance(raw, dict):
+                return self._error(400, "identity must be an object",
+                                   "invalid_request_error")
+            if "private_data" in raw:
+                try:
+                    value = wb_settings.set_identity_private_data(
+                        ACCOUNTS_DIR, raw.get("private_data"))
+                except ValueError as exc:
+                    return self._error(400, str(exc), "invalid_request_error")
+                reply["identity_private_data"] = value
         if "free_model_credit_fallback" in payload:
             raw = payload.get("free_model_credit_fallback")
             if not isinstance(raw, bool):

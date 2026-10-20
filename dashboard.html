@@ -2241,6 +2241,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '能量': 'energy',
     '自': 'from',
     '自动切换出站身份': 'Auto-switch outbound identity',
+    '数据用途声明': 'Data usage declaration',
+    '跟随官方默认 (auto)': 'Follow official default (auto)',
+    '允许参与模型优化 (true)': 'Allow model optimization (true)',
+    '不参与模型优化 (false)': 'Do not train on this data (false)',
     '自动发现 mihomo 端口': 'Auto-discover mihomo ports',
     '自动发现失败:': 'Auto-discovery failed:',
     '自动滚屏: 关': 'Auto-scroll: off',
@@ -4747,6 +4751,28 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
               </label>
             </div>
             <button onclick="saveAutoSwitchProduct(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">数据用途声明 <em id="setPrivateDataState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              X-Private-Data 会随每次模型请求发送，声明这段对话是否允许参与模型优化。auto 保持三套出站身份各自的官方默认；true / false 无条件覆盖。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              这是对上游的数据用途声明，只影响 X-Private-Data 头，不改变请求内容。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <select id="setPrivateData" style="min-width:240px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+              <option value="auto">跟随官方默认 (auto)</option>
+              <option value="true">允许参与模型优化 (true)</option>
+              <option value="false">不参与模型优化 (false)</option>
+            </select>
+            <button onclick="savePrivateData(this)">保存</button>
           </div>
         </div>
       </section>
@@ -10704,6 +10730,16 @@ async function loadSettings(showToast){
         const input = document.getElementById(pair[0]);
         if(input) input.checked = autoSwitchProducts.indexOf(pair[1]) >= 0;
       });
+      const privateData = (data.identity && data.identity.private_data) || 'auto';
+      const privateDataInput = document.getElementById('setPrivateData');
+      if(privateDataInput) privateDataInput.value = privateData;
+      const privateDataState = document.getElementById('setPrivateDataState');
+      if(privateDataState){
+        privateDataState.textContent = privateData === 'auto'
+          ? '(跟随身份默认)' : ('(' + privateData + ')');
+        privateDataState.style.color = privateData === 'auto'
+          ? 'var(--dim)' : 'var(--accent2)';
+      }
       const dailyWeb = data.daily_chat_web !== false;
       const dailyWebInput = document.getElementById('setDailyChatWeb');
       if(dailyWebInput) dailyWebInput.checked = dailyWeb;
@@ -11355,6 +11391,22 @@ async function saveAutoSwitchProduct(btn){
     await postJSON('/settings/save', {auto_switch_product: value,
                                       auto_switch_products: products});
     toast(value ? '已启用：429 时自动切换出站身份' : '已关闭自动切换出站身份', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function savePrivateData(btn){
+  const el = document.getElementById('setPrivateData');
+  const value = el ? el.value : 'auto';
+  if(['auto', 'true', 'false'].indexOf(value) < 0) return;
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {identity: {private_data: value}});
+    toast('已保存数据用途声明: ' + value, 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

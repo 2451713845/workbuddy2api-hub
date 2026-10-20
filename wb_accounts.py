@@ -15,6 +15,7 @@ import wb_activity
 import wb_atrest
 import wb_identity
 import wb_settings
+import wb_tiers
 import wb_upstream_pool
 import wb_webagent
 
@@ -690,6 +691,13 @@ class Account(object):
         # 最近一次软限流（429）的时刻：两条软限流阶梯用同一个时间窗。
         self.last_soft_at = 0.0
         self.credits = data.get("credits") or None
+        # Whether the upstream says this is a paid (PRO) account. Read from the
+        # last credits snapshot the account saved; an account that never
+        # refreshed credits is treated as free, so a PRO-only model is not
+        # handed to it before the tier is known.
+        self.is_paid_user = bool(
+            self.credits.get("is_paid_user")
+            if isinstance(self.credits, dict) else False)
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
         # 国内版每天一次的「对话活跃上报」（点亮官方 growth 连登/热力墙）上次
@@ -1270,6 +1278,9 @@ class Account(object):
         # 「所有账号都禁用了这个模型」时，池子抽干的报错里会逐个号写明原因。
         if self.model_disabled(model):
             return "该模型已被人工禁用"
+        if (model and not getattr(self, "is_paid_user", False)
+                and wb_tiers.requires_pro(model, self.realm)):
+            return "该模型仅限 PRO 账号"
         now = time.time()
         # 四种惩罚的到期时间各走各的，谁把时间推得最远就报谁：只报「冷却」
         # 会让人往 429 的方向查，而实际可能是上游连续断连触发的熔断（30 分钟
@@ -1320,6 +1331,13 @@ class Account(object):
         # 人工黑名单排在最前：它是静态配置（最便宜），而且在语义上优先于所有
         # 「暂时不可用」的判断 —— 被禁用的模型不该因为账号恰好恢复了就漏进来。
         if self.model_disabled(model):
+            return False
+        # A PRO-only model must not be served by a free account: the upstream
+        # answers 11158, which used to be discovered only after spending the
+        # request. An unknown tier map returns False, so this is a no-op until
+        # the catalogue has delivered modelTiers.
+        if (model and not getattr(self, "is_paid_user", False)
+                and wb_tiers.requires_pro(model, self.realm)):
             return False
         if self.throttle_wait(model=model) > 0:
             return False

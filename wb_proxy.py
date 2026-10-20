@@ -20903,7 +20903,8 @@ class Handler(BaseHTTPRequestHandler):
                     write_chunk(chat_finish_chunk(
                         model, "tool_calls" if synthesized_calls else pending_finish, chunk_id=stream_chunk_id))
                 if last_usage is not None:
-                    write_chunk(chat_usage_chunk(model, last_usage))
+                    write_chunk(chat_usage_chunk(
+                        model, last_usage, chunk_id=stream_chunk_id))
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 # Client hung up; still account for what upstream produced.
                 wall = int((time.time() - t_start) * 1000)

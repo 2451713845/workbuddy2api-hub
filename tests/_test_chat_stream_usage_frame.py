@@ -263,6 +263,10 @@ try:
                  and any((c or {}).get("finish_reason") for c in (f.get("choices") or []))]
     check("exactly one finish frame, before the usage frame",
           len(finish_at) == 1 and usage_at > finish_at[0], (finish_at, usage_at))
+    check("the usage frame reuses the stream's unique id",
+          usage_frame.get("id") == frames[finish_at[0]].get("id")
+          and usage_frame.get("id") != "chatcmpl-wb",
+          usage_frame.get("id"))
 
     usage = usage_frame.get("usage") or {}
     check("prompt tokens survive the hoist", usage.get("prompt_tokens") == 37, usage)

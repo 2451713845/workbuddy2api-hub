@@ -67,7 +67,8 @@ class DshHarnessChannelFingerprintTests(unittest.TestCase):
     """
 
     FP = "You are an AI agent powered by DeepSeek Harness."
-    CLEAN = "You are an AI agent powered by the DeepSeek Harness."
+    FP2 = "You are a coding agent powered by the deepseek-v4.1-flash model."
+    CLEAN = "You are a helpful AI assistant."
 
     def test_exact_phrase_rewritten(self):
         self.assertEqual(P.sanitize_text(self.FP), self.CLEAN)
@@ -75,6 +76,13 @@ class DshHarnessChannelFingerprintTests(unittest.TestCase):
     def test_case_insensitive(self):
         self.assertEqual(P.sanitize_text(self.FP.upper()), self.CLEAN)
         self.assertEqual(P.sanitize_text(self.FP.lower()), self.CLEAN)
+
+    def test_coding_agent_sentence_rewritten(self):
+        self.assertEqual(P.sanitize_text(self.FP2), self.CLEAN)
+
+    def test_built_on_variant_rewritten(self):
+        self.assertEqual(P.sanitize_text("You are an AI assistant built on DeepSeek."),
+                         self.CLEAN)
 
     def test_embedded_in_system_prompt(self):
         text = self.FP + "\n\nYou are a coding agent."
@@ -101,6 +109,22 @@ class DshHarnessChannelFingerprintTests(unittest.TestCase):
         out = P.sanitize_messages(messages)
         self.assertEqual(out[0]["content"], self.CLEAN)
         self.assertEqual(out[1]["content"], "hi")
+
+    def test_identity_rewrite_is_scoped_to_system_and_developer(self):
+        # user / assistant / tool 里的身份句是用户数据，不能改写（#537）。
+        messages = [
+            {"role": "system", "content": self.FP},
+            {"role": "developer", "content": self.FP2},
+            {"role": "user", "content": self.FP},
+            {"role": "assistant", "content": self.FP2},
+            {"role": "tool", "content": self.FP},
+        ]
+        out = P.sanitize_messages(messages)
+        self.assertEqual(out[0]["content"], self.CLEAN)
+        self.assertEqual(out[1]["content"], self.CLEAN)
+        self.assertEqual(out[2]["content"], self.FP)
+        self.assertEqual(out[3]["content"], self.FP2)
+        self.assertEqual(out[4]["content"], self.FP)
 
 
 if __name__ == "__main__":

@@ -145,7 +145,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 188 个套件：139 个 Python + 49 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 189 个套件：139 个 Python + 50 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -454,9 +454,13 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- **修复「数据用途声明」文案反了**（#528）：`X-Private-Data` 是「数据私有」声明，`true` = 不参与模型优化、`false` = 允许参与；下拉选项与英文词条此前正好相反，用户按文案选择会得到相反的效果。已交换两处文案，并加 4 项断言。
+
+- **修复模型清单「消费倍率」列截断**（#527）：带「免费账号不可用」胶囊的行在 1366/1440/1512 宽度下被 `nowrap` 裁掉第二枚胶囊；该列改用 `rate-cell` 类允许换行，不再依赖会被 i18n 翻译的 `data-label` 选择器。
+
 - **修复全量刷新积分在默认间隔下崩溃**：`_credits_sweep()` 在账号间使用 `random.uniform(0.8, 1.2)` 做拟人间隔，但 `wb_proxy.py` 漏了 `import random`，多账号点「一键刷新积分」会以 `NameError` 中断，单账号与 `WB_CREDITS_SWEEP_GAP_MS=0` 不受影响。补上导入，并新增 1 项回归测试，实际走默认 800~1200ms 抖动路径。 / Fix the full credit sweep crashing at the default pacing: `_credits_sweep()` used `random.uniform(0.8, 1.2)` between accounts, but `wb_proxy.py` never imported `random`, so "refresh all credits" failed with `NameError`; single-account refreshes and `WB_CREDITS_SWEEP_GAP_MS=0` were unaffected. Add the import and one regression test that exercises the default 800-1200 ms jitter path.
 - **成长任务补充「无畏契约拼豆专家」**：`WorkBuddy_Valorant` 登记为专家任务，事件固定使用真实专家 id `ex_xQHHD1u5Jkua`，不再走通用专家池；一键做任务时自动推进并领奖。实测一个国内版账号上报后进度 0→1，领奖 +100 积分、+5 能量。
-- **DSH 系统提示首句被误判为渠道指纹**（#382 / #506 同类）：上游对连续短语 `You are an AI agent powered by DeepSeek Harness` 做大小写不敏感的渠道校验，命中即回 400 / code 11128；表现是同一账号换号、换身份、带齐会话头仍然失败，而短请求正常。逐句二分确认触发面是整句（拆词、单独 `DeepSeek Harness` 均通过），因此在出站清洗里把它改写为 `You are an AI agent powered by the DeepSeek Harness`（只插入一个 the，语义不变）。新增 6 项单测，覆盖精确 / 大小写 / 嵌入 / 幂等 / 部分短语 / `sanitize_messages` 路径。 / The upstream channel check rejects one contiguous DSH system-prompt phrase (`You are an AI agent powered by DeepSeek Harness`, case-insensitive) with 400 / code 11128 even when the account, identity and conversation headers are all correct, while short requests pass. Bisection shows only the whole sentence matches - individual words and `DeepSeek Harness` alone do not - so the outbound sanitizer now inserts a single "the" (`... powered by the DeepSeek Harness`), which preserves the meaning and no longer matches. Covered by 6 new unit tests.
+- **11-128：身份句 + 品牌的组合指纹改为中性句**（#533 / #537 / #539）：上游对 `You are an AI agent powered by DeepSeek Harness.`、`You are a coding agent powered by the deepseek-v4.1-flash model.`、`You are an AI assistant built on DeepSeek.` 这类「自我介绍句式 + 品牌」做大小写不敏感的连续子串匹配，命中即 400 / code 11-128；单独品牌词、改词或去掉句式都放行。现在把 system / developer 里的这类整句改写为 `You are a helpful AI assistant.`，不依赖具体品牌；user / assistant / tool 里的同名文本保持原样（用户数据）。补了大小写、两句变体、`built on` 变体、内嵌、幂等、作用域测试。 / The upstream channel check rejects the combination of a client self-introduction and a brand (`You are an AI agent powered by DeepSeek Harness.`, `You are a coding agent powered by the deepseek-v4.1-flash model.`, `You are an AI assistant built on DeepSeek.`) with 400 / code 11-128. The sanitizer now replaces that whole sentence in system / developer messages with `You are a helpful AI assistant.`, independent of the brand; the same text in user / assistant / tool messages is left alone.
 
 - **模型清单标出「免费账号不可用」**（#505，运行时部分）：上游返回 `11158`（model not allowed for user type）时写入 `accounts/model_entitlements.json`，同一 `(realm, model)` 后续成功请求自动撤标；`11102` / `11134` 不记。`/v1/models` 每条带 `entitlement` 字段，面板在倍率旁显示「免费账号不可用」胶囊，hover 给出 code / userType / 检测时刻，24 小时后自动过期。刷新清单时的主动探测尚未接（需要采样口径）。
 

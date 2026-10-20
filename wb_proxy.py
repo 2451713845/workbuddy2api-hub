@@ -11518,15 +11518,21 @@ SANITIZE_KV_RE = re.compile(r"(?i)\bcc_[a-z0-9_]+=[^;\r\n]*;?\s*")
 SANITIZE_OMO_JUNIOR_RE = re.compile(
     r"Sisyphus-Junior - Focused executor from OhMyOpenCode", re.IGNORECASE
 )
-# DSH（DeepSeek Harness）的系统提示首句同样被上游判成「非官方客户端」，直接回
-# 400 / code 11128。逐句二分实测（2026-10-20）：整句触发、拆成单词不触发、大小写
-# 不敏感；只插入一个 "the" 改变短语结构后即不再命中，语义不变。与 OmO 指纹同一
-# 类连续指纹匹配，因此沿用同一条「只改写已确认指纹」的策略。
-SANITIZE_DSH_HARNESS_RE = re.compile(
-    r"You are an AI agent powered by DeepSeek Harness", re.IGNORECASE
-)
-SANITIZE_DSH_HARNESS_REPLACEMENT = (
-    "You are an AI agent powered by the DeepSeek Harness")
+# 上游 WAF 把「客户端自我介绍句式 + 品牌」当成非官方渠道（#533 / #537 / #539）：
+#   You are an AI agent powered by DeepSeek Harness.
+#   You are a coding agent powered by the deepseek-v4.1-flash model.
+#   You are an AI assistant built on DeepSeek.
+# 大小写不敏感、连续子串匹配；单独品牌词或改词后放行。这里整句换成中性句，
+# 不依赖具体品牌，也不保留 "powered by / built on" 结构。
+#
+# 只作用于 system / developer 角色（见 sanitize_messages）：user / tool 里的品牌词
+# 是用户数据，改写会让模型看到与磁盘不一致的内容（#537）。
+SANITIZE_IDENTITY_RE = re.compile(
+    r"You are an?(?:\s+AI)?(?:\s+coding)?\s+"
+    r"(?:agent\s+powered by|assistant\s+built on)[^\n]*?"
+    r"(?:\.(?=\s|$)|(?=\n|$))",
+    re.IGNORECASE)
+SANITIZE_IDENTITY_REPLACEMENT = "You are a helpful AI assistant."
 # 指纹判定的字面量快路径（见 has_fingerprint）：原先对每段文本跑两个 (?i) 正则，
 # 4KB 输入实测 319µs，其中正则 137+188µs、几个 `in` 只占 9µs；64KB 文本要
 # 6.2ms，而 sanitize_messages 会给每个文本段都过一遍——build_upstream_body
@@ -11547,8 +11553,8 @@ SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_RE.pattern
 if SANITIZE_BARE_HDR_LOWER.startswith("(?i)"):
     SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_LOWER[4:]
 SANITIZE_OMO_JUNIOR_LOWER = SANITIZE_OMO_JUNIOR_RE.pattern.lower()
-SANITIZE_DSH_HARNESS_LOWER = SANITIZE_DSH_HARNESS_RE.pattern.lower()
-def has_fingerprint(text):
+SANITIZE_IDENTITY_LOWER = ("agent powered by", "assistant built on")
+def has_fingerprint(text, identity=True):
     if not isinstance(text, str) or not text:
         return False
     for f in SANITIZE_FEATURES:
@@ -11560,20 +11566,23 @@ def has_fingerprint(text):
         low = text.translate(SANITIZE_REI_FOLD).lower()
     else:
         low = text.lower()
-    return (SANITIZE_BARE_HDR_LOWER in low
-            or SANITIZE_OMO_JUNIOR_LOWER in low
-            or SANITIZE_DSH_HARNESS_LOWER in low)
-def sanitize_text(text):
+    if (SANITIZE_BARE_HDR_LOWER in low
+            or SANITIZE_OMO_JUNIOR_LOWER in low):
+        return True
+    return bool(identity) and any(needle in low
+                                  for needle in SANITIZE_IDENTITY_LOWER)
+def sanitize_text(text, identity=True):
     if not isinstance(text, str) or not text:
         return text
-    if not has_fingerprint(text):
+    if not has_fingerprint(text, identity=identity):
         return text
     # Keep the rewrite deliberately narrow: do not globally remove
     # "OhMyOpenCode" or "Sisyphus-Junior", because either token alone is
     # accepted by the upstream. Only the confirmed contiguous fingerprint is
     # neutralized.
     text = SANITIZE_OMO_JUNIOR_RE.sub("Sisyphus-Junior - Focused executor", text)
-    text = SANITIZE_DSH_HARNESS_RE.sub(SANITIZE_DSH_HARNESS_REPLACEMENT, text)
+    if identity:
+        text = SANITIZE_IDENTITY_RE.sub(SANITIZE_IDENTITY_REPLACEMENT, text)
     for old, new in SANITIZE_REWRITES:
         text = text.replace(old, new)
     text = SANITIZE_HDR_RE.sub("", text)
@@ -11584,15 +11593,15 @@ def sanitize_text(text):
             text = SANITIZE_KV_RE.sub("", text)
     text = SANITIZE_BARE_HDR_RE.sub("x-anthropic-billing-hdr", text)
     return text.strip()
-def sanitize_content(content):
+def sanitize_content(content, identity=True):
     if isinstance(content, str):
-        return sanitize_text(content)
+        return sanitize_text(content, identity=identity)
     if isinstance(content, list):
         out = []
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text" and "text" in part:
                 p = dict(part)
-                p["text"] = sanitize_text(p["text"])
+                p["text"] = sanitize_text(p["text"], identity=identity)
                 out.append(p)
             else:
                 out.append(part)
@@ -11623,7 +11632,8 @@ def sanitize_tool_calls(tool_calls):
                 fn = dict(fn)
                 raw_args = fn.get("arguments")
                 if isinstance(raw_args, str):
-                    fn["arguments"] = raw_args if preserve else sanitize_text(raw_args)
+                    fn["arguments"] = (raw_args if preserve
+                                       else sanitize_text(raw_args, identity=False))
                 elif raw_args is None:
                     fn["arguments"] = "{}"
                 else:
@@ -11646,10 +11656,13 @@ def sanitize_messages(messages):
             item = dict(m)
             preserve_tool_result = (preserve_request_contract_enabled()
                                     and item.get("role") in ("tool", "function"))
+            identity = item.get("role") in ("system", "developer")
             if "content" in item and not preserve_tool_result:
-                item["content"] = sanitize_content(item["content"])
+                item["content"] = sanitize_content(item["content"],
+                                                   identity=identity)
             if isinstance(item.get("reasoning_content"), str):
-                item["reasoning_content"] = sanitize_text(item["reasoning_content"])
+                item["reasoning_content"] = sanitize_text(
+                    item["reasoning_content"], identity=False)
             if "tool_calls" in item:
                 item["tool_calls"] = sanitize_tool_calls(item["tool_calls"])
             out.append(item)

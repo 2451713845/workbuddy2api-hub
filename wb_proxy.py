@@ -5851,6 +5851,89 @@ def pinned_account():
 SCHEDULER = None
 PRICING = None
 CREDITS_REFRESHER = None
+
+# ------------------------------------------------- 全量刷积分的并发与节奏护栏
+# 「一键刷新积分」与账号页的自动补快照都会打这条全扫路径：不带 uid/realm 时它对
+# **整个账号池**逐个发上游计费请求。真机实测一次 = 23 个账号 = 23 次上游调用，而它
+# 既没有单飞、也没有账号间间隔——池子一大，或某个账号始终拿不到快照被前端每 15 秒
+# 重试一次，就会变成成串的上游轰炸（网关日志里出现过 10 秒内 9 次全量刷）。
+#
+# 两道护栏，口径对齐隔壁 workbuddy2api-panel 的 internal/scheduler/staggered.go：
+#   1) CAS 单飞：同一时刻只允许一次全量刷，重复并发直接拒（HTTP 200 + busy=true，
+#      是正常回执而不是错误）；
+#   2) 账号间 800~1200ms 拟人间隔：避免几十个账号在同一秒把上游打成一串。
+#
+# 只有「全池」与「按区域」这类多账号目标才吃护栏；带 uid 的单账号刷新本来就只发一次
+# 请求，点了就该立刻有反应，不受这两道限制。
+#
+# 间隔可用 WB_CREDITS_SWEEP_GAP_MS 覆盖（"min-max" 或单个数字；0 = 关掉间隔，回到
+# 改造前的连发行为）。23 个账号 × 1 秒 ≈ 23 秒的等待是「拟人」的代价，调小它就等于
+# 削弱对外观感上的打散效果。
+_CREDITS_SWEEP_GUARD = threading.Lock()
+_CREDITS_SWEEP_RUNNING = False
+
+
+def _credits_sweep_gap_seconds():
+    """账号间隔的 (lo, hi)，单位秒。默认 (0.8, 1.2)，可用环境变量覆盖。"""
+    raw_gap = (os.environ.get("WB_CREDITS_SWEEP_GAP_MS") or "").strip()
+    if raw_gap:
+        try:
+            if "-" in raw_gap:
+                lo_s, hi_s = raw_gap.split("-", 1)
+                lo, hi = float(lo_s), float(hi_s)
+            else:
+                lo = hi = float(raw_gap)
+            if hi < lo:
+                lo, hi = hi, lo
+            return max(0.0, lo) / 1000.0, max(0.0, hi) / 1000.0
+        except (TypeError, ValueError):
+            pass          # 环境变量写坏了就回默认，不因为一个配置让功能不可用
+    return 0.8, 1.2
+
+
+def _credits_sweep_begin():
+    """抢一次全量刷：拿到返回 True，已有一次在跑返回 False（CAS）。"""
+    global _CREDITS_SWEEP_RUNNING
+    with _CREDITS_SWEEP_GUARD:
+        if _CREDITS_SWEEP_RUNNING:
+            return False
+        _CREDITS_SWEEP_RUNNING = True
+        return True
+
+
+def _credits_sweep_end():
+    global _CREDITS_SWEEP_RUNNING
+    with _CREDITS_SWEEP_GUARD:
+        _CREDITS_SWEEP_RUNNING = False
+
+
+def _credits_sweep(targets, paced=True):
+    """串行刷一批账号的积分，账号之间按拟人间隔停一下。
+
+    targets 里的 None（uid 查不到）跳过；单个账号取数**抛异常**也只记下来，
+    不中断整轮（池里一个坏凭证不该让其余账号全部刷不到）。
+    paced=False（单账号）时一步不停，保持改造前的即时反应。
+    """
+    lo, hi = _credits_sweep_gap_seconds() if paced else (0.0, 0.0)
+    results = []
+    first = True
+    for account in targets:
+        if account is None:
+            continue
+        if not first and hi > 0:
+            time.sleep(lo if hi <= lo else random.uniform(lo, hi))
+        first = False
+        try:
+            res = account.fetch_credits()
+        except Exception as exc:
+            # 单个账号炸掉只记下来，不中断整轮——否则池里一个坏凭证会让其余账号
+            # 全部刷不到（WBAPI 的同位逻辑也是记完就 continue）。
+            log("credits sweep: %s failed: %s" % (account.uid[:8], exc))
+            res = {"ok": False, "error": str(exc)}
+        results.append({"uid": account.uid, "ok": res.get("ok", False),
+                        "credits": account.credits, "error": res.get("error", "")})
+    return results
+
 # Release discovery only - the checker never downloads or installs anything.
 UPDATES = None
 ACCOUNTS_DIR = os.environ.get("ACCOUNTS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
@@ -17748,10 +17831,17 @@ class Handler(BaseHTTPRequestHandler):
     def _get_accounts_credits(self):
         if not self._authorized():
             return
-        # Refresh credits for all accounts
-        for a in (POOL.accounts if POOL else []):
-            a.fetch_credits()
-        return self._json_panel(200, {"accounts": account_views()})
+        # Refresh credits for all accounts —— 全池扫，吃单飞与拟人间隔
+        # （见 _credits_sweep 的说明）。已有一次在跑时不排队、不报错：直接把当前
+        # 快照回给调用方，前端拿到的仍是可用数据。
+        targets = list(POOL.accounts) if POOL else []
+        busy = not _credits_sweep_begin()
+        if not busy:
+            try:
+                _credits_sweep(targets)
+            finally:
+                _credits_sweep_end()
+        return self._json_panel(200, {"accounts": account_views(), "busy": busy})
 
     def _get_account_credits_grants(self):
         """积分获取历史：只读账号积分快照，不发上游请求。
@@ -19268,13 +19358,18 @@ class Handler(BaseHTTPRequestHandler):
             targets = [a for a in POOL.accounts if a.realm == realm]
         else:
             targets = list(POOL.accounts)
-        results = []
-        for account in targets:
-            if account is None:
-                continue
-            res = account.fetch_credits()
-            results.append({"uid": account.uid, "ok": res.get("ok", False),
-                            "credits": account.credits, "error": res.get("error", "")})
+        # 多账号目标才吃单飞与拟人间隔：单账号刷新本来就只发一次请求，不该被别人的
+        # 全量刷挡住，也不该为它空等一个间隔。
+        multi = len([t for t in targets if t is not None]) > 1
+        if multi and not _credits_sweep_begin():
+            # 已有一次全量刷在跑：不排队、不重复轰炸上游，把当前快照原样回给调用方。
+            return self._json_panel(200, {"results": [], "accounts": account_views(),
+                                          "busy": True})
+        try:
+            results = _credits_sweep(targets, paced=multi)
+        finally:
+            if multi:
+                _credits_sweep_end()
         return self._json_panel(200, {"results": results, "accounts": account_views()})
 
     def _route_account_credits_detail(self, payload):

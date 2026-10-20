@@ -441,6 +441,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 已发布版本的完整记录（v1.4.5 ~ v1.7.16，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 
 - **面板与日志出口统一脱敏账号手机号**（#415 跟进）：账号昵称常被设成手机号，此前面板 JSON、日志看板、stderr、`/logs/export` 与账号导出文档一律明文。现在 66 处面板出口走新增的 `_json_panel` / `_json_cached_panel` 封装（LLM 的 `/v1` 生成路由保持 `_json`，模型输出一字不动，有源码级用例钉住）；日志在 level/tag 推断之后才掩码，分类不受掩码影响；账号导出两条路（`?download=1` 与内联）共用一次脱敏。匹配只认整值 11 位手机号与文本内三段分组形态（容忍空格/点/中点等常见分隔符），数字边界保护 26 位订单号、10 位时间戳不被误切；掩码幂等、copy-on-write，不污染共享 TTL 缓存。新增 `tests/_test_nickname_privacy.py`（34 例）。
+- **全量刷积分加并发与节奏护栏**：「一键刷新积分」（POST `/accounts/credits`）与 GET `/accounts/credits` 在不带 uid/realm 时对整池逐个发上游计费请求，此前没有单飞也没有账号间隔——真机上出现过 10 秒内 9 次全量刷（约 207 次上游调用），触发条件是某账号始终拿不到快照、前端每 15 秒重试一次。现在：多账号目标先抢 CAS 单飞，抢不到直接回 `200 + busy=true` 与当前快照（不排队、不算错）；账号之间按 800~1200ms 随机间隔（`WB_CREDITS_SWEEP_GAP_MS` 可改，0 为关闭）；带 uid 的单账号刷新不受影响。新增 `tests/_test_credits_sweep_guard.py`（17 例）。
 
 ## 七、致谢与引用声明 (Credits & References)
 

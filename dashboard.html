@@ -747,6 +747,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   table.account-cards .acct-actions-row{flex-wrap:wrap;gap:6px}
   table.account-cards .acct-actions button.mini{min-height:32px;padding:6px 12px}
   table.account-cards .slot-select{max-width:none;width:100%;min-height:40px}
+  /* 账号工具栏：打卡按钮（每日活跃/Buddy 加油站）与「添加」同一行并靠右，
+     不再单独占一整行。 */
+  #accountsBody .toolbar .tb-checkin{margin-left:auto;flex-shrink:0}
   /* Forms stack */
   #pageSettings section > div[style*="display:flex"]{flex-wrap:wrap}
   #pageSettings input:not([type=checkbox]), #pageSettings select{min-height:40px;font-size:13px}
@@ -3928,6 +3931,16 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <div class="collapse-inner">
     <div class="toolbar">
     <button onclick="openLoginModal()">添加</button>
+    <!-- 打卡按钮与「添加」同排：手机端靠右显示，不再单独占一行。 -->
+    <div class="tb-group">
+    <button class="sec" id="btnCheckin" onclick="doCheckin(this)" style="display:none">Buddy 加油站签到</button>
+    <button class="sec" id="btnDailyChat" onclick="doDailyChat(this)" style="display:none">每日活跃打卡 (国际版)</button>
+    <!-- 网页通道打卡按钮不再上屏（2026-10-10 起）：网页通道那一步已经由设置里的
+         「国际版每日活跃打卡」自动带在「每日活跃打卡」里，手动补跑走
+         /accounts/daily-chat-web 即可。要放回面板：去掉下面的 display:none，
+         并在 updateUI() 里恢复它按视图显隐。 -->
+    <button class="sec" id="btnDailyChatWeb" onclick="doDailyChatWeb(this)" style="display:none">网页通道打卡 (国际版)</button>
+    </div>
     <div class="tb-group">
     <!-- 桌面客户端自 2026-09-24 起把 token 改成加密存储（$wbEncrypted 信封）。
          网关现在会从正在运行的桌面端进程内存里回收静态密钥来解密（只读、密钥
@@ -3942,15 +3955,6 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     <button class="sec" onclick="fetchCredits(this)">一键刷新积分</button>
     <button class="sec" onclick="refreshAccounts(this)" title="逐个刷新所有账号的上游访问凭证（相当于对每个账号点一次「刷新凭证」）">一键刷新凭证</button>
     <button class="sec" onclick="testAccounts(this)" title="逐个真发一条最小请求，并同时检查本机到上游的网络：能分清「账号坏了」和「本机断网了」，测试通过还会清掉该账号的熔断/降权计数">一键测试</button>
-    </div>
-    <div class="tb-group">
-    <button class="sec" id="btnCheckin" onclick="doCheckin(this)" style="display:none">Buddy 加油站签到</button>
-    <button class="sec" id="btnDailyChat" onclick="doDailyChat(this)" style="display:none">每日活跃打卡 (国际版)</button>
-    <!-- 网页通道打卡按钮不再上屏（2026-10-10 起）：网页通道那一步已经由设置里的
-         「国际版每日活跃打卡」自动带在「每日活跃打卡」里，手动补跑走
-         /accounts/daily-chat-web 即可。要放回面板：去掉下面的 display:none，
-         并在 updateUI() 里恢复它按视图显隐。 -->
-    <button class="sec" id="btnDailyChatWeb" onclick="doDailyChatWeb(this)" style="display:none">网页通道打卡 (国际版)</button>
     </div>
     <div class="tb-group">
     <button class="sec" onclick="autoAssignSlots()" title="把尚未绑定出口的已启用账号依次分配到已启用的代理槽；已有绑定的账号不受影响">一键分配代理</button>

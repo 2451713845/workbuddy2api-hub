@@ -454,6 +454,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- **DSH 系统提示首句被误判为渠道指纹**（#382 / #506 同类）：上游对连续短语 `You are an AI agent powered by DeepSeek Harness` 做大小写不敏感的渠道校验，命中即回 400 / code 11128；表现是同一账号换号、换身份、带齐会话头仍然失败，而短请求正常。逐句二分确认触发面是整句（拆词、单独 `DeepSeek Harness` 均通过），因此在出站清洗里把它改写为 `You are an AI agent powered by the DeepSeek Harness`（只插入一个 the，语义不变）。新增 6 项单测，覆盖精确 / 大小写 / 嵌入 / 幂等 / 部分短语 / `sanitize_messages` 路径。 / The upstream channel check rejects one contiguous DSH system-prompt phrase (`You are an AI agent powered by DeepSeek Harness`, case-insensitive) with 400 / code 11128 even when the account, identity and conversation headers are all correct, while short requests pass. Bisection shows only the whole sentence matches - individual words and `DeepSeek Harness` alone do not - so the outbound sanitizer now inserts a single "the" (`... powered by the DeepSeek Harness`), which preserves the meaning and no longer matches. Covered by 6 new unit tests.
+
 - **模型清单标出「免费账号不可用」**（#505，运行时部分）：上游返回 `11158`（model not allowed for user type）时写入 `accounts/model_entitlements.json`，同一 `(realm, model)` 后续成功请求自动撤标；`11102` / `11134` 不记。`/v1/models` 每条带 `entitlement` 字段，面板在倍率旁显示「免费账号不可用」胶囊，hover 给出 code / userType / 检测时刻，24 小时后自动过期。刷新清单时的主动探测尚未接（需要采样口径）。
 
 - **OpenRouter 估价可按模型校准**（#514）：`usage/pricing-markup.json` 支持 `{模型: 系数}`，估算金额乘以该系数，便于把 OR 的 top-provider 参考价校准到官方价；文件缺失、损坏或非正数按 1.0，策略历史不改写。新增 5 项测试。

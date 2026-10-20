@@ -4842,8 +4842,17 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
           <label style="font-size:13px;color:var(--dim)">回退模型组合</label>
-          <input id="setDailyChatWebFallbackModels" type="text" placeholder="留空 = 首选模型 + 内置免费模型；逗号分隔" style="flex:1;min-width:280px">
+          <span id="setDailyChatWebFallbackModelsState" style="font-size:12px;color:var(--dim)"></span>
+          <button class="sec mini" onclick="toggleDailyChatFallbackPicker()">选择模型</button>
           <button onclick="saveDailyChatWebFallbackModels(this)">保存</button>
+        </div>
+        <div id="setDailyChatWebFallbackPicker" style="display:none;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:6px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">
+            <input id="setDailyChatWebFallbackSearch" placeholder="搜索模型" oninput="filterDailyChatFallbackPicker()" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            <button class="sec mini" onclick="setDailyChatFallbackAll(true)">全选</button>
+            <button class="sec mini" onclick="setDailyChatFallbackAll(false)">全不选</button>
+          </div>
+          <div id="setDailyChatWebFallbackList" style="max-height:220px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px 8px"></div>
         </div>
         <div style="font-size:12px;color:var(--dim);margin-top:6px">
           回退开启后，网页通道每失败一次就换下一个模型；组合按目录倍率自动排序（免费 → 低积分 → 高积分），先试免费的，再试便宜的，最后才是贵的。候选至少各试一次，配置的「最多尝试次数」更大时再从头跑第二轮。默认关闭。
@@ -10859,8 +10868,7 @@ async function loadSettings(showToast){
       if(dailyWebFallbackInput) dailyWebFallbackInput.checked = dailyWebFallback;
       const dailyWebFallbackModels = Array.isArray(data.daily_chat_web_fallback_models)
         ? data.daily_chat_web_fallback_models : [];
-      const dailyWebFallbackModelsInput = document.getElementById('setDailyChatWebFallbackModels');
-      if(dailyWebFallbackModelsInput) dailyWebFallbackModelsInput.value = dailyWebFallbackModels.join(', ');
+      renderDailyChatFallbackPicker(dailyWebFallbackModels);
       const dailyWebFallbackState = document.getElementById('setDailyChatWebFallbackState');
       if(dailyWebFallbackState){
         dailyWebFallbackState.textContent = dailyWebFallback
@@ -11557,11 +11565,59 @@ async function saveDailyChatWebFallback(){
   }
 }
 
+let DAILY_CHAT_FALLBACK_SELECTED = [];
+function updateDailyChatFallbackState(){
+  const el = document.getElementById('setDailyChatWebFallbackModelsState');
+  if(el){
+    el.textContent = DAILY_CHAT_FALLBACK_SELECTED.length
+      ? ('已选 ' + DAILY_CHAT_FALLBACK_SELECTED.length + ' 个候选')
+      : '未选择（默认免费组合）';
+  }
+}
+function renderDailyChatFallbackPicker(selected){
+  DAILY_CHAT_FALLBACK_SELECTED = Array.isArray(selected) ? selected.slice() : [];
+  const list = document.getElementById('setDailyChatWebFallbackList');
+  if(!list) return;
+  loadDailyChatModels().then(function(models){
+    list.innerHTML = (models || []).map(function(m){
+      const checked = DAILY_CHAT_FALLBACK_SELECTED.indexOf(m.id) >= 0 ? ' checked' : '';
+      const tag = m.free ? '免费' : (m.credits || '付费');
+      return '<label class="fallback-pick-row" data-search="' + esc(m.id.toLowerCase()) + '" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 4px"><input type="checkbox" value="' + esc(m.id) + '"' + checked + ' onchange="toggleDailyChatFallbackModel(this)">' + esc(m.id) + ' <span style="color:var(--dim-light)">' + esc(tag) + '</span></label>';
+    }).join('') || '<div style="font-size:12px;color:var(--dim);padding:4px">模型清单为空</div>';
+    updateDailyChatFallbackState();
+  });
+}
+function toggleDailyChatFallbackPicker(){
+  const el = document.getElementById('setDailyChatWebFallbackPicker');
+  if(el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+function toggleDailyChatFallbackModel(el){
+  const id = el.value;
+  const index = DAILY_CHAT_FALLBACK_SELECTED.indexOf(id);
+  if(el.checked && index < 0) DAILY_CHAT_FALLBACK_SELECTED.push(id);
+  if(!el.checked && index >= 0) DAILY_CHAT_FALLBACK_SELECTED.splice(index, 1);
+  updateDailyChatFallbackState();
+}
+function setDailyChatFallbackAll(on){
+  const list = document.getElementById('setDailyChatWebFallbackList');
+  if(!list) return;
+  list.querySelectorAll('input[type=checkbox]').forEach(function(el){ el.checked = on; });
+  DAILY_CHAT_FALLBACK_SELECTED = on
+    ? Array.from(list.querySelectorAll('input[type=checkbox]')).map(function(el){ return el.value; })
+    : [];
+  updateDailyChatFallbackState();
+}
+function filterDailyChatFallbackPicker(){
+  const input = document.getElementById('setDailyChatWebFallbackSearch');
+  const list = document.getElementById('setDailyChatWebFallbackList');
+  if(!list) return;
+  const q = String((input && input.value) || '').trim().toLowerCase();
+  list.querySelectorAll('.fallback-pick-row').forEach(function(el){
+    el.style.display = !q || (el.getAttribute('data-search') || '').indexOf(q) >= 0 ? 'flex' : 'none';
+  });
+}
 async function saveDailyChatWebFallbackModels(btn){
-  const el = document.getElementById('setDailyChatWebFallbackModels');
-  const raw = (el && el.value) || '';
-  const models = raw.split(/[,，]/).map(function(s){ return s.trim(); })
-                     .filter(function(s){ return s.length > 0; });
+  const models = DAILY_CHAT_FALLBACK_SELECTED.slice();
   if(btn) btn.disabled = true;
   try {
     await postJSON('/settings/save', {daily_chat_web_fallback_models: models});

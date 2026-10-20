@@ -10008,6 +10008,7 @@ def runtime_settings_view():
         "auto_switch_products": wb_settings.auto_switch_products(ACCOUNTS_DIR),
         "free_model_credit_fallback": wb_settings.free_model_credit_fallback(ACCOUNTS_DIR),
         "enable_anthropic_messages": wb_settings.enable_anthropic_messages(ACCOUNTS_DIR),
+        "filter_models_by_key": wb_settings.filter_models_by_key(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
         "daily_chat_web_attempts":
@@ -17547,6 +17548,12 @@ class Handler(BaseHTTPRequestHandler):
             # 定址路由宣告的是「这个账号实际能接的模型」：该账号禁用的模型
             # 不出现在清单里，客户端按账号拆 provider 时才不会选到必失败的项。
             data = [m for m in data if not pinned.model_disabled(m.get("id"))]
+        # 可选：清单只宣告当前 Key 能用的模型。默认关闭时保持原来的全量
+        # 目录语义；打开后，配了模型限制的 Key 不会再看到会被本地 400 拒掉
+        # 的项，自动发现型客户端也就不会选到必失败的模型。
+        if wb_settings.filter_models_by_key(ACCOUNTS_DIR) and self.key_entry:
+            data = [m for m in data
+                    if wb_settings.key_allows_model(self.key_entry, m.get("id"))]
         payload = {"object": "list", "data": data,
                    "realm": req_realm or CURRENT_REALM}
         # 来源说明（面板展示用）：这批清单是上游 API 实时取的，还是读的
@@ -18350,6 +18357,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "enable_anthropic_messages must be true or false", "invalid_request_error")
             wb_settings.set_enable_anthropic_messages(ACCOUNTS_DIR, raw)
             reply["enable_anthropic_messages"] = raw
+        if "filter_models_by_key" in payload:
+            raw = payload.get("filter_models_by_key")
+            if not isinstance(raw, bool):
+                return self._error(400, "filter_models_by_key must be true or false", "invalid_request_error")
+            wb_settings.set_filter_models_by_key(ACCOUNTS_DIR, raw)
+            reply["filter_models_by_key"] = raw
         if "free_model_credit_fallback" in payload:
             raw = payload.get("free_model_credit_fallback")
             if not isinstance(raw, bool):

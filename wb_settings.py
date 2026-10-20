@@ -1360,6 +1360,28 @@ def set_free_model_credit_fallback(accounts_dir, enabled):
     return enabled
 
 
+def filter_models_by_key(accounts_dir):
+    """Whether /v1/models hides models the requesting key may not use.
+
+    Off by default: the endpoint has always advertised the upstream catalogue,
+    and an install that predates this setting keeps behaving exactly as it did.
+    When on, a key with a model restriction only sees the models it allows, so
+    clients that auto-discover the catalogue cannot pick one that is later
+    rejected at request time. Keys without a restriction still see everything.
+    """
+    return load(accounts_dir).get("filter_models_by_key") is True
+
+
+def set_filter_models_by_key(accounts_dir, enabled):
+    """Persist the /v1/models key filter toggle. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data["filter_models_by_key"] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
 def auto_switch_product(accounts_dir):
     """Whether an upstream 429 may rotate an account's outbound identity.
 

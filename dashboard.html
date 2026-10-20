@@ -4609,6 +4609,24 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">按 API Key 过滤模型列表 <em id="setFilterModelsByKeyState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              开启后，<code style="font-family:var(--mono,monospace)">/v1/models</code> 只返回当前 Key 允许的模型，避免自动获取模型列表的客户端选到会被本地拒绝的模型。Key 未配置模型限制时仍返回全部。默认关闭。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setFilterModelsByKey" type="checkbox" style="width:16px;height:16px">
+              启用过滤
+            </label>
+            <button onclick="saveFilterModelsByKey(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">免费额度耗尽回退积分版 <em id="setCreditFallbackState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               国际版 deepseek-v4.1-flash 免费额度在所有账号均耗尽（6004 撞线）后，自动回退到 deepseek-v4.1-flash-sg 付费通道。默认关闭。
@@ -10389,6 +10407,14 @@ async function loadSettings(showToast){
       const autoSwitch = data.auto_switch_product === true;
       const creditFallback = data.free_model_credit_fallback === true;
       const anthropicMsg = data.enable_anthropic_messages === true;
+      const filterModelsByKey = data.filter_models_by_key === true;
+      const filterModelsByKeyInput = document.getElementById('setFilterModelsByKey');
+      if(filterModelsByKeyInput) filterModelsByKeyInput.checked = filterModelsByKey;
+      const filterModelsByKeyState = document.getElementById('setFilterModelsByKeyState');
+      if(filterModelsByKeyState){
+        filterModelsByKeyState.textContent = filterModelsByKey ? '(已启用)' : '(未启用)';
+        filterModelsByKeyState.style.color = filterModelsByKey ? 'var(--accent2)' : 'var(--dim)';
+      }
       const anthropicMsgInput = document.getElementById('setAnthropicMessages');
       if(anthropicMsgInput) anthropicMsgInput.checked = anthropicMsg;
       const anthropicMsgState = document.getElementById('setAnthropicMessagesState');
@@ -11012,6 +11038,21 @@ async function saveAnthropicMessages(btn){
   try {
     await postJSON('/settings/save', {enable_anthropic_messages: value});
     toast(value ? '已启用：Anthropic Messages 接口' : '已关闭：Anthropic Messages 接口', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveFilterModelsByKey(btn){
+  const el = document.getElementById('setFilterModelsByKey');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {filter_models_by_key: value});
+    toast(value ? '已启用：按 API Key 过滤 /v1/models' : '已关闭：/v1/models 返回全部模型', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

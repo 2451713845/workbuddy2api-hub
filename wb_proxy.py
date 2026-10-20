@@ -10182,6 +10182,89 @@ LOG_BUFFER = deque(maxlen=2000)
 _LOG_LOCK = threading.Lock()
 _LOG_COUNTER = 0
 
+# ------------------------------------------------- 账号手机号脱敏（隐私出口）
+# 账号池里多数账号把手机号当昵称用，而面板要把它显示出来。真值只保留在内存对象
+# 与 accounts/*.json 磁盘文件里；**所有出口**（面板 JSON、导出件、看板日志、
+# 控制台 stderr）一律换成 138****1234。
+#
+# 为什么值级正则带 ^$ 锚点、文本级正则带 (?!\d)/(?<!\d) 边界：面板载荷里有 26 位
+# 订单号（deal_name）、10 位时间戳、11 位以上的 token 计数，裸匹配 1[3-9]\d{9}
+# 会把它们切一段出来当成手机号改掉——那是数据损坏，不是脱敏。
+#
+# 首三位 1[3-9]\d 仍要求连续（真实号码不会是 1-38-…）；只在 3-4-4 分组之间容忍
+# 常见书写分隔符（- . · 空格 制表符）。刻意不含换行，避免跨行把两段数字拼成号码。
+# 分隔符容忍不削弱「大数字不被切段」这条保证：26 位订单号是连续数字，10 位时间戳
+# 根本凑不满 11 位，二者的数字边界 (?!\d)/(?<!\d) 依旧成立。
+_PHONE_EXACT = re.compile(r"^1[3-9]\d{9}$")
+_PHONE_SEP = r"[ \t\-.·]?"
+_PHONE_IN_TEXT = re.compile(
+    r"(?<!\d)(1[3-9]\d)" + _PHONE_SEP + r"(\d{4})" + _PHONE_SEP + r"(\d{4})(?!\d)"
+)
+
+
+def _mask_phone(value):
+    """整个值就是手机号时掩码成 138****1234；其余（含非字符串）原样返回。
+
+    幂等：掩码结果不再是 11 位纯数字，重复调用不会二次掩码。
+    """
+    if not isinstance(value, str):
+        return value
+    s = value.strip()
+    if not _PHONE_EXACT.match(s):
+        return value
+    return "%s****%s" % (s[:3], s[-4:])
+
+
+def _mask_text(text):
+    """把一段文本中出现的手机号就地掩码（日志、服务端先拼好的摘要串）。
+
+    容忍 3-4-4 分组间的常见分隔符（138-1234-5678 / 138 1234 5678 / 138.1234.5678 /
+    138·1234·5678），输出统一为 138****5678，故幂等。
+    """
+    if not isinstance(text, str) or not _PHONE_IN_TEXT.search(text):
+        return text
+    return _PHONE_IN_TEXT.sub(lambda m: m.group(1) + "****" + m.group(3), text)
+
+
+def _redact_account_names(obj):
+    """递归脱敏账号名，**copy-on-write**：无命中时原对象原样返回（同一引用）。
+
+    两条规则：
+      * 键名恰为 "nickname" → 先 _mask_phone（值级，严格），不中再 _mask_text
+        （覆盖「老王(13812345678)」这种昵称里嵌号码的形态）
+      * 其余字符串值        → _mask_text —— 覆盖服务端**先拼成字符串再返回**的
+        logs / msg 通道（昵称根本不在 nickname 键里），这是首轮方案漏掉的那一类
+
+    绝不原地改：这些载荷里有的是直接返回共享 TTL 缓存对象（remaining_usage()、
+    usage_snapshot() 都返回缓存本体），原地改会把掩码写进缓存、污染其他读者。
+    """
+    if isinstance(obj, dict):
+        out = None
+        for k, v in obj.items():
+            if k == "nickname":
+                nv = _mask_phone(v)
+                if nv is v:
+                    nv = _mask_text(v)
+            else:
+                nv = _redact_account_names(v)
+            if nv is not v:
+                if out is None:
+                    out = dict(obj)
+                out[k] = nv
+        return obj if out is None else out
+    if isinstance(obj, list):
+        out = None
+        for i, v in enumerate(obj):
+            nv = _redact_account_names(v)
+            if nv is not v:
+                if out is None:
+                    out = list(obj)
+                out[i] = nv
+        return obj if out is None else out
+    if isinstance(obj, str):
+        return _mask_text(obj)
+    return obj
+
 # 日志级别与模块的自动归类。调用点显式传了 level/tag 就用传的，没传才按内容猜。
 #
 # 级别：早先只认英文关键字，而本仓大量日志是中文——定价侧的「抓取失败，继续用
@@ -10252,6 +10335,9 @@ def add_log_entry(msg, level=None, tag=None):
                 break
         else:
             tag = "system"
+    # 掩码必须发生在 level/tag 推断**之后**：推断用的是原始串（见上），若先掩码，
+    # 含手机号的日志行其分类会被改变，属行为回归。buffer 里只存掩码后的文本。
+    safe_msg = _mask_text(msg_str)
     with _LOG_LOCK:
         _LOG_COUNTER += 1
         entry = {
@@ -10260,7 +10346,7 @@ def add_log_entry(msg, level=None, tag=None):
             "time": t_short,
             "level": level,
             "tag": tag,
-            "msg": msg_str,
+            "msg": safe_msg,
         }
         LOG_BUFFER.append(entry)
     # 落库在锁外：append 只是入队，但没必要把持锁时间拉长到调用 queue.put。
@@ -10269,7 +10355,8 @@ def add_log_entry(msg, level=None, tag=None):
     return entry
 
 def log(msg, level=None, tag=None):
-    sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {msg}\n")
+    # 控制台 stderr 与看板 buffer 同源脱敏：一边泄露一边遮蔽没有意义
+    sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {_mask_text(str(msg))}\n")
     sys.stderr.flush()
     add_log_entry(msg, level=level, tag=tag)
 
@@ -16950,6 +17037,20 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             # 无论 _json() 是否抛异常，都不能把这次请求的 tag 留给下一次。
             self._json_etag = None
+
+    # ---- 面板出口的脱敏封装 ----------------------------------------------
+    # 刻意**不**在 _json() 里挂钩子：/v1/chat/completions、/v1/responses、
+    # /v1/messages 的非流式返回体也走 _json()，那是一份模型输出，一个字节都不
+    # 许动（若其中出现 "nickname": "13800138000"，脱敏就是篡改）。
+    # 所以改成语义化命名：面板展示端点显式调用 _json_panel*，LLM 路由保持 _json。
+    def _json_panel(self, code, obj):
+        return self._json(code, _redact_account_names(obj))
+    def _json_cached_panel(self, code, data_fn, etag_fn):
+        # 脱敏只发生在 data_fn 的返回值上；ETag 由 (kind, key, built_at) 决定、
+        # 与响应体无关，所以掩码不会造成「缓存体与校验符对不上」。
+        return self._json_cached(code,
+                                 lambda: _redact_account_names(data_fn()),
+                                 etag_fn)
     def _discard_body(self):
         """Drain the request body so the connection stays in sync.
 
@@ -17600,7 +17701,7 @@ class Handler(BaseHTTPRequestHandler):
         req_range, req_since, req_until = range_query(query)
         # 取数与取校验符必须看到同一套参数（否则 tag 落到另一条缓存条目上），
         # 但"先取戳、再取数、再取一次戳"的配对顺序由 _json_cached 保证。
-        return self._json_cached(
+        return self._json_cached_panel(
             200,
             lambda: usage_snapshot(realm=req_realm, range=req_range,
                                    since=req_since, until=req_until),
@@ -17619,7 +17720,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             page = 1
         req_realm = query.get('realm', [None])[0] or self.headers.get('X-Realm') or CURRENT_REALM
-        return self._json(200, recent_usage(limit, realm=req_realm, page=page))
+        return self._json_panel(200, recent_usage(limit, realm=req_realm, page=page))
 
     def _get_activity_history(self, query):
         """账号每日活动的结构化历史（issue #34）。只读，供面板的签到记录用。
@@ -17642,7 +17743,7 @@ class Handler(BaseHTTPRequestHandler):
                                         limit=first("limit") or None)
         except ValueError as exc:
             return self._error(400, str(exc), "invalid_request_error")
-        return self._json(200, payload)
+        return self._json_panel(200, payload)
 
     def _get_accounts_credits(self):
         if not self._authorized():
@@ -17650,7 +17751,7 @@ class Handler(BaseHTTPRequestHandler):
         # Refresh credits for all accounts
         for a in (POOL.accounts if POOL else []):
             a.fetch_credits()
-        return self._json(200, {"accounts": account_views()})
+        return self._json_panel(200, {"accounts": account_views()})
 
     def _get_account_credits_grants(self):
         """积分获取历史：只读账号积分快照，不发上游请求。
@@ -17661,7 +17762,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         if not self._authorized():
             return
-        return self._json(200, credit_grants())
+        return self._json_panel(200, credit_grants())
 
     def _get_account_credits_detail(self, query):
         if not self._authorized():
@@ -17669,18 +17770,18 @@ class Handler(BaseHTTPRequestHandler):
         uid = (query.get("uid") or [""])[0]
         refresh = (query.get("refresh") or ["0"])[0] in ("1", "true", "yes")
         if not POOL:
-            return self._json(200, {"ok": False, "error": "账号池未初始化"})
+            return self._json_panel(200, {"ok": False, "error": "账号池未初始化"})
         account = POOL.get(uid) if uid else None
         if not account:
             if POOL.accounts:
                 account = POOL.accounts[0]
             else:
-                return self._json(200, {"ok": False, "error": "未找到指定账号"})
+                return self._json_panel(200, {"ok": False, "error": "未找到指定账号"})
 
         if refresh or not account.credits or not account.credits.get("packages"):
             res = account.fetch_credits()
             if not res.get("ok"):
-                return self._json(200, {
+                return self._json_panel(200, {
                     "ok": False,
                     "uid": account.uid,
                     "nickname": account.nickname,
@@ -17689,7 +17790,7 @@ class Handler(BaseHTTPRequestHandler):
                     "error": res.get("error", "获取积分明细失败")
                 })
 
-        return self._json(200, {
+        return self._json_panel(200, {
             "ok": True,
             "uid": account.uid,
             "nickname": account.nickname,
@@ -17703,7 +17804,7 @@ class Handler(BaseHTTPRequestHandler):
         # Fold the usage log before building the view, so the 日限额 badge and
         # the parked count describe right now instead of the last request.
         apply_daily_guards()
-        return self._json(200, {
+        return self._json_panel(200, {
             "accounts": account_views(realm=query.get('realm', [None])[0] or CURRENT_REALM),
             "storage": ACCOUNTS_DIR,
             "usable": POOL.count_ready() if POOL else 0,
@@ -17735,6 +17836,12 @@ class Handler(BaseHTTPRequestHandler):
             include_secrets=include_secrets,
             uids=uids or None,
         )
+        # 一个出口覆盖两条路：不带 download=1 走下面的 _json（前端实际用的就是
+        # 这条），带 download=1 走 _download()（自带 json.dumps，绕过 _json）。
+        # 登记后果：这份掩码昵称若经 /accounts/import 回灌，会以掩码形态落盘；
+        # 可接受——昵称正是要隐藏的东西，且 sync_nickname() 能从上游取回真名，
+        # accessToken/refreshToken 等凭证字段不受影响。
+        doc = _redact_account_names(doc)
         if (query.get("download") or ["0"])[0] in ("1", "true", "yes"):
             stamp = time.strftime("%Y%m%d-%H%M%S")
             if len(uids) == 1:
@@ -17751,14 +17858,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         state = (query.get("state") or [""])[0]
-        return self._json(200, POOL.poll_login(state))
+        return self._json_panel(200, POOL.poll_login(state))
 
     def _get_usage_analytics(self, query):
         if not self._authorized():
             return
         req_realm = query.get("realm", [None])[0] or None
         req_range, req_since, req_until = range_query(query)
-        return self._json_cached(
+        return self._json_cached_panel(
             200,
             lambda: compute_usage_analytics(realm=req_realm, range=req_range,
                                             since=req_since, until=req_until),
@@ -17768,7 +17875,7 @@ class Handler(BaseHTTPRequestHandler):
     def _get_usage_by_account(self):
         if not self._authorized():
             return
-        return self._json_cached(200,
+        return self._json_cached_panel(200,
                                  lambda: {"accounts": usage_by_account()},
                                  usage_by_account_etag)
 
@@ -17777,7 +17884,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         # 载荷挂短 TTL（WB_REMAINING_TTL，默认 15 秒）+ ETag：面板 5 秒一轮的
         # 轮询在 TTL 内命中同一条缓存 → 校验符不变 → 304，重建与重传都省掉。
-        return self._json_cached(200, remaining_usage, remaining_usage_etag)
+        return self._json_cached_panel(200, remaining_usage, remaining_usage_etag)
 
     def _get_usage_timeseries(self, query):
         if not self._authorized():
@@ -17790,7 +17897,7 @@ class Handler(BaseHTTPRequestHandler):
             bucket_seconds = int(bucket) if bucket else None
         except (TypeError, ValueError):
             bucket_seconds = None
-        return self._json_cached(
+        return self._json_cached_panel(
             200,
             lambda: usage_timeseries(realm=req_realm, range=req_range,
                                      since=req_since, until=req_until,
@@ -17808,7 +17915,7 @@ class Handler(BaseHTTPRequestHandler):
             sample = 5000
         req_realm = query.get('realm', [None])[0] or self.headers.get('X-Realm') or CURRENT_REALM
         req_range, req_since, req_until = range_query(query)
-        return self._json_cached(
+        return self._json_cached_panel(
             200,
             lambda: perf_stats(sample, realm=req_realm, range=req_range,
                                since=req_since, until=req_until),
@@ -17820,7 +17927,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         cn_accounts = [a for a in (POOL.accounts if POOL else []) if a.realm == "cn" and a.enabled]
         if not cn_accounts:
-            return self._json(200, {"tasks": [], "summary": {}, "accounts": [], "msg": "未找到可用的国内版账号"})
+            return self._json_panel(200, {"tasks": [], "summary": {}, "accounts": [], "msg": "未找到可用的国内版账号"})
         uid = (query.get("uid") or [None])[0]
         acc = None
         if uid and uid != "all":
@@ -17831,7 +17938,7 @@ class Handler(BaseHTTPRequestHandler):
             acc = cn_accounts[0]
         tasks, summary = growth_snapshot(acc)
         acct_list = [{"uid": a.uid, "nickname": a.nickname or a.uid[:8]} for a in cn_accounts]
-        return self._json(200, {
+        return self._json_panel(200, {
             "tasks": tasks,
             "summary": summary,
             "account": acc.public(),
@@ -17841,7 +17948,7 @@ class Handler(BaseHTTPRequestHandler):
     def _get_scheduler(self):
         if not self._authorized():
             return
-        return self._json(200, SCHEDULER.status() if SCHEDULER else {"enabled": False, "msg": "未运行"})
+        return self._json_panel(200, SCHEDULER.status() if SCHEDULER else {"enabled": False, "msg": "未运行"})
 
     def _get_pricing(self):
         if not self._authorized():
@@ -17915,13 +18022,17 @@ class Handler(BaseHTTPRequestHandler):
                 stats = {}
             result["stored"] = stats.get("rows", 0)
             result["db_bytes"] = stats.get("bytes", 0)
-        return self._json(200, result)
+        return self._json_panel(200, result)
 
     def _get_logs_export(self):
         if not self._authorized():
             return
         log_data = get_logs(limit=5000)
-        lines = [f"[{item['ts']}] [{item['level']}] [{item['tag']}] {item['msg']}" for item in log_data["logs"]]
+        # 导出走的是 send_response/wfile，不经过 _json_panel，所以掩码得自己来：
+        # 新写入的条目在 add_log_entry 里已掩码，但落库打开之前的历史行仍是明文，
+        # 直接拼进下载文件就把「出口脱敏」这条从侧门绕过去了。
+        lines = [f"[{item['ts']}] [{item['level']}] [{item['tag']}] {_mask_text(str(item['msg']))}"
+                 for item in log_data["logs"]]
         text_content = "\n".join(lines).encode("utf-8")
         filename = f"wb-proxy-{time.strftime('%Y%m%d-%H%M%S')}.log"
         self.send_response(200)
@@ -19141,7 +19252,7 @@ class Handler(BaseHTTPRequestHandler):
                 log("product switch failed for %s: %s" % (account.uid[:8], exc),
                     level="WARN")
 
-        return self._json(200, {
+        return self._json_panel(200, {
             "ok": True,
             "product": target,
             "changed": changed,
@@ -19164,7 +19275,7 @@ class Handler(BaseHTTPRequestHandler):
             res = account.fetch_credits()
             results.append({"uid": account.uid, "ok": res.get("ok", False),
                             "credits": account.credits, "error": res.get("error", "")})
-        return self._json(200, {"results": results, "accounts": account_views()})
+        return self._json_panel(200, {"results": results, "accounts": account_views()})
 
     def _route_account_credits_detail(self, payload):
         if not self._authorized():
@@ -19172,15 +19283,15 @@ class Handler(BaseHTTPRequestHandler):
         uid = payload.get("uid")
         refresh = payload.get("refresh", True)
         if not POOL:
-            return self._json(200, {"ok": False, "error": "账号池未初始化"})
+            return self._json_panel(200, {"ok": False, "error": "账号池未初始化"})
         account = POOL.get(uid) if uid else None
         if not account:
-            return self._json(200, {"ok": False, "error": "未找到指定账号"})
+            return self._json_panel(200, {"ok": False, "error": "未找到指定账号"})
 
         if refresh or not account.credits or not account.credits.get("packages"):
             res = account.fetch_credits()
             if not res.get("ok"):
-                return self._json(200, {
+                return self._json_panel(200, {
                     "ok": False,
                     "uid": account.uid,
                     "nickname": account.nickname,
@@ -19189,7 +19300,7 @@ class Handler(BaseHTTPRequestHandler):
                     "error": res.get("error", "获取积分明细失败")
                 })
 
-        return self._json(200, {
+        return self._json_panel(200, {
             "ok": True,
             "uid": account.uid,
             "nickname": account.nickname,
@@ -19199,18 +19310,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route_tasks_run(self, payload):
         if not POOL:
-            return self._json(200, {"ok": False, "msg": "账号池不可用"})
+            return self._json_panel(200, {"ok": False, "msg": "账号池不可用"})
         invalidate_tasks_cache()          # 跑完任务状态就变了，别再端旧快照
         uid = payload.get("uid")
         if uid and uid != "all":
             target = POOL.get(uid)
             if not target or target.realm != "cn":
-                return self._json(200, {"ok": False, "msg": "未找到指定的国内版账号"})
+                return self._json_panel(200, {"ok": False, "msg": "未找到指定的国内版账号"})
             targets = [target]
         else:
             targets = [a for a in POOL.accounts if a.realm == "cn" and a.enabled]
         if not targets:
-            return self._json(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
+            return self._json_panel(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
         from wb_tasks import run_growth_tasks
         combined_logs = []
         total_credit = 0
@@ -19229,7 +19340,7 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(1.5)
         combined_logs.append(f"====== 全部 {len(targets)} 个账号任务执行完毕，累计新增积分: +{total_credit} ======")
         add_log_entry(f"[任务福利] 批量成长任务执行完成，共 {len(targets)} 个账号，新增积分 +{total_credit}", tag="tasks")
-        return self._json(200, {
+        return self._json_panel(200, {
             "ok": True,
             "credit_added": total_credit,
             "logs": combined_logs,
@@ -19238,18 +19349,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route_tasks_streak_bonus(self, payload):
         if not POOL:
-            return self._json(200, {"ok": False, "msg": "账号池不可用"})
+            return self._json_panel(200, {"ok": False, "msg": "账号池不可用"})
         invalidate_tasks_cache()
         uid = payload.get("uid")
         if uid and uid != "all":
             target = POOL.get(uid)
             if not target or target.realm != "cn":
-                return self._json(200, {"ok": False, "msg": "未找到指定的国内版账号"})
+                return self._json_panel(200, {"ok": False, "msg": "未找到指定的国内版账号"})
             targets = [target]
         else:
             targets = [a for a in POOL.accounts if a.realm == "cn" and a.enabled]
         if not targets:
-            return self._json(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
+            return self._json_panel(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
         from wb_tasks import run_streak_bonus
         results = []
         for i, acc in enumerate(targets):
@@ -19260,22 +19371,22 @@ class Handler(BaseHTTPRequestHandler):
             add_log_entry(f"[任务福利] 账号 [{nick}] 连登管家与抽奖: {res.get('msg')}", tag="tasks")
             if i < len(targets) - 1:
                 time.sleep(1.0)
-        return self._json(200, {"ok": True, "msg": chr(10).join(results)})
+        return self._json_panel(200, {"ok": True, "msg": chr(10).join(results)})
 
     def _route_tasks_travel(self, payload):
         if not POOL:
-            return self._json(200, {"ok": False, "msg": "账号池不可用"})
+            return self._json_panel(200, {"ok": False, "msg": "账号池不可用"})
         invalidate_tasks_cache()          # 同上：旅行会改任务/体力状态
         uid = payload.get("uid")
         if uid and uid != "all":
             target = POOL.get(uid)
             if not target or target.realm != "cn":
-                return self._json(200, {"ok": False, "msg": "未找到指定的国内版账号"})
+                return self._json_panel(200, {"ok": False, "msg": "未找到指定的国内版账号"})
             targets = [target]
         else:
             targets = [a for a in POOL.accounts if a.realm == "cn" and a.enabled]
         if not targets:
-            return self._json(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
+            return self._json_panel(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
         from wb_tasks import do_cat_travel
         results = []
         for i, acc in enumerate(targets):
@@ -19295,7 +19406,7 @@ class Handler(BaseHTTPRequestHandler):
         summary_msg = chr(10).join([f"{r['nickname']}: {r['msg']}" for r in results])
         for r in results:
             add_log_entry(f"[任务福利] 账号 [{r['nickname']}] 猫猫旅行: {r['msg']}", tag="tasks")
-        return self._json(200, {
+        return self._json_panel(200, {
             "ok": True,
             "results": results,
             "msg": summary_msg,
@@ -19337,7 +19448,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route_scheduler_trigger(self, payload):
         if SCHEDULER:
-            return self._json(200, SCHEDULER.trigger_now())
+            return self._json_panel(200, SCHEDULER.trigger_now())
         return self._json(200, {"ok": False, "msg": "调度器未初始化"})
 
     def _route_quota_scan_run(self):
@@ -19367,7 +19478,7 @@ class Handler(BaseHTTPRequestHandler):
         if SCHEDULER:
             SCHEDULER.enabled = not SCHEDULER.enabled
             SCHEDULER.log(f"用户切换调度器状态为: {'启用' if SCHEDULER.enabled else '暂停'}")
-            return self._json(200, SCHEDULER.status())
+            return self._json_panel(200, SCHEDULER.status())
         return self._json(200, {"ok": False, "msg": "调度器未初始化"})
 
     def _route_pricing_refresh(self, payload):
@@ -19466,7 +19577,7 @@ class Handler(BaseHTTPRequestHandler):
             add_log_entry(f"[任务福利] 账号 [{nick}] 每日签到: {res.get('msg') if res.get('ok') else res.get('error')}",
                           level="INFO" if res.get("ok") else "WARN", tag="tasks")
             results.append({"uid": account.uid, "nickname": account.nickname, **res})
-        return self._json(200, {"results": results, "accounts": account_views()})
+        return self._json_panel(200, {"results": results, "accounts": account_views()})
 
     def _route_accounts_daily_chat(self, payload):
         uid = payload.get("uid")
@@ -19496,7 +19607,7 @@ class Handler(BaseHTTPRequestHandler):
             log(f"[任务福利] 账号 [{nick}] 每日活跃打卡: {res.get('msg') if res.get('ok') else res.get('error')}",
                 level="INFO" if res.get("ok") else "WARN", tag="tasks")
             results.append({"uid": account.uid, "nickname": account.nickname, **res})
-        return self._json(200, {"results": results, "accounts": account_views()})
+        return self._json_panel(200, {"results": results, "accounts": account_views()})
 
     def _route_accounts_daily_chat_web(self, payload):
         """网页通道打卡：只建网页端会话，不发桌面端那条轻量对话。
@@ -19518,7 +19629,7 @@ class Handler(BaseHTTPRequestHandler):
             log(f"[任务福利] 账号 [{nick}] 网页通道打卡: {res.get('conversation') if res.get('ok') else res.get('error')}",
                 level="INFO" if res.get("ok") else "WARN", tag="tasks")
             results.append({"uid": account.uid, "nickname": account.nickname, **res})
-        return self._json(200, {"results": results, "accounts": account_views()})
+        return self._json_panel(200, {"results": results, "accounts": account_views()})
 
     def _route_accounts_login_start(self, payload):
         platform = payload.get("platform") or "CLI"
@@ -19551,9 +19662,9 @@ class Handler(BaseHTTPRequestHandler):
                     force=bool(payload.get("force")), log=lambda m: log(m, tag="accounts"))
             except Exception as exc:
                 log("at-rest key recovery failed: %s" % exc, level="WARN", tag="accounts")
-                return self._json(200, {"ok": False, "msg": str(exc),
+                return self._json_panel(200, {"ok": False, "msg": str(exc),
                                         "atrest": wb_atrest.status()})
-            return self._json(200, {
+            return self._json_panel(200, {
                 "ok": True,
                 "keyId": wb_atrest.derive_key_id(key),
                 "msg": "已从桌面客户端进程回收密钥（只留在内存里）",
@@ -19567,9 +19678,9 @@ class Handler(BaseHTTPRequestHandler):
                                           log=lambda m: log(m, tag="accounts"))
             except Exception as exc:
                 log("at-rest key import rejected: %s" % exc, level="WARN", tag="accounts")
-                return self._json(200, {"ok": False, "msg": str(exc),
+                return self._json_panel(200, {"ok": False, "msg": str(exc),
                                         "atrest": wb_atrest.status()})
-            return self._json(200, {
+            return self._json_panel(200, {
                 "ok": True,
                 "keyId": wb_atrest.derive_key_id(key),
                 "msg": "已导入解码密钥（只留在内存里）",
@@ -19577,7 +19688,7 @@ class Handler(BaseHTTPRequestHandler):
             })
         if payload.get("forgetKey"):
             wb_atrest.forget_key()
-            return self._json(200, {"ok": True, "atrest": wb_atrest.status()})
+            return self._json_panel(200, {"ok": True, "atrest": wb_atrest.status()})
         if target_path:
             realm = payload.get("realm")
             try:
@@ -19586,17 +19697,17 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._error(400, "import failed: %s" % exc)
             log("imported %s from %s (user confirmed)" % (account.uid[:8], os.path.basename(target_path)))
-            return self._json(200, {
+            return self._json_panel(200, {
                 "imported": [account.public()],
                 "accounts": account_views(),
             })
         if payload.get("all"):
             imported = import_desktop_accounts(payload.get("realm"))
-            return self._json(200, {
+            return self._json_panel(200, {
                 "imported": [a.public() for a in imported],
                 "accounts": account_views(),
             })
-        return self._json(200, {
+        return self._json_panel(200, {
             "detected": desktop_credential_scan(),
             "accounts": account_views(),
             "pool_uids": [a.uid for a in POOL.accounts],
@@ -19613,7 +19724,7 @@ class Handler(BaseHTTPRequestHandler):
             ok = account.refresh()
             account.save(ACCOUNTS_DIR)
             results.append({"uid": account.uid, "ok": ok, "error": account.last_error})
-        return self._json(200, {"results": results})
+        return self._json_panel(200, {"results": results})
 
     def _route_accounts_sync_profile(self, payload):
         """Manual nickname refresh from the web console.
@@ -19645,7 +19756,7 @@ class Handler(BaseHTTPRequestHandler):
             updated.append({"uid": account.uid, "nickname": nickname})
             log("account %s: nickname synced from the web console"
                 % account.uid[:8], level="INFO")
-        return self._json(200, {"updated": updated, "failed": failed,
+        return self._json_panel(200, {"updated": updated, "failed": failed,
                                 "accounts": account_views()})
 
     def _route_accounts_test(self, payload):
@@ -19705,7 +19816,7 @@ class Handler(BaseHTTPRequestHandler):
         log("test all: realm=%s model=%s tested=%d passed=%d failed=%d network=%s"
             % (realm, model, len(rows), len(passed), len(failed),
                "ok" if network.get("ok") else "DOWN"), tag="accounts")
-        return self._json(200, {"ok": True, "summary": summary, "network": network,
+        return self._json_panel(200, {"ok": True, "summary": summary, "network": network,
                                 "results": rows, "accounts": account_views()})
 
     def _route_accounts_set(self, payload):
@@ -19764,11 +19875,11 @@ class Handler(BaseHTTPRequestHandler):
                 400,
                 "nothing to update: pass 'enabled', 'proxy', 'proxySlot', 'weight' or 'note'"
             )
-        return self._json(200, {"account": updated})
+        return self._json_panel(200, {"account": updated})
 
     def _route_accounts_set_all(self, payload):
         POOL.set_all_enabled(bool(payload.get("enabled")))
-        return self._json(200, {"accounts": account_views()})
+        return self._json_panel(200, {"accounts": account_views()})
 
     def _route_accounts_delete(self, payload):
         uid = payload.get("uid")
@@ -19776,7 +19887,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "uid required")
         removed = POOL.remove(uid)
         log("account %s deleted" % uid[:8])
-        return self._json(200, {"deleted": removed, "accounts": account_views()})
+        return self._json_panel(200, {"deleted": removed, "accounts": account_views()})
 
     def _route_accounts_import(self, payload):
         # Import a previously exported document (or any hand-written list
@@ -19811,7 +19922,7 @@ class Handler(BaseHTTPRequestHandler):
             # see exactly what an import would do before committing to it.
             # Shares its rules with the real import, so the preview cannot
             # disagree with what would actually happen.
-            return self._json(200, {
+            return self._json_panel(200, {
                 "dryRun": True,
                 "count": len(rows),
                 "result": POOL.preview_import_rows(rows, realm=forced_realm, overwrite=overwrite),
@@ -19821,7 +19932,7 @@ class Handler(BaseHTTPRequestHandler):
         log("account import: %d added, %d updated, %d skipped, %d invalid"
             % (len(report["added"]), len(report["updated"]),
                len(report["skipped"]), len(report["invalid"])))
-        return self._json(200, {
+        return self._json_panel(200, {
             "count": len(rows),
             "result": report,
             "accounts": account_views(),
@@ -20970,7 +21081,10 @@ def _report_first_run(args):
         log("still no accounts - starting anyway so you can log in via the dashboard")
     if args.import_desktop:
         for account in POOL.accounts:
-            print("  %s  %s  %s" % (account.uid[:8], account.nickname, account.domain))
+            # 控制台也是「显示」：真机核验时会直接看这条输出。
+            # 用文本级掩码而非值级，覆盖「老王(13812345678)」这类昵称内嵌号码的形态，
+            # 与 log() 的 stderr 出口、_redact_account_names 的 nickname 规则保持一致。
+            print("  %s  %s  %s" % (account.uid[:8], _mask_text(account.nickname), account.domain))
         return
 
 def _log_startup_summary(args, api_key_generated):

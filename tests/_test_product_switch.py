@@ -27,6 +27,9 @@ UIDS = ("intl-aaa-1", "intl-bbb-2", "cn-ccc-3")
 
 
 class FakeRequest(object):
+    # 该路由现在经 _json_panel 出站（手机号脱敏）；替身只接管最底层的 _json，
+    # 让真实的脱敏逻辑照常执行——否则这条用例就不再代表线上行为。
+    _json_panel = proxy.Handler._json_panel
     """Just enough of the handler for the route under test."""
 
     _route_accounts_product = proxy.Handler._route_accounts_product

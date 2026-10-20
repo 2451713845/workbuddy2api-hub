@@ -12889,7 +12889,13 @@ def build_upstream_body(payload):
             if "thinking" not in body:
                 body["thinking"] = {"type": "enabled"}
             if not effort:
-                body["reasoning_effort"] = model_default_effort(model) or "high"
+                mode = default_reasoning_effort_mode()
+                if mode != "off":
+                    chosen = model_default_effort(model)
+                    if not chosen and mode == "high":
+                        chosen = "high"
+                    if chosen:
+                        body["reasoning_effort"] = chosen
     body["stream"] = True
     if "stream_options" not in body:
         body["stream_options"] = {"include_usage": True}
@@ -12957,6 +12963,24 @@ def model_default_effort(model):
     """The effort the catalog applies when the client asks for none, or None."""
     effort = model_reasoning_meta(model).get("defaultEffort")
     return effort.strip() if isinstance(effort, str) and effort.strip() else None
+
+
+def default_reasoning_effort_mode():
+    """How to fill reasoning_effort when the client left it out.
+
+    high    - catalog default, else "high" (legacy behaviour, default)
+    catalog - catalog default only; leave the field out when the model has none
+    off     - never inject a default
+
+    The forced "high" is what makes deepseek spend the whole round on reasoning
+    and occasionally return no output text (issue #508).
+    """
+    raw = os.environ.get("WB_DEFAULT_REASONING_EFFORT", "").strip().lower()
+    if raw in ("off", "none", "0", "false", "no"):
+        return "off"
+    if raw in ("catalog", "model", "default"):
+        return "catalog"
+    return "high"
 
 
 def model_fixed_effort(model):
@@ -16446,6 +16470,22 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
     if finish == "length":
         obj["incomplete_details"] = {"reason": "max_output_tokens"}
     return obj
+
+
+def reasoning_only_response(result):
+    """True when a Responses object has reasoning but no text or tool call."""
+    obj = result or {}
+    output = obj.get("output") or []
+    text = obj.get("output_text") or ""
+    has_calls = any(
+        isinstance(o, dict) and o.get("type") in ("function_call", "web_search_call")
+        for o in output)
+    has_reasoning = any(
+        isinstance(o, dict) and o.get("type") == "reasoning" for o in output)
+    return (not text.strip() and has_reasoning and not has_calls
+            and obj.get("status") != "incomplete")
+
+
 def stream_responses_events(upstream, model, holder):
     """Yield Responses-API SSE frames translated from chat-completions chunks."""
     resp_id, msg_id, rs_id = _new_id("resp_"), _new_id("msg_"), _new_id("rs_")
@@ -16722,12 +16762,31 @@ def stream_responses_events(upstream, model, holder):
                     "prompt_tokens_details": {"cached_tokens": 0},
                 }
                 holder["usage"] = usage
+        # DeepSeek occasionally burns the whole round on reasoning and returns
+        # no text at all. Emitting response.completed here makes the client
+        # believe the turn finished (issue #508); fail the response instead so
+        # it can retry.
+        empty_reasoning_only = (
+            not full_text.strip()
+            and bool("".join(reason_parts).strip())
+            and not tool_calls_map and not dsml_tool_calls
+            and not _internal_calls
+            and finish != "length" and not dropped_truncated)
         status = ("completed" if (finish != "length" and not dropped_truncated)
                   else "incomplete")
+        if empty_reasoning_only:
+            status = "failed"
+            holder["empty_reasoning"] = True
         final = resp_obj(status)
         if finish == "length":
             final["incomplete_details"] = {"reason": "max_output_tokens"}
-        if not holder.get("suppress_completion"):
+        if empty_reasoning_only:
+            final["error"] = {
+                "code": "empty_reasoning_only",
+                "message": "upstream returned reasoning without output text; retry",
+            }
+            yield ev("response.failed", {"response": final})
+        elif not holder.get("suppress_completion"):
             yield ev("response.completed", {"response": final})
 
     # 只有第一轮开场。第二轮以后再送一次 response.created，客户端会
@@ -20357,7 +20416,8 @@ class Handler(BaseHTTPRequestHandler):
         record_upstream_usage(upstream, model, holder.get("usage"), stream=True, elapsed_ms=wall,
                      ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
-                     fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                     fp=fp, account=account.uid, key=self._key_id(), effort=effort,
+                     outcome=("failed" if holder.get("empty_reasoning") else "completed"))
         return
 
     def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
@@ -20401,6 +20461,13 @@ class Handler(BaseHTTPRequestHandler):
         wall = int((time.time() - t_start) * 1000)
         result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
                                   sources=sources)
+        if reasoning_only_response(result):
+            record_error(model, 502, "upstream returned reasoning without output text",
+                         elapsed_ms=wall, account=account.uid,
+                         usage=chat_obj.get("usage"), stream=False,
+                         fp=fp, outcome="empty_reasoning", key=self._key_id())
+            return self._error(
+                502, "upstream returned reasoning without output text; retry")
         record_upstream_usage(upstream, model, chat_obj.get("usage"), stream=False, elapsed_ms=wall, fp=fp,
                      account=account.uid, key=self._key_id(), effort=effort)
         return self._json(200, result)

@@ -1,3 +1,14 @@
+## v1.7.18
+
+11-128 身份句指纹、积分刷新崩溃、无畏契约任务与两处面板修复：本版把「客户端自我介绍句式 + 品牌」这一类渠道指纹从单句扩展到通用句式，并收了积分批量刷新、任务清单和面板文案/布局的几处回归。套件 189 个（139 Python + 50 JS）。
+
+- **11-128：身份句 + 品牌的组合指纹改为中性句**（#533 / #537 / #539）：上游对 `You are an AI agent powered by DeepSeek Harness.`、`You are a coding agent powered by the deepseek-v4.1-flash model.`、`You are an AI assistant built on DeepSeek.` 这类「自我介绍句式 + 品牌」做大小写不敏感的连续子串匹配，命中即 400 / code 11-128；单独品牌词、改词或去掉句式都放行。现在把 system / developer 里的这类整句改写为 `You are a helpful AI assistant.`，不依赖具体品牌；user / assistant / tool 里的同名文本保持原样（用户数据）。`has_fingerprint()` 的小写快路径同步补齐，新增 12 项单测。
+- **修复全量刷新积分在默认间隔下崩溃**（#530）：`_credits_sweep()` 使用 `random.uniform(0.8, 1.2)` 做账号间拟人间隔，但 `wb_proxy.py` 漏了 `import random`，多账号点「一键刷新积分」会以 `NameError` 中断；单账号与 `WB_CREDITS_SWEEP_GAP_MS=0` 不受影响。补上导入并新增回归测试。
+- **成长任务补充「无畏契约拼豆专家」**（#525）：`WorkBuddy_Valorant` 登记为专家任务，事件固定使用真实专家 id `ex_xQHHD1u5Jkua`，不再走通用专家池；一键做任务时自动推进并领奖。
+- **修复「数据用途声明」文案反了**（#528）：`X-Private-Data` 是「数据私有」声明，`true` = 不参与模型优化、`false` = 允许参与；下拉选项与英文词条此前正好相反。已交换两处文案并加 4 项断言。
+- **修复模型清单「消费倍率」列截断**（#527）：带「免费账号不可用」胶囊的行在 1366/1440/1512 宽度下被 `nowrap` 裁掉第二枚胶囊；该列改用 `rate-cell` 类允许换行，不再依赖会被 i18n 翻译的 `data-label` 选择器。
+- **测试：聚合缓存节流用例改为统计写盘调用**（#526）：exFAT 的 mtime 粒度粗，内容相同的重写与「没有写」在文件上看不出区别；用例改为计数 `_usage_cache_write_kind` 的 snapshot 调用，断言不变。
+
 ## v1.7.17
 
 流式断流重试与出口退避、模型级 5xx 不熔断、Codex 一键配置、积分与估价口径、成长任务手动领取、免费账号不可用标注：本版把「断流被伪装成正常结束」「模型错误拖垮整池」「关限额不生效」这几条长尾问题一起收了，并补上几个新能力。套件 188 个（139 Python + 49 JS）。

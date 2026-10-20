@@ -4070,6 +4070,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         <select id="growthAcctSelect" onchange="switchGrowthAccount(this.value)" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--fg);font-family:inherit">
           <option value="all">全部国内账号 (批量)</option>
         </select>
+        <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
+          <input type="checkbox" id="growthAutoClaim" checked onchange="saveGrowthAutoClaim(this.checked)"> 自动领取
+        </label>
         <button class="primary" id="btnPageCheckin" onclick="triggerBuddyCheckin(this)">Buddy 加油站签到</button>
         <button class="primary" id="btnRunTasks" onclick="runGrowthTasks(this)">一键做任务领积分</button>
         <button id="btnCatTravel" onclick="triggerCatTravel(this)">猫猫旅行</button>
@@ -6168,6 +6171,10 @@ function renderAvailableModels(){
 }
 
 let CURRENT_GROWTH_UID = 'all';
+try {
+  const _autoClaim = document.getElementById('growthAutoClaim');
+  if(_autoClaim && localStorage.getItem('wb-growth-auto-claim') === '0') _autoClaim.checked = false;
+} catch(e) {}
 
 async function switchGrowthAccount(uid){
   CURRENT_GROWTH_UID = uid;
@@ -6297,7 +6304,10 @@ async function loadGrowthTasks(){
         + '<td style="font-size:12px;color:var(--dim);max-width:300px" data-label="说明">' + esc(t.description || '-') + '</td>'
         + '<td data-label="进度">' + prog + '</td>'
         + '<td data-label="奖励">' + (rwd || '-') + '</td>'
-        + '<td data-label="状态">' + stBadge + '</td>'
+        + '<td data-label="状态">' + stBadge
+        + ((t.status !== 'claimed' && (t.status === 'completed' || (Number(t.current) || 0) >= (Number(t.target) || 0)))
+           ? ' <button class="sec mini" data-code="' + esc(t.task_code) + '" onclick="claimGrowthTask(this)">领取</button>' : '')
+        + '</td>'
         + '</tr>';
     }).join('');
     applyTableSort('growthTable');
@@ -6320,6 +6330,8 @@ async function runGrowthTasks(btn){
     if(CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all'){
       payload.uid = CURRENT_GROWTH_UID;
     }
+    const autoClaim = document.getElementById('growthAutoClaim');
+    payload.claim = !autoClaim || autoClaim.checked;
     const r = await postJSON("/tasks/run", payload);
     const logs = r.logs || [];
     if(logBox){
@@ -6336,6 +6348,32 @@ async function runGrowthTasks(btn){
   }finally{
     btn.disabled = false;
     btn.textContent = oldText;
+  }
+}
+
+function saveGrowthAutoClaim(checked){
+  try { localStorage.setItem('wb-growth-auto-claim', checked ? '1' : '0'); } catch(e) {}
+}
+
+async function claimGrowthTask(btn){
+  const code = (btn && btn.dataset && btn.dataset.code) || '';
+  const uid = (CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all') ? CURRENT_GROWTH_UID : '';
+  if(!code) return;
+  if(!uid){ toast('请先在右上角选择一个国内版账号', 'warn'); return; }
+  if(btn) btn.disabled = true;
+  try{
+    const r = await postJSON('/tasks/claim', {uid, code});
+    if(r.ok){
+      toast('领取成功' + (r.credit ? ('，+' + r.credit + ' 积分') : ''), 'ok');
+    } else {
+      toast('领取失败: ' + (r.msg || '未知原因'), 'bad');
+    }
+    await loadGrowthTasks();
+    await loadAccounts();
+  }catch(e){
+    toast('领取失败: ' + e.message, 'bad');
+  }finally{
+    if(btn) btn.disabled = false;
   }
 }
 

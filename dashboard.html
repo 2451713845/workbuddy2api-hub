@@ -1933,6 +1933,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '工作回溯': 'Activity lookback',
     '吞吐量': 'Throughput',
     '峰值吞吐': 'Peak throughput',
+    '输出 tok/s': 'Output tok/s',
     '实时活动流': 'Live activity stream',
     '近一年每日活动': 'Daily activity over the last year',
     '用量明细': 'Usage detail',
@@ -14682,7 +14683,7 @@ function drawSparks(){
   const arr = s.series;
   drawSpark('sparkTokens', arr.map(b => b.total_tokens || 0), '--chart-bar');
   drawSpark('sparkReqs',   arr.map(b => b.requests || 0), '--chart-line');
-  drawSpark('sparkSpeed',  arr.map(b => (b.total_tokens || 0) / step), '--chart-bar');
+  drawSpark('sparkSpeed',  arr.map(b => (b.completion_tokens || 0) / step), '--chart-bar');
   drawSpark('sparkCache',  arr.map(b => b.prompt_tokens ? (b.cached_tokens || 0) / b.prompt_tokens * 100 : 0), '--chart-line');
   drawSpark('sparkCost',   arr.map(b => b.credit || 0), '--chart-bar');
 }
@@ -14856,7 +14857,7 @@ function peakThroughput(){
   const s = state.series;
   if (!s || !s.series || !s.bucket_seconds) return null;
   let m = 0;
-  for (const b of s.series) m = Math.max(m, (b.total_tokens||0) / s.bucket_seconds);
+  for (const b of s.series) m = Math.max(m, (b.completion_tokens||0) / s.bucket_seconds);
   return m > 0 ? m : null;
 }
 
@@ -14873,7 +14874,10 @@ function renderSeriesMeta(){
 function metricValue(b, metric, step){
   if (metric === 'tokens') return b.total_tokens || 0;
   if (metric === 'requests') return b.requests || 0;
-  return (b.total_tokens || 0) / step; // throughput tok/s
+  // Output throughput: prompt tokens are the whole conversation re-sent on
+  // every turn, so total_tokens / wall time inflates the number on long
+  // sessions (issue #509). What the model actually generates is completion.
+  return (b.completion_tokens || 0) / step;
 }
 const seriesColorHost = document.getElementById('pageAnalytics');
 function seriesColor(i){
@@ -14972,7 +14976,7 @@ function drawSeries(){
 
   // 图例
   const legend = [];
-  legend.push(`<span><i style="background:${barC}"></i>${metric === 'tokens' ? 'Token 总量' : metric === 'requests' ? '请求数' : '吞吐 tok/s'}</span>`);
+  legend.push(`<span><i style="background:${barC}"></i>${metric === 'tokens' ? 'Token 总量' : metric === 'requests' ? '请求数' : '输出 tok/s'}</span>`);
   if (lineVals) legend.push(`<span><i style="background:${lineC}"></i>${lineLabel}</span>`);
   $('seriesLegend').innerHTML = legend.join('');
 
@@ -14998,7 +15002,7 @@ function drawSeries(){
     const rows = [
       ['请求', fmtCompact(b.requests)],
       ['Token', fmtCompact(b.total_tokens)],
-      ['吞吐', ((b.total_tokens||0)/step).toFixed(1) + ' tok/s'],
+      ['吞吐', ((b.completion_tokens||0)/step).toFixed(1) + ' tok/s'],
       ['失败', fmtCompact(b.errors)],
       ['积分', (b.credit||0).toFixed(2)],
     ];

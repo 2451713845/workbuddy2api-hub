@@ -135,7 +135,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 179 个套件：134 个 Python + 45 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 180 个套件：134 个 Python + 46 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -442,6 +442,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **修复 Token 时序图吞吐量计算**（#509）：此前用 total_tokens / 桶宽，长上下文会话每轮都会重复计入 prompt，单小时可显示三万以上 tok/s。现在图表、峰值和悬停都改用 completion_tokens，标签改为「输出 tok/s」；Token 总量仍显示 total_tokens，请求数视图不变。
 
 - **修复后台排程时段被忽略**（#515）：此前只要命中任意一个配置小时（例如默认的 01:00 夜猫），巡检就会把签到、活跃上报、猫猫旅行、连登管家和 Token 保活一起跑一遍，`schedule.checkin` 设成 10:00/20:00 仍会在 01:00 签到。现在每个任务只在自己的配置小时执行；面板「立即执行」仍会强制跑完整轮。
 - 修复上游瞬时故障重试：精确识别 Windows `10053/10054/10060`（`10061` 连接被拒仍按原规则记账冷却 60 秒），避免把连接重置误报为本机断网；账号池轮转不再消耗实际请求次数，短暂超时、连接重置或 DNS/路由故障恢复后可在原有次数上限内继续请求。证书校验、固定账号及失败归账规则保持原有约束。 / Fix transient upstream retries: classify Windows transport errors by exact OS code and preserve real request attempts across account-pool rotations, allowing recovery within the existing retry budget without changing TLS verification, pinned-account or failure-accounting rules.

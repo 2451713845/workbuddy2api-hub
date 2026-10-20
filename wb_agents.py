@@ -623,6 +623,15 @@ def _apply_opencode(paths, ctx):
     if models:
         provider["models"] = models
     data = deep_merge(data, {"provider": {PROVIDER_ID: provider}})
+    # models 是「这次勾选了哪些」的快照，必须整体替换：deep_merge 只做并集，
+    # 会把上一轮写过、这一轮取消勾选的 id 留在客户端的 models 字典里。同层的
+    # npm / options 等仍按 deep_merge 保留用户自己加的键。
+    entry = (data.get("provider") or {}).get(PROVIDER_ID)
+    if isinstance(entry, dict):
+        if models:
+            entry["models"] = models
+        else:
+            entry.pop("models", None)
     if ctx.get("model"):
         data["model"] = "%s/%s" % (PROVIDER_ID, ctx["model"])
     return {path: _dump_json(data)}

@@ -141,6 +141,13 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 #modelsTable td[data-label="思考档位"]{white-space:nowrap}
 /* 采样参数：放不下时 chips 折行显示完整，不截断 */
 #modelsTable td[data-label="默认采样参数"]{white-space:normal}
+/* 模型 ID 前的「一键配置」勾选框。勾选只决定一键配置写进客户端的模型清单，
+   不改网关路由；label 把勾选框和 ID 包在一起，点 ID 也能勾。排序只认表头
+   （见 sortHeaderAt），点勾选框不会触发排序。单元格用类名定位，别用
+   data-label——i18n 会把 data-label 翻成英文 / 繁中。 */
+#modelsTable .model-pick{width:14px;height:14px;margin:0;flex-shrink:0;cursor:pointer}
+#modelsTable td.model-id-cell label{display:inline-flex;align-items:center;gap:7px;max-width:100%;cursor:pointer}
+#modelsTable td.model-id-cell b{overflow:hidden;text-overflow:ellipsis}
 th,td{text-align:right;padding:9px 12px;border-bottom:1px solid var(--line);
   font-variant-numeric:tabular-nums;vertical-align:middle}
 th{color:var(--dim);font-weight:600;font-size:12px;white-space:nowrap;background:var(--panel2)}
@@ -1761,6 +1768,19 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '已取消窗口限高（不限）': 'Height cap removed (no limit)',
     '请填写 0 或正数（像素）': 'Enter 0 or a positive number (pixels)',
     '网关模型清单': 'Gateway model catalog',
+    // 「网关模型清单」勾选：静态说明、勾选框 tooltip、表头三个批量动作、已选计数与两个即时提示。
+    '只有勾选的模型才会写入 DSH 等客户端（一键配置）；默认全部勾选，可用表头「全选 / 全不选 / 反选」批量调整，改完请重新一键配置并重启客户端。': 'Only the models you tick are written into the one-click configuration for DSH and other clients; everything is ticked by default, the header buttons Select all / Clear all / Invert change them in bulk, so re-run the one-click configuration and restart the client after changing it.',
+    '全选': 'Select all',
+    '全不选': 'Clear all',
+    '反选': 'Invert',
+    '把当前清单里的模型全部勾上（与「从未改过勾选」的默认态等价）': 'Tick every model in the current catalog - the same as the default state of never having touched the selection',
+    '取消全部勾选：DSH 等读取模型清单的客户端会被拦下，不会写出一份空清单': 'Untick everything: clients that read the model list, such as DSH, are stopped instead of being handed an empty list',
+    '按当前勾选状态取反：只想排除个别模型时比逐个点快': 'Flip the current ticks: quicker than clicking one by one when you only want to exclude a few models',
+    '勾选结果存在网关设置里，对所有版本视图生效；未勾选只影响一键配置写入客户端的模型清单，网关本身照常提供这些模型。': 'The selection is stored in the gateway settings and applies to every realm view; unticking only affects the model list written by the one-click configuration - the gateway still serves those models.',
+    '勾选后该模型才会写入 DSH 等客户端的一键配置': 'The model is written into the one-click configuration for DSH and other clients only when ticked',
+    ' · 已选 ': ' · selected ',
+    '模型勾选保存失败：': 'Saving the model selection failed: ',
+    '请先在「网关模型清单」勾选至少一个模型': 'Tick at least one model in the Gateway model catalog first',
     '当前生效': 'In effect',
     '当前系统（': 'Current OS (',
     '当前视图': 'Current view',
@@ -2921,6 +2941,19 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "网关默认上游已切换并永久保存为:": "閘道預設上游已切換並永久儲存為:",
     "网关默认上游已切换并永久保存为: ": "閘道預設上游已切換並永久儲存為: ",
     "网关默认出口": "閘道預設出口",
+    // 「网关模型清单」勾选：静态说明、勾选框 tooltip、表头三个批量动作、已选计数与两个即时提示。
+    "只有勾选的模型才会写入 DSH 等客户端（一键配置）；默认全部勾选，可用表头「全选 / 全不选 / 反选」批量调整，改完请重新一键配置并重启客户端。": "只有勾選的模型才會寫入 DSH 等客戶端（一鍵配置）；預設全部勾選，可用表頭「全選 / 全不選 / 反選」批次調整，改完請重新一鍵配置並重啟客戶端。",
+    "全选": "全選",
+    "全不选": "全不選",
+    "反选": "反選",
+    "把当前清单里的模型全部勾上（与「从未改过勾选」的默认态等价）": "把當前清單裡的模型全部勾上（與「從未改過勾選」的預設態等價）",
+    "取消全部勾选：DSH 等读取模型清单的客户端会被拦下，不会写出一份空清单": "取消全部勾選：DSH 等讀取模型清單的客戶端會被攔下，不會寫出一份空清單",
+    "按当前勾选状态取反：只想排除个别模型时比逐个点快": "按當前勾選狀態取反：只想排除個別模型時比逐個點快",
+    "勾选结果存在网关设置里，对所有版本视图生效；未勾选只影响一键配置写入客户端的模型清单，网关本身照常提供这些模型。": "勾選結果存在閘道設定裡，對所有版本檢視生效；未勾選只影響一鍵配置寫入客戶端的模型清單，閘道本身照常提供這些模型。",
+    "勾选后该模型才会写入 DSH 等客户端的一键配置": "勾選後該模型才會寫入 DSH 等客戶端的一鍵配置",
+    " · 已选 ": " · 已選 ",
+    "模型勾选保存失败：": "模型勾選儲存失敗：",
+    "请先在「网关模型清单」勾选至少一个模型": "請先在「閘道模型清單」勾選至少一個模型",
     "网络异常:": "網路異常:",
     "网络异常: ": "網路異常: ",
     "自动发现 mihomo 端口": "自動發現 mihomo 埠",
@@ -3802,7 +3835,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   <!-- 版本模型库与能力清单 -->
   <section>
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-      <h2 style="margin:0">网关模型清单<em id="modelsRealmTag" style="color:var(--dim);font-weight:500"></em><em id="availModelCount"></em></h2>
+      <h2 style="margin:0">网关模型清单<em id="modelsRealmTag" style="color:var(--dim);font-weight:500"></em><em id="availModelCount"></em><span id="modelPickActions" style="font-weight:400;margin-left:10px;white-space:nowrap"><button class="sec mini" onclick="applyModelPickAction('all')" title="把当前清单里的模型全部勾上（与「从未改过勾选」的默认态等价）">全选</button><button class="sec mini" onclick="applyModelPickAction('none')" title="取消全部勾选：DSH 等读取模型清单的客户端会被拦下，不会写出一份空清单">全不选</button><button class="sec mini" onclick="applyModelPickAction('invert')" title="按当前勾选状态取反：只想排除个别模型时比逐个点快">反选</button></span></h2>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="font-size:12px;color:var(--dim)">展示当前视图下官方对话大模型、上下文容量、推理/视觉能力、思考控制、默认采样参数及在售倍率</div>
         <!-- 手动刷新：强制走一次上游 /v3/config（只在当前视图的版本上，用该
@@ -3811,6 +3844,11 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
                 title="立即从上游 API 重新拉取当前视图版本的模型清单（不走缓存；同一版本 30 秒内只能刷一次）">刷新模型清单</button>
       </div>
     </div>
+    <!-- 勾选语义（静态说明）：复选框只决定「一键配置」把哪些模型写进 DSH 等
+         客户端，不改网关路由（未勾选的模型在网关侧照常可用）。选择是全局一份，
+         不按版本视图分开；服务端没存过时按「全部勾选」画（= 升级前行为）。 -->
+    <div id="modelPickHint" style="font-size:12px;color:var(--dim);margin:0 0 10px;line-height:1.6"
+         title="勾选结果存在网关设置里，对所有版本视图生效；未勾选只影响一键配置写入客户端的模型清单，网关本身照常提供这些模型。">只有勾选的模型才会写入 DSH 等客户端（一键配置）；默认全部勾选，可用表头「全选 / 全不选 / 反选」批量调整，改完请重新一键配置并重启客户端。</div>
     <!-- 清单来源横幅：API 获取 → 绿色状态条（附刷新时间）；非 API（项目默认
          信息/缓存文件）→ 黄色警示「模型、倍率数据可能不一致」。内容由
          /v1/models 的 catalog 字段驱动，见 renderModelsSourceLine。 -->
@@ -3819,14 +3857,14 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <table id="modelsTable" class="data-cards">
         <thead>
           <tr>
-            <th style="text-align:left;width:17%">模型 ID</th>
+            <th style="text-align:left;width:19%">模型 ID</th>
             <th style="text-align:left;width:11%">名称</th>
             <th style="text-align:center;width:12%">消费倍率 / 优惠</th>
             <th style="text-align:center;width:14%">模型能力</th>
             <th style="text-align:center;width:9%">上下文窗口</th>
             <th style="text-align:center;width:9%">最大输出</th>
-            <th style="text-align:left;width:16%">思考档位</th>
-            <th style="text-align:left;width:12%;white-space:nowrap">默认采样参数</th>
+            <th style="text-align:left;width:15%">思考档位</th>
+            <th style="text-align:left;width:11%;white-space:nowrap">默认采样参数</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -5684,6 +5722,177 @@ async function loadModels(){
   }
 }
 
+/* ---- 「网关模型清单」勾选（一键配置用，全局一份） ----
+   这张表每行前面的复选框只决定「一键配置」把哪些模型写进 DSH 等客户端，不改
+   网关路由：未勾选的模型在网关侧照常可以调用。选择是全局的（不按版本视图划
+   分），后端存一份 id 列表，见 /agents/model-selection。
+   默认态是「全部勾选」：服务端还没存过时（configured=false）空集合表示
+   「全都要」，所以升级后第一次打开面板看到的就是全勾，一键配置写出的清单与
+   升级前逐字相同。只有用户改过（含表头的批量动作）才会落一份显式列表。 */
+let AGENT_MODEL_SELECTION = new Set();
+// 服务端是否存过勾选。false = 从未保存 = 视作全部勾选（与「明确全不选」区分开，
+// 后端的 agent_models 也是这个三态：None / [] / 非空）。
+let MODEL_SELECTION_CONFIGURED = false;
+// 上一次确认写进服务端的那份选择：失败回滚与「没变化就不重发」都靠它。
+// null = 还没保存过（与空集合语义不同）。
+let MODEL_SELECTION_SAVED = null;
+let MODEL_SELECTION_TIMER = null;
+let MODEL_SELECTION_SAVING = false;
+let MODEL_SELECTION_QUEUED = false;
+let MODEL_SELECTION_LOADING = false;
+
+function modelSelectionKey(list){
+  return (list || []).map(String).sort().join('\n');
+}
+function currentModelSelection(){
+  return Array.from(AGENT_MODEL_SELECTION);
+}
+// 某个模型当前算不算被勾选。所有「读勾选」的地方都走这里，别直接看集合，
+// 否则「从未保存」的全选态会被读成「全都不要」。
+function isModelPicked(id){
+  return !MODEL_SELECTION_CONFIGURED || AGENT_MODEL_SELECTION.has(id);
+}
+// 批量动作与「把全选态展开成集合」用的全量 id：以表格里画出来的为准
+// （清单会被排序/过滤），表格还没渲染时退回当前视图的目录。
+function allModelPickIds(){
+  const boxes = Array.from(document.querySelectorAll('#modelsTable input.model-pick'));
+  if(boxes.length) return boxes.map(b => (b.dataset ? b.dataset.modelId : '')).filter(Boolean);
+  return (MODELS_DATA || []).map(m => String((m && m.id) || '')).filter(Boolean);
+}
+
+// 计数挂在「网关模型清单」标题后面：共几个 + 已勾选几个。勾选数放在这里而
+// 不是每行旁边，是因为「一个都没勾」在第一眼看不出来（所有框都是空的）。
+function updateAvailModelCount(){
+  const em = document.getElementById('availModelCount');
+  if(!em) return;
+  const total = MODELS_DATA.length;
+  const picked = MODEL_SELECTION_CONFIGURED ? AGENT_MODEL_SELECTION.size : total;
+  em.textContent = '(共 ' + total + ' 个) · 已选 ' + picked;
+}
+
+// 只改复选框的勾选状态与计数，不重建行——避免把滚动位置、排序和焦点抖掉。
+// 选择在别处变化（GET 回来、POST 失败回滚、批量动作）时用这个同步。
+function syncModelPickBoxes(){
+  Array.from(document.querySelectorAll('#modelsTable input.model-pick')).forEach(box => {
+    box.checked = isModelPicked(box.dataset.modelId);
+  });
+  updateAvailModelCount();
+}
+
+async function loadAgentModelSelection(){
+  if(MODEL_SELECTION_LOADING) return;
+  MODEL_SELECTION_LOADING = true;
+  try{
+    const r = await getJSON('/agents/model-selection');
+    const list = (r && (r.selected_models || r.models)) || [];
+    // configured=false 表示服务端还没存过：这时维持「全部勾选」的默认态，
+    // 空集合在这里读作「全都要」。存过之后才按存的那份画。
+    MODEL_SELECTION_CONFIGURED = !!(r && r.configured);
+    AGENT_MODEL_SELECTION = new Set(MODEL_SELECTION_CONFIGURED ? list.map(String) : []);
+    MODEL_SELECTION_SAVED = MODEL_SELECTION_CONFIGURED ? new Set(AGENT_MODEL_SELECTION) : null;
+    syncModelPickBoxes();
+  }catch(e){
+    // 读不到就维持「全部勾选」的默认态（等价于升级前的行为：整份目录都写进客户端），
+    // 不打断页面其它加载；授权失效由面板登录门统一处理，这里不重复弹提示。
+    if(!isAuthError(e)) console.error('loadAgentModelSelection error:', e);
+  }finally{
+    MODEL_SELECTION_LOADING = false;
+  }
+}
+
+// 勾选落库：本地立即生效，POST 防抖 400ms——连点几行只发一次整份列表。
+// 选择没变化（比如勾上又取消）时不发请求。
+function scheduleModelSelectionSave(){
+  if(MODEL_SELECTION_TIMER) clearTimeout(MODEL_SELECTION_TIMER);
+  MODEL_SELECTION_TIMER = setTimeout(saveModelSelection, 400);
+}
+
+async function saveModelSelection(){
+  MODEL_SELECTION_TIMER = null;
+  if(MODEL_SELECTION_SAVING){ MODEL_SELECTION_QUEUED = true; return; }
+  const payload = currentModelSelection();
+  const key = modelSelectionKey(payload);
+  // 还没存过时（SAVED=null）不能拿空集合当"上次保存的结果"比，否则用户从全选态
+  // 里取消一个模型，会被误判成"没变化"而永远发不出去。
+  if(MODEL_SELECTION_SAVED && key === modelSelectionKey(Array.from(MODEL_SELECTION_SAVED))) return;
+  MODEL_SELECTION_SAVING = true;
+  try{
+    const r = await postJSON('/agents/model-selection', {models: payload});
+    MODEL_SELECTION_SAVED = new Set(payload);
+    MODEL_SELECTION_CONFIGURED = true;
+    // 服务端会清洗列表（去重 / 超长截断）。保存期间没人继续勾选时以返回值为准，
+    // 让面板上的勾选与真正落盘的清单一致；有人在期间改过就保留本地状态，等
+    // 下面 finally 里的补发把最新一份送上去。
+    const saved = r && (r.selected_models || r.models);
+    if(Array.isArray(saved) && modelSelectionKey(currentModelSelection()) === key){
+      const normalized = new Set(saved.map(String));
+      if(modelSelectionKey(Array.from(normalized)) !== key){
+        AGENT_MODEL_SELECTION = normalized;
+        MODEL_SELECTION_SAVED = new Set(normalized);
+        syncModelPickBoxes();
+        if(AGENT_MODELS.length) renderAgentConnForm();
+      }
+    }
+  }catch(e){
+    // 面板上的勾选必须和服务器保持一致：回滚到上次成功的快照并重画。智能体页
+    // 的默认模型下拉是按勾选集合画的，回滚后也要跟着重画，否则它会继续列一个
+    // 已经被取消勾选的模型。
+    AGENT_MODEL_SELECTION = MODEL_SELECTION_SAVED ? new Set(MODEL_SELECTION_SAVED) : new Set();
+    MODEL_SELECTION_CONFIGURED = !!MODEL_SELECTION_SAVED;
+    syncModelPickBoxes();
+    if(AGENT_MODELS.length) renderAgentConnForm();
+    if(!isAuthError(e)) toast('模型勾选保存失败：' + e.message, 'bad');
+  }finally{
+    MODEL_SELECTION_SAVING = false;
+    // 保存期间又有勾选：串行补发一次，别让旧响应把新的选择盖掉。
+    if(MODEL_SELECTION_QUEUED){
+      MODEL_SELECTION_QUEUED = false;
+      scheduleModelSelectionSave();
+    } else if(modelSelectionKey(currentModelSelection())
+              !== modelSelectionKey(MODEL_SELECTION_SAVED ? Array.from(MODEL_SELECTION_SAVED) : [])){
+      scheduleModelSelectionSave();
+    }
+  }
+}
+
+// 复选框走事件委托：表格每次重画都会换掉整批 input，逐行挂监听会跟着丢。
+// 排序的点击委托只认表头（sortHeaderAt），勾选不会触发表格排序。
+document.addEventListener('change', function(ev){
+  const box = ev.target;
+  if(!box || !box.classList || !box.classList.contains('model-pick')) return;
+  const id = box.dataset ? box.dataset.modelId : '';
+  if(!id) return;
+  if(!MODEL_SELECTION_CONFIGURED){
+    // 从「从未保存」的全选态改起：先把整份清单落成显式集合，再应用这一次改动。
+    // 少了这一步，「取消一个模型」会被存成「只选这一个」的反面。
+    AGENT_MODEL_SELECTION = new Set(allModelPickIds());
+    MODEL_SELECTION_CONFIGURED = true;
+  }
+  if(box.checked) AGENT_MODEL_SELECTION.add(id);
+  else AGENT_MODEL_SELECTION.delete(id);
+  updateAvailModelCount();
+  scheduleModelSelectionSave();
+  // 智能体页的默认模型下拉只列已勾选的模型，选择变了就跟着重画；目录还没
+  // 加载（没打开过智能体页）时由 loadAgents() 自己按当前选择画。
+  if(AGENT_MODELS.length) renderAgentConnForm();
+});
+
+// 表头三个批量动作：全选 / 全不选 / 反选。
+// 做成按钮而不是「反选」复选框：反选是动作、不是状态。复选框形态要么得额外记一份
+// 「反选之前的集合」（否则两次开关回不到原状），要么让「界面显示的勾选」和
+// 「实际保存的清单」分家——两者都是最难查的那类双状态 bug。
+function applyModelPickAction(kind){
+  const all = allModelPickIds();
+  if(kind === 'all') AGENT_MODEL_SELECTION = new Set(all);
+  else if(kind === 'none') AGENT_MODEL_SELECTION = new Set();
+  else if(kind === 'invert') AGENT_MODEL_SELECTION = new Set(all.filter(id => !isModelPicked(id)));
+  else return;
+  MODEL_SELECTION_CONFIGURED = true;
+  syncModelPickBoxes();
+  scheduleModelSelectionSave();
+  if(AGENT_MODELS.length) renderAgentConnForm();
+}
+
 // 清单来源横幅：把「通过 API 获取的最新数据」和「项目默认/缓存文件数据」在
 // 视觉上分清楚——非 API 来源给黄色警示（模型、倍率数据可能不一致），API 来源
 // 给绿色状态条并附刷新时间。数据由 /v1/models 响应的 catalog 字段驱动（见
@@ -5750,8 +5959,7 @@ function renderModelsSourceLine(meta){
 function renderAvailableModels(){
   const tb = document.querySelector('#modelsTable tbody');
   if(!tb) return;
-  const countEm = document.getElementById('availModelCount');
-  if(countEm) countEm.textContent = '(共 ' + MODELS_DATA.length + ' 个)';
+  updateAvailModelCount();
   if(!MODELS_DATA.length){
     tb.innerHTML = '<tr><td colspan="8" class="empty">暂无可用模型</td></tr>';
     return;
@@ -5877,8 +6085,15 @@ function renderAvailableModels(){
           : '<span style="color:var(--dim)">—</span>')
       + '</td>';
 
+    // 8. 模型 ID 前的「一键配置」复选框：勾上才会被写进 DSH 等客户端的模型
+    //    清单（选择全局一份，见 AGENT_MODEL_SELECTION）。服务端还没存过勾选时
+    //    isModelPicked() 一律返回 true——默认全部勾选，首屏不必等 GET 回来。
+    const picked = isModelPicked(m.id);
     return '<tr>'
-      + '<td style="text-align:left" class="mono" data-label="模型 ID" title="' + esc(m.id) + '"><b>' + esc(m.id) + '</b></td>'
+      + '<td style="text-align:left" class="mono model-id-cell" data-label="模型 ID" title="' + esc(m.id) + '">'
+      + '<label><input type="checkbox" class="model-pick" data-model-id="' + esc(m.id) + '"'
+      + (picked ? ' checked' : '')
+      + ' title="勾选后该模型才会写入 DSH 等客户端的一键配置"><b>' + esc(m.id) + '</b></label></td>'
       + nameCell
       + '<td style="text-align:center" data-label="消费倍率">' + credBadge + '</td>'
       + '<td style="text-align:center" data-label="能力">' + capHtml + '</td>'
@@ -9614,7 +9829,7 @@ async function startDashboard(){
   // 页签时，KPI 要等这两秒过去才开始发 /usage/analytics。这里只把它摘出来让它
   // 并行跑，其余照旧等待；异常自己收，别变成未处理的拒绝。
   loadGrowthTasks().catch(() => {});
-  await Promise.all([loadAccounts(), loadModels(),
+  await Promise.all([loadAccounts(), loadModels(), loadAgentModelSelection(),
                      loadSchedulerStatus(), refresh(), loadAgentsAvailability()]);
   updateRecentLimitButtons();
   // The head script already resolved this before first paint; re-apply it
@@ -12552,8 +12767,11 @@ function renderAgentConnForm(){
     const prev = modelSel.value;
     let html = '<option value="">(不指定模型)</option>';
     AGENT_MODELS.forEach(m => {
-      const id = typeof m === 'string' ? m : (m.id || m.model || '');
+      const id = String((typeof m === 'string' ? m : (m.id || m.model || '')) || '');
       if(!id) return;
+      // 只列「网关模型清单」里勾选的模型：一键配置只写这份清单，下拉里出现
+      // 没勾选的模型会让用户以为它也会被写进去。
+      if(!isModelPicked(id)) return;
       const cw = (typeof m === 'object' && m) ? (m.context_window || m.contextWindow || 0) : 0;
       const label = id + (cw ? ' (' + fmt(cw) + ' ctx)' : '');
       html += '<option value="' + esc(id) + '">' + esc(label) + '</option>';
@@ -12673,6 +12891,21 @@ async function applyAgent(id, btn){
   const modelSel = document.getElementById('agentModelSelect');
   const baseUrl = baseInput ? baseInput.value.trim() : '';
   if(!baseUrl){ toast('请先填写网关地址', 'warn'); return; }
+  // 只把「网关模型清单」里勾选的模型写进客户端（与 AGENT_MODELS 取交集，避免
+  // 把不在当前模型目录里的 id 也发上去）。一个都没勾就先别发请求：后端对 DSH
+  // 这类客户端收到空列表会返回 400，这里给一句更明确的下一步提示。
+  const pickedModels = (AGENT_MODELS || [])
+    .map(m => String((typeof m === 'object' ? (m.id || m.model || '') : m) || ''))
+    .filter(id => id && isModelPicked(id));
+  // 只有把模型清单写进自身配置的客户端（DSH / OpenCode / Crush / ZCode，
+  // 后端 /agents 的 model_embedding_clients 声明）才需要「至少勾一个」；
+  // Claude Code / Codex 不读这份清单，别因为没勾模型就把它们的一键配置也挡掉。
+  const embeddingClients = (AGENTS_DATA && AGENTS_DATA.model_embedding_clients) || [];
+  const embedsModels = embeddingClients.map(String).indexOf(String(id)) !== -1;
+  if(!pickedModels.length && embedsModels){
+    toast('请先在「网关模型清单」勾选至少一个模型', 'warn');
+    return;
+  }
   if(client.applied && client.applied.external_change){
     if(!confirm('「' + (client.label || id) + '」的配置文件在应用后被外部修改过，重新应用将覆盖这些改动。确定继续吗？')) return;
   }
@@ -12684,7 +12917,7 @@ async function applyAgent(id, btn){
       base_url: baseUrl,
       key_id: keySel ? keySel.value : '',
       model: modelSel ? modelSel.value : '',
-      models: (AGENT_MODELS || []).map(m => (typeof m === 'object' ? (m.id || '') : m)).filter(Boolean)
+      models: pickedModels
     });
     if(r && (r.ok === false || r.error)){
       toast('配置失败: ' + (r.message || (r.error && r.error.message) || '未知错误'), 'bad');
@@ -12730,6 +12963,7 @@ async function restoreAgent(id, btn){
 })();
 
 window.loadAgents = loadAgents;
+window.loadAgentModelSelection = loadAgentModelSelection;
 window.renderAgentCards = renderAgentCards;
 window.applyAgent = applyAgent;
 window.restoreAgent = restoreAgent;

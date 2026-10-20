@@ -4810,10 +4810,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
           <label style="font-size:13px;color:var(--dim)">每日活跃定时</label>
-          <input id="setDailyChatTimes" type="text" placeholder="留空 = 跟随签到整点；如 09:30, 21:15" style="flex:1;min-width:260px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">
-          <button onclick="saveDailyChatTimes(this)">保存</button>
           <span id="setDailyChatTimesState" style="font-size:12px;color:var(--dim)"></span>
+          <input id="setDailyChatTimeInput" type="time" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">
+          <button class="sec mini" onclick="addDailyChatTime()">添加时间</button>
+          <button onclick="saveDailyChatTimes(this)">保存</button>
         </div>
+        <div id="setDailyChatTimesList" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
         <div style="font-size:12px;color:var(--dim);margin-top:6px">
           可填多个 HH:MM（逗号分隔，最多 24 个）。留空时跟随「签到」整点（默认 09:00/21:00）；填写后每日活跃只在这些时刻触发，不再跟签到走。改完无需重启，调度器每 30 秒重读一次。
         </div>
@@ -10822,16 +10824,7 @@ async function loadSettings(showToast){
       renderDailyChatModel(data.daily_chat_model || '', data.daily_chat_model_default || '');
       const scheduleCfg = (data.schedule && typeof data.schedule === 'object') ? data.schedule : {};
       const dailyChatTimes = Array.isArray(scheduleCfg.daily_chat) ? scheduleCfg.daily_chat : [];
-      const dailyChatTimesInput = document.getElementById('setDailyChatTimes');
-      if(dailyChatTimesInput) dailyChatTimesInput.value = dailyChatTimes.join(', ');
-      const dailyChatTimesState = document.getElementById('setDailyChatTimesState');
-      if(dailyChatTimesState){
-        dailyChatTimesState.textContent = dailyChatTimes.length
-          ? ('独立时段 · ' + dailyChatTimes.join(' / '))
-          : '跟随签到整点';
-        dailyChatTimesState.style.color = dailyChatTimes.length
-          ? 'var(--accent2)' : 'var(--dim)';
-      }
+      renderDailyChatTimes(dailyChatTimes);
       // 网页通道重试：没配过时后端给的是「开」，只有显式 false 才当关闭。
       const dailyWebRetry = data.daily_chat_web_retry !== false;
       const dailyWebRetryInput = document.getElementById('setDailyChatWebRetry');
@@ -11627,10 +11620,42 @@ async function saveDailyChatModel(btn){
   }
 }
 
+let DAILY_CHAT_TIMES_SELECTED = [];
+function renderDailyChatTimes(times){
+  DAILY_CHAT_TIMES_SELECTED = Array.isArray(times) ? times.slice().sort() : [];
+  const list = document.getElementById('setDailyChatTimesList');
+  if(list){
+    list.innerHTML = DAILY_CHAT_TIMES_SELECTED.map(function(t){
+      return '<span class="badge s" style="font-size:12px;padding:4px 8px;display:inline-flex;align-items:center;gap:6px">' + esc(t) + '<button class="key-action-btn" style="padding:0 4px" data-time="' + esc(t) + '" onclick="removeDailyChatTime(this)">×</button></span>';
+    }).join('') || '<span style="font-size:12px;color:var(--dim)">未设置，跟随签到整点</span>';
+  }
+  const state = document.getElementById('setDailyChatTimesState');
+  if(state){
+    state.textContent = DAILY_CHAT_TIMES_SELECTED.length
+      ? ('独立时段 · ' + DAILY_CHAT_TIMES_SELECTED.join(' / '))
+      : '跟随签到整点';
+    state.style.color = DAILY_CHAT_TIMES_SELECTED.length
+      ? 'var(--accent2)' : 'var(--dim)';
+  }
+}
+function addDailyChatTime(){
+  const input = document.getElementById('setDailyChatTimeInput');
+  const value = String((input && input.value) || '').trim();
+  if(!value){ toast('请先选择时间', 'warn'); return; }
+  if(DAILY_CHAT_TIMES_SELECTED.indexOf(value) < 0){
+    DAILY_CHAT_TIMES_SELECTED.push(value);
+    DAILY_CHAT_TIMES_SELECTED.sort();
+  }
+  renderDailyChatTimes(DAILY_CHAT_TIMES_SELECTED);
+  if(input) input.value = '';
+}
+function removeDailyChatTime(el){
+  const value = (el && el.getAttribute) ? el.getAttribute('data-time') : '';
+  DAILY_CHAT_TIMES_SELECTED = DAILY_CHAT_TIMES_SELECTED.filter(function(t){ return t !== value; });
+  renderDailyChatTimes(DAILY_CHAT_TIMES_SELECTED);
+}
 async function saveDailyChatTimes(btn){
-  const el = document.getElementById('setDailyChatTimes');
-  const raw = String((el && el.value) || '').trim();
-  const times = raw ? raw.split(/[,，\s]+/).filter(function(s){ return s.length > 0; }) : [];
+  const times = DAILY_CHAT_TIMES_SELECTED.slice();
   if(btn) btn.disabled = true;
   try {
     await postJSON('/settings/save', {schedule: {daily_chat: times}});

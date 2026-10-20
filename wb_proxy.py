@@ -17,6 +17,7 @@ start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
 import argparse
 import bisect
 import calendar
+import errno
 import hashlib
 import heapq
 import ipaddress
@@ -13041,6 +13042,24 @@ def realm_model_throttled(realm, model):
     return (False, 0)
 
 
+def _network_error_details(exc):
+    """Read wrapped OS codes without depending on the host's error language."""
+    errors = (exc, getattr(exc, "reason", None))
+    text = " ".join("%s %s" % (type(error).__name__, error)
+                    for error in errors if error is not None).lower()
+    # HTTPError inherits OSError, but its missing attributes may be delegated
+    # to an absent/closed response on Python 3.9. HTTP status is not an OS
+    # error code, so never probe errno/winerror on that response wrapper.
+    codes = {getattr(error, attr, None) for error in errors
+             if not isinstance(error, urllib.error.HTTPError)
+             for attr in ("errno", "winerror")}
+    # Some urllib callers only retain a string. Match the complete number:
+    # the old substring "errno 100" also matched Windows ECONNRESET (10054).
+    codes.update(int(code) for code in re.findall(
+        r"\b(?:errno|winerror)\s+(-?\d+)\b", text))
+    return codes, text
+
+
 def is_transient(exc):
     """Network-level flakiness that deserves a retry, not a cooldown.
 
@@ -13049,12 +13068,18 @@ def is_transient(exc):
     Treating that as a dead account took the only intl account offline for 60s
     and turned one hiccup into a 502 storm.
     """
-    t = ("%s %s" % (type(exc).__name__, exc)).lower()
     # A certificate/hostname verification failure is deterministic: every
     # retry hits the same chain. Treating it as a transport hiccup consumed
     # the egress budget and turned a configuration error into a 502 storm.
     if wb_accounts.is_tls_verify_error(exc):
         return False
+    codes, t = _network_error_details(exc)
+    # ECONNREFUSED (10061) stays out on purpose: nothing is listening, which
+    # usually means a dead per-account proxy. It keeps the old charge + 60s
+    # cooldown path so the pool moves on instead of re-picking that account.
+    if codes.intersection((errno.EPIPE, errno.ECONNABORTED, errno.ECONNRESET,
+                           errno.ETIMEDOUT, 10053, 10054, 10060)):
+        return True
     markers = (
         "ssl", "unexpected_eof", "eof occurred", "remote end closed",
         "connection reset", "connection aborted", "connectionreseterror",
@@ -13070,8 +13095,6 @@ LOCAL_NETWORK_MARKERS = (
     "gaierror", "getaddrinfo failed", "name or service not known",
     "nodename nor servname", "temporary failure in name resolution",
     "network is unreachable", "network is down", "no route to host",
-    "errno -2", "errno -3", "errno -5", "errno 100", "errno 101", "errno 113",
-    "winerror 11001", "winerror 10050", "winerror 10051", "winerror 10065",
 )
 
 def looks_like_local_network(exc):
@@ -13083,9 +13106,11 @@ def looks_like_local_network(exc):
     """
     if isinstance(exc, socket.gaierror):
         return True
-    reason = getattr(exc, "reason", None)
-    text = "%s %s %s" % (type(exc).__name__, exc, "" if reason is None else reason)
-    lower = text.lower()
+    codes, lower = _network_error_details(exc)
+    if codes.intersection((errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH,
+                           -2, -3, -5, 100, 101, 113,
+                           10050, 10051, 10065, 11001)):
+        return True
     return any(marker in lower for marker in LOCAL_NETWORK_MARKERS)
 
 class LocalNetworkError(Exception):
@@ -13636,11 +13661,17 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             account = POOL.pick_for_session(realm=realm, session_key=session_key,
                                             exclude=tried, model=model,
                                             page=affinity_page) if POOL else None
+        if (account is None and pinned is None
+                and (transient_hits or local_net_hits)):
+            # Pool rotation is bookkeeping, not an upstream attempt. Re-pick
+            # in this iteration so a two-account pool keeps its third request.
+            # Local DNS/route failures need the same bounded retry path.
+            tried.clear()
+            time.sleep(min(1.5 * (transient_hits or local_net_hits), 3.0))
+            account = POOL.pick_for_session(realm=realm, session_key=session_key,
+                                            exclude=tried, model=model,
+                                            page=affinity_page) if POOL else None
         if account is None:
-            if transient_hits and _attempt < max_attempts - 1:
-                tried.clear()
-                time.sleep(min(1.5 * transient_hits, 3.0))
-                continue
             break
         if account.realm != realm:
             if session_key and POOL: POOL.affinity.demote(session_key, account.uid)

@@ -12305,6 +12305,26 @@ def chat_finish_chunk(model, reason, chunk_id=None):
     return chat_chunk(model, {}, reason, chunk_id)
 
 
+def chat_usage_chunk(model, usage, chunk_id="chatcmpl-wb"):
+    """The trailing usage frame of an include_usage stream.
+
+    OpenAI puts usage on a final chunk with an empty choices list, after the
+    finish chunk and before [DONE]. Strict downstream parsers (clients that
+    validate the chunk contract, gateways that bill from the stream) ignore a
+    usage block riding on a choice-bearing chunk, so the block is hoisted out
+    of the upstream frame and re-emitted here in that shape.
+    """
+    normalize_usage_cache_aliases(usage)
+    return json.dumps({
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [],
+        "usage": usage,
+    }, ensure_ascii=False)
+
+
 def translate_max_completion_tokens(obj):
     alias = obj.pop("max_completion_tokens", None)
     if alias is None:
@@ -20575,6 +20595,13 @@ class Handler(BaseHTTPRequestHandler):
                         if u:
                             if last_usage is None or (u.get("total_tokens") or 0) >= (last_usage.get("total_tokens") or 0):
                                 last_usage = u
+                            # Usage belongs in a trailing choices-less frame (the
+                            # include_usage contract), not on a chunk that also
+                            # carries choices: strict clients and downstream
+                            # gateways reject the in-band block, and the stream
+                            # then ends without billable usage. Re-emitted once
+                            # below, after the finish frame.
+                            maybe.pop("usage", None)
                         for ch in (maybe.get("choices") or []):
                             delta = ch.get("delta") or {}
                             if delta.get("reasoning_content"):
@@ -20604,6 +20631,8 @@ class Handler(BaseHTTPRequestHandler):
                 if synthesized_calls or pending_finish is not None:
                     write_chunk(chat_finish_chunk(
                         model, "tool_calls" if synthesized_calls else pending_finish, chunk_id=stream_chunk_id))
+                if last_usage is not None:
+                    write_chunk(chat_usage_chunk(model, last_usage))
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 # Client hung up; still account for what upstream produced.
                 wall = int((time.time() - t_start) * 1000)

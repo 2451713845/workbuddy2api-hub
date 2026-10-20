@@ -436,6 +436,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 ### Unreleased
 
 - 修复上游瞬时故障重试：精确识别 Windows `10053/10054/10060`（`10061` 连接被拒仍按原规则记账冷却 60 秒），避免把连接重置误报为本机断网；账号池轮转不再消耗实际请求次数，短暂超时、连接重置或 DNS/路由故障恢复后可在原有次数上限内继续请求。证书校验、固定账号及失败归账规则保持原有约束。 / Fix transient upstream retries: classify Windows transport errors by exact OS code and preserve real request attempts across account-pool rotations, allowing recovery within the existing retry budget without changing TLS verification, pinned-account or failure-accounting rules.
+- **流式对话的 usage 按 OpenAI 契约放到末尾空 choices 帧**：`stream_options.include_usage` 要求 usage 出现在 finish 帧之后、`[DONE]` 之前的 `choices: []` 尾帧，而上游把它挂在仍然带 choices 的 chunk 上，`finish_reason` 随后单独到达。原样透传时，按 chunk 契约校验的客户端与按流记账的下游网关会把这段 usage 当成有歧义的中间帧丢掉——实测某网关该渠道 247/310 次流式请求没有落 usage 行，prompt / completion 与缓存命中数一起消失。现在代理把上游 usage 从原帧里摘掉，在 finish 帧之后用 `choices: []` 尾帧一次性发出（缓存别名照旧规范化），`usage.jsonl` 的统计口径不变。新增 `tests/_test_chat_stream_usage_frame.py`（16 项，帧顺序、唯一 usage 帧、cached_tokens 与 usage 行）。
 
 已发布版本的完整记录（v1.4.5 ~ v1.7.16，含每版的 PR 归属）见 **[docs/CHANGELOG.md](docs/CHANGELOG.md)**。
 

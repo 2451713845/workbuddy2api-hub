@@ -12824,7 +12824,7 @@ def prompt_mode_config():
     except Exception:
         cfg = None
     if not isinstance(cfg, dict):
-        cfg = {"mode": "passthrough", "file": ""}
+        cfg = {"mode": "passthrough", "file": "", "text": ""}
     return cfg
 
 
@@ -12841,7 +12841,7 @@ def apply_prompt_mode(messages):
     degraded = PROMPT_DEGRADE.active()
     if mode in ("custom", "append"):
         try:
-            text = wb_prompt.load_prompt(mode, cfg.get("file"))
+            text = wb_prompt.load_prompt(mode, cfg.get("file"), cfg.get("text"))
         except Exception:
             text = ""
         if text:

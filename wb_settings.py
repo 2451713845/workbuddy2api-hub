@@ -1333,7 +1333,11 @@ def set_usage_config(accounts_dir, patch):
 PROMPT_DEFAULTS = {
     "mode": "passthrough",
     "file": "",
+    "text": "",
 }
+#: 在线全局提示词的上限。比文件路径宽松得多，但仍然有界：一个手滑的粘贴
+#: 不该让每个请求都多背几百 KB。
+PROMPT_TEXT_MAX = 64 * 1024
 
 
 def validate_prompt_patch(raw):
@@ -1351,6 +1355,13 @@ def validate_prompt_patch(raw):
             if not isinstance(value, str):
                 raise ValueError("prompt file must be a string")
             out["file"] = value.strip()
+        elif key == "text":
+            if not isinstance(value, str):
+                raise ValueError("prompt text must be a string")
+            if len(value.encode("utf-8")) > PROMPT_TEXT_MAX:
+                raise ValueError("prompt text cannot be more than %d bytes"
+                                 % PROMPT_TEXT_MAX)
+            out["text"] = value
         else:
             raise ValueError("unknown prompt setting %r" % key)
     return out
@@ -1369,7 +1380,10 @@ def prompt_config(accounts_dir):
     file_path = stored.get("file", PROMPT_DEFAULTS["file"])
     if not isinstance(file_path, str):
         file_path = PROMPT_DEFAULTS["file"]
-    return {"mode": mode, "file": file_path.strip()}
+    text = stored.get("text", PROMPT_DEFAULTS["text"])
+    if not isinstance(text, str):
+        text = PROMPT_DEFAULTS["text"]
+    return {"mode": mode, "file": file_path.strip(), "text": text}
 
 
 def set_prompt_config(accounts_dir, cfg):

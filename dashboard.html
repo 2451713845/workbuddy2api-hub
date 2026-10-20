@@ -9928,9 +9928,12 @@ function pageNavSignature(page){
 /* 跳转时要让开的距离：吸顶 header，窄屏下再加上同样吸顶的导航条本身 */
 function pageNavHeaderOffset(page){
   const header = document.querySelector('header');
-  const base = (header ? header.offsetHeight : 64) + 14;
+  const narrow = window.matchMedia('(max-width:860px)').matches;
+  // 窄屏下二级导航条紧贴 header 底边（见 syncPageNavOffset），不再留 14px 缝，
+  // 否则内容会从两条吸顶栏之间的缝隙里穿过去。
+  const base = (header ? header.offsetHeight : 64) + (narrow ? 0 : 14);
   const sidebar = page ? page.querySelector('.page-sidebar') : null;
-  if(sidebar && window.matchMedia('(max-width:860px)').matches){
+  if(sidebar && narrow){
     return base + sidebar.offsetHeight + 10;
   }
   return base;
@@ -9938,7 +9941,8 @@ function pageNavHeaderOffset(page){
 
 function syncPageNavOffset(){
   const header = document.querySelector('header');
-  const top = (header ? header.offsetHeight : 64) + 14;
+  const narrow = window.matchMedia('(max-width:860px)').matches;
+  const top = (header ? header.offsetHeight : 64) + (narrow ? 0 : 14);
   document.documentElement.style.setProperty(PAGE_NAV_TOP_VAR, top + 'px');
 }
 

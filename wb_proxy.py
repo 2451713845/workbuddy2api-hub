@@ -12801,6 +12801,17 @@ def banned_model_message(model):
             % (model, allowed))
 
 
+def key_open_kwargs(entry):
+    """Open-upstream kwargs carrying a key's account restriction, if any.
+
+    The unrestricted path must not pass the keyword at all: test stubs and
+    third-party pool implementations keep their old signature, and None is
+    exactly "no restriction".
+    """
+    allowed = wb_settings.key_allowed_accounts(entry)
+    return {"allowed_accounts": allowed} if allowed is not None else {}
+
+
 def key_model_message(entry, model):
     """Explain a per-key model restriction the same way the global ban does."""
     name = (entry or {}).get("name") or "未命名"
@@ -13910,9 +13921,17 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # 每请求新生成（见 wb_identity.new_turn_request_id）。生成在重试循环外，
     # 循环里只把它传给身份构造；桌面端 / VSCode 分支不消费它，行为不变。
     turn_request_id = wb_identity.new_turn_request_id()
-    total = (1 if pinned is not None else
-             (max(1, POOL.count_ready(realm, model=model,
-                                      allowed=allowed_accounts)) if POOL else 1))
+    # Only pass `allowed` when the request actually carries a restriction: a
+    # stub pool in tests (and any external pool implementation) keeps its old
+    # count_ready signature for the unrestricted path.
+    if POOL is None:
+        ready_total = 1
+    elif allowed_accounts is not None:
+        ready_total = POOL.count_ready(realm, model=model,
+                                       allowed=allowed_accounts)
+    else:
+        ready_total = POOL.count_ready(realm, model=model)
+    total = 1 if pinned is not None else max(1, ready_total)
     tried = set()
     # 这一轮请求已经记过账的账号：重试轮（transient_hits 后 tried.clear() 整池
     # 重轮）会把同一个账号再挑一遍，若每次都记，一次请求就能给同一个账号记上
@@ -13999,10 +14018,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             account = pool_account(refresh_uid)
             refresh_uid = None
         else:
-            account = POOL.pick_for_session(realm=realm, session_key=session_key,
-                                            exclude=tried, model=model,
-                                            page=affinity_page,
-                                            allowed=allowed_accounts) if POOL else None
+            pick_kwargs = dict(realm=realm, session_key=session_key,
+                               exclude=tried, model=model, page=affinity_page)
+            if allowed_accounts is not None:
+                pick_kwargs["allowed"] = allowed_accounts
+            account = POOL.pick_for_session(**pick_kwargs) if POOL else None
         if (account is None and pinned is None
                 and (transient_hits or local_net_hits)):
             # Pool rotation is bookkeeping, not an upstream attempt. Re-pick
@@ -14010,10 +14030,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             # Local DNS/route failures need the same bounded retry path.
             tried.clear()
             time.sleep(min(1.5 * (transient_hits or local_net_hits), 3.0))
-            account = POOL.pick_for_session(realm=realm, session_key=session_key,
-                                            exclude=tried, model=model,
-                                            page=affinity_page,
-                                            allowed=allowed_accounts) if POOL else None
+            pick_kwargs = dict(realm=realm, session_key=session_key,
+                               exclude=tried, model=model, page=affinity_page)
+            if allowed_accounts is not None:
+                pick_kwargs["allowed"] = allowed_accounts
+            account = POOL.pick_for_session(**pick_kwargs) if POOL else None
         if account is None:
             break
         if account.realm != realm:
@@ -14372,7 +14393,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         response, account, effort = open_upstream(
             paid_payload, session_key=session_key, target_realm=realm,
             allow_credit_fallback=False, allow_product_switch=False,
-            allowed_accounts=allowed_accounts)
+            **({"allowed_accounts": allowed_accounts}
+               if allowed_accounts is not None else {}))
         try:
             response._wb_billed_model = paid_model
         except Exception:
@@ -15385,9 +15407,10 @@ def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_st
         })
     body["messages"] = convo
     body["stream"] = True
-    return open_upstream(body, session_key=session_key,
-                         target_realm=holder.get("realm"),
-                         allowed_accounts=allowed_accounts)
+    kwargs = dict(session_key=session_key, target_realm=holder.get("realm"))
+    if allowed_accounts is not None:
+        kwargs["allowed_accounts"] = allowed_accounts
+    return open_upstream(body, **kwargs)
 
 
 def internal_calls_from_chat(chat_obj, web_tools=False):
@@ -20422,7 +20445,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, key_blocked, "invalid_request_error")
             upstream, account, effort = open_upstream(
                 chat_req, session_key=session_key, target_realm=req_realm,
-                allowed_accounts=self._key_allowed_accounts())
+                **key_open_kwargs(getattr(self, "key_entry", None)))
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -20526,7 +20549,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 upstream, account, _ = follow_up_with_tool_results(
                     internal, holder, model, session_key, t_start, drop_tools=give_up,
-                    allowed_accounts=self._key_allowed_accounts())
+                    **key_open_kwargs(getattr(self, "key_entry", None)))
             if total_usage:
                 holder["usage"] = total_usage
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -20598,7 +20621,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 upstream, account, _ = follow_up_with_tool_results(
                     calls, holder, model, session_key, t_start, drop_tools=give_up,
-                    allowed_accounts=self._key_allowed_accounts())
+                    **key_open_kwargs(getattr(self, "key_entry", None)))
             except Exception as exc:
                 record_error(model, 502, "web tool follow-up failed: %s" % exc,
                              elapsed_ms=int((time.time() - t_start) * 1000),
@@ -20665,7 +20688,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._anthropic_error(400, key_blocked, "invalid_request_error")
             upstream, account, effort = open_upstream(
                 chat_req, session_key=session_key, target_realm=req_realm,
-                allowed_accounts=self._key_allowed_accounts())
+                **key_open_kwargs(getattr(self, "key_entry", None)))
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -21032,7 +21055,7 @@ class Handler(BaseHTTPRequestHandler):
             upstream, account, effort = open_upstream(
                 payload, session_key=session_key, target_realm=req_realm,
                 prebuilt_body=forwarded, defer_egress_success=True,
-                allowed_accounts=self._key_allowed_accounts())
+                **key_open_kwargs(getattr(self, "key_entry", None)))
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -21089,7 +21112,7 @@ class Handler(BaseHTTPRequestHandler):
                     payload, session_key=session_key, target_realm=req_realm,
                     prebuilt_body=forwarded, pin_account=account,
                     defer_egress_success=True,
-                    allowed_accounts=self._key_allowed_accounts())
+                    **key_open_kwargs(getattr(self, "key_entry", None)))
             if want_stream:
                 return self._chat_stream_response(
                     upstream, model, fp, account, t_start, effort=effort,

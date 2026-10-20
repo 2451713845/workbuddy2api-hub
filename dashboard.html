@@ -6046,6 +6046,16 @@ function renderAvailableModels(){
         ? ' <span style="font-size:10px;color:var(--accent)">(夜间0.5x)</span>' : '';
       credBadge = '<span class="badge s">' + esc(raw) + night + '</span>';
     }
+    // #505: 只标「免费账号不可用」，不标「可用」。没有 entitlement 就什么都不显示。
+    const ent = m.entitlement;
+    if(ent && Number(ent.code) === 11158){
+      const who = ent.userType ? ('user type ' + ent.userType) : '免费账号';
+      const when = ent.checked_at ? new Date(Number(ent.checked_at) * 1000).toLocaleString() : '';
+      const tip = '上游 ' + ent.code + ' · ' + who + (when ? (' · ' + when) : '')
+        + ' · 仅标记不可用，未标记不代表可用';
+      credBadge += ' <span class="badge warn" style="font-size:11px;background:var(--warn-soft);color:var(--warn);border-color:rgba(183,121,31,.35)" title="'
+        + esc(tip) + '">免费账号不可用</span>';
+    }
 
     // 2. 模型能力 (Vision, Tool calls)
     const caps = [];

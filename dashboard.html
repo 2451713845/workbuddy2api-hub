@@ -10911,6 +10911,7 @@ async function loadSettings(showToast){
       masked: k.masked || '',
       realm: k.realm || '',
       models: Array.isArray(k.models) ? k.models.slice() : [],
+      accounts: Array.isArray(k.accounts) ? k.accounts.slice() : [],
       concurrency_limit: parseInt(k.concurrency_limit || 0, 10) || 0,
       enabled: k.enabled !== false,
       created_at: k.created_at || '',
@@ -12109,6 +12110,19 @@ function modelPatternsText(patterns){
   return Array.isArray(patterns) ? patterns.join(', ') : '';
 }
 
+/* 允许账号按精确 uid 匹配（不做通配），所以这里只做去空白与去重。 */
+function parseAccountRefs(text){
+  const out = [];
+  String(text || '').split(/[,;\n]/).forEach(part => {
+    const ref = part.trim();
+    if(ref && out.indexOf(ref) === -1) out.push(ref);
+  });
+  return out;
+}
+function accountRefsText(refs){
+  return Array.isArray(refs) ? refs.join(', ') : '';
+}
+
 /* 已删除的 Key 是只读历史：密钥已被抹掉，所以这里不提供复制，也不提供恢复。 */
 function renderDeletedKeyRows(){
   const box = document.getElementById('deletedKeySection');
@@ -12175,6 +12189,11 @@ function renderKeyRows(){
         +       'style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
         +   '</div>'
         +   '<div style="grid-column:1 / -1">'
+        +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">允许账号 <span style="color:var(--dim-light)">(选填，留空 = 不限制；填账号 UID，多个用逗号分隔)</span></div>'
+        +     '<input type="text" id="editKeyAccounts_' + i + '" value="' + esc(accountRefsText(row.accounts)) + '" placeholder="如 4f2a1c3e-...；留空表示该 Key 可用全部账号" '
+        +       'style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
+        +   '</div>'
+        +   '<div style="grid-column:1 / -1">'
         +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">API Key 内容 ' + (row.masked ? '<span style="color:var(--dim-light)">(已保存: ' + esc(row.masked) + '，留空表示不改)</span>' : '') + '</div>'
         +     '<div style="display:flex;gap:8px">'
         +       '<input type="text" id="editKeyValue_' + i + '" value="' + esc(row.key || '') + '" placeholder="' + (row.masked ? '留空表示保持原 Key 不变' : '输入自定义密钥，或点击右侧生成') + '" '
@@ -12206,6 +12225,9 @@ function renderKeyRows(){
     const modelBadge = (Array.isArray(row.models) && row.models.length)
       ? '<span class="badge s" style="font-size:11px">限 ' + esc(modelPatternsText(row.models)) + '</span>'
       : '';
+    const accountBadge = (Array.isArray(row.accounts) && row.accounts.length)
+      ? '<span class="badge s" style="font-size:11px">限 ' + row.accounts.length + ' 个账号</span>'
+      : '';
 
     const displayKey = row.masked || (row.key ? (row.key.slice(0, 4) + '******' + row.key.slice(-4)) : '未设置');
     const createdStr = row.created_at ? ('创建时间 ' + esc(row.created_at)) : '';
@@ -12218,6 +12240,7 @@ function renderKeyRows(){
       +       statusBadge
       +       realmBadge
       +       modelBadge
+        +       accountBadge
         +       concBadge
       +     '</div>'
       +     '<div style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
@@ -12266,6 +12289,7 @@ async function saveSingleKey(index, btn){
   const realmSelect = document.getElementById('editKeyRealm_' + index);
   const keyInput = document.getElementById('editKeyValue_' + index);
   const modelsInput = document.getElementById('editKeyModels_' + index);
+  const accountsInput = document.getElementById('editKeyAccounts_' + index);
     const concInput = document.getElementById('editKeyConc_' + index);
 
   const name = nameInput ? nameInput.value.trim() : (row.name || '');
@@ -12280,6 +12304,7 @@ async function saveSingleKey(index, btn){
   row.name = name || '未命名';
   row.realm = realm;
   row.models = parseModelPatterns(modelsInput ? modelsInput.value : modelPatternsText(row.models));
+  row.accounts = parseAccountRefs(accountsInput ? accountsInput.value : accountRefsText(row.accounts));
     row.concurrency_limit = Math.max(0, parseInt((concInput ? concInput.value : row.concurrency_limit) || 0, 10) || 0);
   if(keyVal) row.key = keyVal;
   row._editing = false;
@@ -12445,6 +12470,7 @@ async function saveApiKeys(btn){
       name: row.name || '',
       realm: row.realm || '',
       models: row.models || [],
+      accounts: row.accounts || [],
         concurrency_limit: parseInt(row.concurrency_limit || 0, 10) || 0,
       enabled: row.enabled !== false,
       // Blank means "keep the stored key", which the server honours per row.

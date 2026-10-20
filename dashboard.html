@@ -4832,6 +4832,22 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         <div style="font-size:12px;color:var(--warn);margin-top:4px">
           注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。
         </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <label class="switch">
+            <input id="setDailyChatWebFallback" type="checkbox" onchange="saveDailyChatWebFallback()">
+            <span class="switch-track"></span>
+            <span>失败后按模型组合回退</span>
+          </label>
+          <span id="setDailyChatWebFallbackState" style="font-size:12px;color:var(--dim)"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <label style="font-size:13px;color:var(--dim)">回退模型组合</label>
+          <input id="setDailyChatWebFallbackModels" type="text" placeholder="留空 = 首选模型 + 内置免费模型；逗号分隔" style="flex:1;min-width:280px">
+          <button onclick="saveDailyChatWebFallbackModels(this)">保存</button>
+        </div>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          回退开启后，网页通道每失败一次就换下一个模型；组合按目录倍率自动排序（免费 → 低积分 → 高积分），先试免费的，再试便宜的，最后才是贵的。候选至少各试一次，配置的「最多尝试次数」更大时再从头跑第二轮。默认关闭。
+        </div>
       </section>
 
       <section>
@@ -10838,6 +10854,22 @@ async function loadSettings(showToast){
           : ('只跑一轮 · ' + dailyWebTimeout + ' 秒');
         dailyWebRetryState.style.color = dailyWebRetry ? 'var(--accent2)' : 'var(--dim)';
       }
+      const dailyWebFallback = data.daily_chat_web_fallback === true;
+      const dailyWebFallbackInput = document.getElementById('setDailyChatWebFallback');
+      if(dailyWebFallbackInput) dailyWebFallbackInput.checked = dailyWebFallback;
+      const dailyWebFallbackModels = Array.isArray(data.daily_chat_web_fallback_models)
+        ? data.daily_chat_web_fallback_models : [];
+      const dailyWebFallbackModelsInput = document.getElementById('setDailyChatWebFallbackModels');
+      if(dailyWebFallbackModelsInput) dailyWebFallbackModelsInput.value = dailyWebFallbackModels.join(', ');
+      const dailyWebFallbackState = document.getElementById('setDailyChatWebFallbackState');
+      if(dailyWebFallbackState){
+        dailyWebFallbackState.textContent = dailyWebFallback
+          ? ('已启用 · ' + (dailyWebFallbackModels.length
+              ? dailyWebFallbackModels.length + ' 个候选'
+              : '默认免费组合'))
+          : '(未启用)';
+        dailyWebFallbackState.style.color = dailyWebFallback ? 'var(--accent2)' : 'var(--dim)';
+      }
       const localWeb = data.local_web_tools === true;
       const localWebInput = document.getElementById('setLocalWebTools');
       if(localWebInput) localWebInput.checked = localWeb;
@@ -11508,6 +11540,38 @@ async function saveDailyChatWebRetry(){
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
     if(el) el.checked = !value;
+  }
+}
+
+async function saveDailyChatWebFallback(){
+  const el = document.getElementById('setDailyChatWebFallback');
+  const value = !!(el && el.checked);
+  try {
+    await postJSON('/settings/save', {daily_chat_web_fallback: value});
+    toast(value ? '已启用：网页通道失败后按模型组合回退'
+                : '已关闭：网页通道只用当前模型', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+    if(el) el.checked = !value;
+  }
+}
+
+async function saveDailyChatWebFallbackModels(btn){
+  const el = document.getElementById('setDailyChatWebFallbackModels');
+  const raw = (el && el.value) || '';
+  const models = raw.split(/[,，]/).map(function(s){ return s.trim(); })
+                     .filter(function(s){ return s.length > 0; });
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {daily_chat_web_fallback_models: models});
+    toast(models.length ? ('已保存回退组合：' + models.length + ' 个模型')
+                        : '已清空回退组合，使用默认免费组合', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
   }
 }
 

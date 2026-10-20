@@ -12270,8 +12270,10 @@ class LeakedToolCallStreamFilter:
         return out
 
 
-def chat_chunk(model, delta, finish=None, chunk_id="chatcmpl-wb"):
+def chat_chunk(model, delta, finish=None, chunk_id=None):
     """One Chat Completions streaming chunk."""
+    if not chunk_id:
+        chunk_id = f"chatcmpl-wb-{uuid.uuid4().hex[:16]}"
     return json.dumps({
         "id": chunk_id,
         "object": "chat.completion.chunk",
@@ -12281,11 +12283,11 @@ def chat_chunk(model, delta, finish=None, chunk_id="chatcmpl-wb"):
     }, ensure_ascii=False)
 
 
-def chat_text_chunk(model, text, chunk_id="chatcmpl-wb"):
+def chat_text_chunk(model, text, chunk_id=None):
     return chat_chunk(model, {"content": text}, None, chunk_id)
 
 
-def chat_tool_call_chunks(model, calls, chunk_id="chatcmpl-wb"):
+def chat_tool_call_chunks(model, calls, chunk_id=None):
     """Deltas that hand recovered calls over as structured tool calls."""
     out = []
     for i, call in enumerate(calls):
@@ -12298,7 +12300,7 @@ def chat_tool_call_chunks(model, calls, chunk_id="chatcmpl-wb"):
     return out
 
 
-def chat_finish_chunk(model, reason, chunk_id="chatcmpl-wb"):
+def chat_finish_chunk(model, reason, chunk_id=None):
     return chat_chunk(model, {}, reason, chunk_id)
 
 
@@ -14456,7 +14458,7 @@ def aggregate_stream(raw_iter, model, resp_id):
                 "prompt_tokens_details": {"cached_tokens": 0},
             }
     out = {
-        "id": resp_id or "chatcmpl-wb",
+        "id": resp_id or f"chatcmpl-wb-{uuid.uuid4().hex[:16]}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
@@ -20499,6 +20501,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None):
             self.send_response(200)
+            stream_chunk_id = f"chatcmpl-wb-{uuid.uuid4().hex[:16]}"
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
@@ -20538,10 +20541,10 @@ class Handler(BaseHTTPRequestHandler):
                 for action in actions:
                     if action[0] == "text":
                         if action[1]:
-                            write_chunk(chat_text_chunk(model, action[1]))
+                            write_chunk(chat_text_chunk(model, action[1], chunk_id=stream_chunk_id))
                     else:
                         synthesized_calls = True
-                        for payload in chat_tool_call_chunks(model, action[1]):
+                        for payload in chat_tool_call_chunks(model, action[1], chunk_id=stream_chunk_id):
                             write_chunk(payload)
 
             try:
@@ -20587,7 +20590,7 @@ class Handler(BaseHTTPRequestHandler):
                 release(leak_filter.flush())
                 if synthesized_calls or pending_finish is not None:
                     write_chunk(chat_finish_chunk(
-                        model, "tool_calls" if synthesized_calls else pending_finish))
+                        model, "tool_calls" if synthesized_calls else pending_finish, chunk_id=stream_chunk_id))
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 # Client hung up; still account for what upstream produced.
                 wall = int((time.time() - t_start) * 1000)

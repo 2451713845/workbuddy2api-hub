@@ -4295,6 +4295,7 @@ def _coerce_account_rows(blob):
         # and must be reported rather than silently treated as one account.
         looks_like_account = (
             blob.get("accessToken")
+            or blob.get("access_token")
             or isinstance(blob.get("auth"), dict)
             or isinstance(blob.get("account"), dict)
         )

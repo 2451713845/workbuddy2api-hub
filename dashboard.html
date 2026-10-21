@@ -15722,17 +15722,38 @@ async function loadRange(polled){
 
 async function loadStatic(){
   try{ state.perf = await api('/usage/perf'); } catch(e){ console.error(e); }
-  try{
-    const now = Math.floor(Date.now()/1000);
-    state.heat = await api(`/usage/timeseries?realm=all&range=custom&since=${now-366*86400}&until=${now}&bucket_seconds=86400`);
-  } catch(e){ console.error('heat failed', e); }
-  buildHeatGrid(state.heat);
+  await loadHeat();
   renderPerfFold();
   // 剩余用量 / 积分扣减 / 积分获取历史：原版区块的数据管道原来挂在旧 loadAnalytics 上，
   // 页面换成新版后这里补回调用（展开对应折叠区时还会再刷一次）。
   try{ loadRemainingUsage(); }catch(e){}
   try{ loadCreditHistory(); }catch(e){}
   try{ loadCreditGrants(); }catch(e){}
+}
+
+/* 热力图按「本地日」取数：since/until 都钉在本地午夜，缓存键一整天不变；
+ * until 取到明天 0 点，今天新产生的用量也能落进今天的格子。只在进页面、
+ * 跨天或距上次取数满 60 秒时重取——以前只在进页面取一次，跨过午夜后页面
+ * 还停在旧的一天（issue #541）。 */
+let heatFetchedAt = 0, heatFetchedDay = '', heatLoading = false;
+async function loadHeat(){
+  if (heatLoading) return;
+  heatLoading = true;
+  const nowMs = Date.now();
+  const midnight = new Date(nowMs); midnight.setHours(0,0,0,0);
+  const since = Math.floor(midnight.getTime()/1000) - 366*86400;
+  const until = Math.floor(midnight.getTime()/1000) + 86400;
+  heatFetchedAt = nowMs/1000;
+  heatFetchedDay = fmtDate(nowMs/1000);
+  try{
+    state.heat = await api(`/usage/timeseries?realm=all&range=custom&since=${since}&until=${until}&bucket_seconds=86400`);
+  } catch(e){ console.error('heat failed', e); }
+  heatLoading = false;
+  buildHeatGrid(state.heat);
+}
+function maybeLoadHeat(){
+  const now = Date.now()/1000;
+  if (fmtDate(now) !== heatFetchedDay || now - heatFetchedAt >= 60) loadHeat();
 }
 
 /* ---------------- KPI ---------------- */
@@ -16412,6 +16433,7 @@ function syncOldRange(){
 let wbaStarted = false;
 function wbaTick(){
   if (!wbaStarted){ wbaStarted = true; loadStatic(); }
+  maybeLoadHeat();
   loadRange(true);   // 轮询：窗口上界按 15 秒桶量化，连续两轮同桶才有可能吃 304
 }
 window.loadAnalytics = wbaTick;            /* 面板 5s 轮询 / 切页 / 回前台统一入口 */

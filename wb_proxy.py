@@ -12359,9 +12359,21 @@ LEAK_TAG_RE = re.compile(
     r"<\s*/?\s*(?:\|\s*DSML\s*\|\s*)?"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<attrs>[^>]*)>"
 )
+# The full-width spelling (｜｜DSML｜｜) is what the model actually prints;
+# LEAK_TAG_RE only knows the ASCII bars, so closing-tag boundaries get their
+# own matcher that accepts both.
+LEAK_CLOSE_RE = re.compile(
+    r"<\s*/\s*(?:\|\s*DSML\s*\|\s*|[\uff5c]+\s*DSML\s*[\uff5c]+\s*)?"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)[^>]*>",
+    re.IGNORECASE,
+)
 LEAK_NAME_ATTR_RE = re.compile(r"""name\s*=\s*["']([^"']*)["']""")
 LEAK_WRAPPER_TAGS = {"calls", "tool_calls", "function_calls", "function_call"}
 LEAK_PARAM_TAGS = {"parameter", "param", "arg", "argument"}
+# A printed call is complete once one of these closing tags arrives. The
+# stream filter used to wait for EOF, so a long tool call left the client
+# silent and then dumped the whole block at the end (issue #549).
+CALL_CLOSE_TAGS = LEAK_WRAPPER_TAGS | {"invoke", "run_code", "run_shell"}
 # First characters of every tag the stream filter has to hold text back for.
 LEAK_TAG_PREFIXES = (
     "<run_code", "<run_shell", "<invoke", "<parameter", "<param", "<arg",
@@ -12516,6 +12528,37 @@ def could_be_leaked_call(tail):
     return any(p.startswith(low) or low.startswith(p) for p in LEAK_TAG_PREFIXES)
 
 
+def _split_at_call_close(text):
+    """Split `text` after the first complete call-closing tag.
+
+    Returns (prefix, rest), or (None, text) while no call has closed yet.
+    Consecutive closing tags belong to the same block and are swallowed
+    with it, so a trailing </calls> cannot later leak out as prose.
+    """
+    for match in LEAK_CLOSE_RE.finditer(text):
+        if match.group("name").lower() not in CALL_CLOSE_TAGS:
+            continue
+        end = match.end()
+        while True:
+            nxt = end
+            while nxt < len(text) and text[nxt] in " \t\r\n":
+                nxt += 1
+            closing = LEAK_CLOSE_RE.match(text, nxt)
+            if not closing:
+                break
+            end = closing.end()
+        return text[:end], text[end:]
+    return None, text
+
+
+def _first_call_candidate(text):
+    """Index of the first "<" that may still become printed markup."""
+    for idx, ch in enumerate(text):
+        if ch == "<" and could_be_leaked_call(text[idx:]):
+            return idx
+    return None
+
+
 class LeakedToolCallStreamFilter:
     """Hold back assistant text that may be a printed tool call.
 
@@ -12540,20 +12583,37 @@ class LeakedToolCallStreamFilter:
         if not text:
             return []
         self.buf += text
-        for idx in range(len(self.buf)):
-            if self.buf[idx] != "<":
-                continue
-            if not could_be_leaked_call(self.buf[idx:]):
-                continue
-            if idx:
-                head, self.buf = self.buf[:idx], self.buf[idx:]
-                return [("text", head)]
-            break
-        else:
+        idx = _first_call_candidate(self.buf)
+        if idx is None:
             return self._release_all()
+        out = []
+        if idx:
+            out.append(("text", self.buf[:idx]))
+            self.buf = self.buf[idx:]
         if len(self.buf) > self.MAX_HOLD:
-            return self._release_all()
-        return []
+            out.extend(self._release_all())
+            return out
+        prefix, rest = _split_at_call_close(self.buf)
+        if prefix is None:
+            return out
+        calls, clean = parse_leaked_tool_calls(prefix)
+        if not calls:
+            calls, clean = parse_dsml_tool_calls(prefix)
+        if not calls:
+            return out
+        self.buf = rest
+        out.append(("calls", calls))
+        if clean:
+            out.append(("text", clean))
+        # Prose after the call can go out at once; only text that may still
+        # grow into another call stays buffered.
+        idx = _first_call_candidate(self.buf)
+        if idx is None:
+            out.extend(self._release_all())
+        elif idx:
+            out.append(("text", self.buf[:idx]))
+            self.buf = self.buf[idx:]
+        return out
 
     def flush(self):
         if not self.buf:
@@ -12623,6 +12683,27 @@ def chat_usage_chunk(model, usage, chunk_id="chatcmpl-wb"):
         "choices": [],
         "usage": usage,
     }, ensure_ascii=False)
+
+
+def chat_stream_error_frame(message, code="upstream_stream_error"):
+    """A terminal SSE error frame for a chat stream that died mid-body.
+
+    `data: [DONE]` means the turn finished normally. Sending it after an
+    upstream read error hid the failure from every client that treats it as
+    the end of the answer (issue #549); send an error object instead and
+    close the connection.
+    """
+    payload = {"error": {"message": str(message), "type": "upstream_error",
+                         "param": None, "code": code}}
+    return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+
+def responses_stream_error_frame(message, code="upstream_stream_error"):
+    """The Responses-API spelling of the same terminal error event."""
+    payload = {"type": "error", "code": code, "message": str(message),
+               "param": None, "sequence_number": 0}
+    return ("event: error\ndata: " + json.dumps(payload, ensure_ascii=False)
+            + "\n\n").encode("utf-8")
 
 
 def translate_max_completion_tokens(obj):
@@ -20821,7 +20902,8 @@ class Handler(BaseHTTPRequestHandler):
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
                          fp=fp, outcome="upstream_aborted", key=self._key_id())
             try:
-                self.wfile.write(b"data: [DONE]" + bytes([10, 10]))
+                self.wfile.write(responses_stream_error_frame(
+                    "upstream stream aborted: %s" % exc))
                 self.wfile.flush()
             except Exception:
                 pass
@@ -21535,8 +21617,10 @@ class Handler(BaseHTTPRequestHandler):
                             gen_ms=(wall - first_ms) if first_ms is not None else None,
                              fp=fp, outcome="upstream_aborted", key=self._key_id())
                 try:
+                    release(leak_filter.flush())
                     flush_out()
-                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.write(chat_stream_error_frame(
+                        "upstream stream aborted: %s" % exc))
                     self.wfile.flush()
                 except Exception:
                     pass

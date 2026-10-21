@@ -4939,6 +4939,29 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">全局提示词 <em id="setGlobalPromptState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              给所有 <code style="font-family:var(--mono,monospace)">/v1</code> 对话注入一段网关自己的系统提示词。「追加」保留客户端提示词并插在开头，「替换」删掉客户端 system/developer 后只留这一条。留空时「追加/替换」使用内置默认提示词。默认「透传」，不改写任何客户端内容。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <select id="setGlobalPromptMode" style="min-width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+              <option value="passthrough">透传（不改写）</option>
+              <option value="append">追加到 system</option>
+              <option value="custom">替换 system</option>
+            </select>
+            <button onclick="saveGlobalPrompt(this)">保存</button>
+          </div>
+        </div>
+        <textarea id="setGlobalPromptText" rows="6" placeholder="留空使用内置默认提示词；写入后即时生效，不需要重启" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 12px;font:inherit;color:var(--fg);resize:vertical"></textarea>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          只作用于对外对话；网页活跃、保活与签到等网关内部请求不注入。内容上限 64 KiB。
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">本地网络工具 <em id="setLocalWebToolsState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               部分客户端（如 Codex App）会宣告 web_search / web_fetch 这类服务端工具，而上游没有对应的执行器：声明送上去，模型看到工具却没有执行器，客户端最后只拿到一句 unsupported call。开启后由本网关代跑——把声明换成自己的同名函数，在本地执行（搜索按 DuckDuckGo → Bing → Wikipedia → Stack Overflow → Google News 的顺序自动轮换，抓页面抓这个 URL）再把结果喂回模型。默认关闭，关闭时声明原样透传，客户端自己声明的搜索工具照常拿到调用。
@@ -10989,6 +11012,20 @@ async function loadSettings(showToast){
         dailyWebRandomPromptState.style.color = dailyWebRandomPrompt
           ? 'var(--accent2)' : 'var(--dim)';
       }
+      const promptCfg = (data.prompt && typeof data.prompt === 'object') ? data.prompt : {};
+      const promptMode = ['passthrough', 'append', 'custom'].indexOf(promptCfg.mode) >= 0
+        ? promptCfg.mode : 'passthrough';
+      const promptModeInput = document.getElementById('setGlobalPromptMode');
+      if(promptModeInput) promptModeInput.value = promptMode;
+      const promptTextInput = document.getElementById('setGlobalPromptText');
+      if(promptTextInput) promptTextInput.value = promptCfg.text || '';
+      const promptState = document.getElementById('setGlobalPromptState');
+      if(promptState){
+        promptState.textContent = promptMode === 'passthrough' ? '(透传)'
+          : (promptMode === 'append' ? '(追加)' : '(替换)');
+        promptState.style.color = promptMode === 'passthrough'
+          ? 'var(--dim)' : 'var(--accent2)';
+      }
       const localWeb = data.local_web_tools === true;
       const localWebInput = document.getElementById('setLocalWebTools');
       if(localWebInput) localWebInput.checked = localWeb;
@@ -11974,6 +12011,24 @@ async function saveDailyChatModel(btn){
   try {
     await postJSON('/settings/save', {daily_chat_model: value});
     toast(value ? ('每日活跃改用 ' + value) : '每日活跃恢复内置默认模型', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveGlobalPrompt(btn){
+  const modeEl = document.getElementById('setGlobalPromptMode');
+  const textEl = document.getElementById('setGlobalPromptText');
+  const mode = (modeEl && modeEl.value) || 'passthrough';
+  const text = (textEl && textEl.value) || '';
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {prompt: {mode: mode, text: text}});
+    toast(mode === 'passthrough' ? '已保存：全局提示词透传'
+        : ('已保存：全局提示词' + (mode === 'append' ? '追加到 system' : '替换 system')), 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

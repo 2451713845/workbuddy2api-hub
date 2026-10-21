@@ -1,3 +1,10 @@
+## v1.7.21
+
+Windows 便携包补一个可选的前台窗口启动入口：默认仍是静默（pythonw + 日志窗口），需要「关窗即停」时用新的 `start-wb-proxy-visible.bat` / `start-wb-proxy-lan-visible.bat`。套件 202 个（151 Python + 51 JS）。
+
+- **Windows 可选前台窗口启动**（#559）：新增两个薄封装脚本，设置 `WB_LAUNCH_MODE=console` 后调用原启动脚本，走现成的 `:use_python` 可见分支；默认启动方式不变。两个脚本已加入 `release/portable.txt`，并新增 2 项断言（封装脚本设置模式并调用正确目标、主脚本在 pythonw 探测前检查模式）。
+- **README 快速启动说明**：Windows 默认静默启动，关掉日志窗口不会停服务；需要「前台控制台 + 关窗即停」时用 `-visible.bat`；局域网一节同步补上。
+
 ## v1.7.20
 
 三处回归修复：裸对象账号导入、流式断流错误帧与打印工具调用延迟、热力图跨天不刷新。套件 202 个（151 Python + 51 JS）。

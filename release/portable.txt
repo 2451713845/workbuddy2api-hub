@@ -32,10 +32,12 @@ ops/aliyun/workbuddy2api-hub-updater.conf
 ops/aliyun/workbuddy2api-hub-updater-app.conf
 
 start-wb-proxy.bat
+start-wb-proxy-visible.bat
 start-wb-proxy.command
 start-wb-proxy.sh
 restart-wb-proxy.bat
 start-wb-proxy-lan.bat
+start-wb-proxy-lan-visible.bat
 start-wb-proxy-lan.command
 restart-wb-proxy.command
 start-wb-proxy-lan.sh

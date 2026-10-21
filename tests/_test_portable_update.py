@@ -171,6 +171,7 @@ class ApplyTests(unittest.TestCase):
 
             with mock.patch.object(U, "asset_urls", fake_urls), \
                     mock.patch.object(U, "status_path", lambda: status_file), \
+                    mock.patch.object(U, "is_visible_process", lambda pid: False), \
                     mock.patch.object(U, "stop_gateway", lambda pid: None), \
                     mock.patch.object(U, "wait_port_free", lambda port: True), \
                     mock.patch.object(U, "start_service", lambda *a: None), \
@@ -187,6 +188,7 @@ class ApplyTests(unittest.TestCase):
             status_file = os.path.join(root, "updates", "status.json")
             with mock.patch.object(U, "asset_urls", fake_urls), \
                     mock.patch.object(U, "status_path", lambda: status_file), \
+                    mock.patch.object(U, "is_visible_process", lambda pid: False), \
                     mock.patch.object(U, "stop_gateway", lambda pid: None), \
                     mock.patch.object(U, "wait_port_free", lambda port: True), \
                     mock.patch.object(U, "start_service", lambda *a: None), \
@@ -244,6 +246,111 @@ class RequestTests(unittest.TestCase):
                 self.assertEqual(U.status()["state"], "queued")
                 with self.assertRaises(U.UpdateError):
                     U.request_install("v1.0.0", "1.0.0")
+
+
+class ExternalBridgeTests(unittest.TestCase):
+    def test_external_enabled_needs_env_and_directory(self):
+        import wb_update_request as R
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(R, "REQUEST_DIR", d), \
+                    mock.patch.dict(os.environ, {
+                        "WB_UPDATE_INSTALL_ENABLED": "1",
+                        "WB_UPDATE_EXECUTOR": "external"}, clear=False):
+                self.assertTrue(R.external_enabled())
+                self.assertTrue(R.install_enabled())
+            with mock.patch.object(R, "REQUEST_DIR", d), \
+                    mock.patch.dict(os.environ, {}, clear=True):
+                self.assertFalse(R.external_enabled())
+
+    def test_executor_marker_registers_without_env(self):
+        import wb_update_request as R
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "executor.json"), "w") as fh:
+                fh.write("{}")
+            with mock.patch.object(R, "REQUEST_DIR", d), \
+                    mock.patch.dict(os.environ, {
+                        "WB_UPDATE_INSTALL_ENABLED": "1"}, clear=True):
+                self.assertTrue(R.external_enabled())
+
+    def test_request_writes_pid_port_and_root(self):
+        import wb_update_request as R
+        with tempfile.TemporaryDirectory() as d:
+            request_file = os.path.join(d, "request.json")
+            status_file = os.path.join(d, "status.json")
+            with mock.patch.object(R, "REQUEST_DIR", d), \
+                    mock.patch.object(R, "REQUEST_FILE", request_file), \
+                    mock.patch.object(R, "STATUS_FILE", status_file), \
+                    mock.patch.object(R, "_systemd_enabled",
+                                      return_value=False), \
+                    mock.patch.object(R, "external_enabled",
+                                      return_value=True), \
+                    mock.patch.object(R, "install_enabled",
+                                      return_value=True):
+                queued = R.request_install("v2.0.0", "1.0.0", port=8899)
+                self.assertEqual(queued["state"], "queued")
+                with open(request_file, encoding="utf-8") as fh:
+                    payload = json.load(fh)
+                self.assertEqual(payload["tag"], "v2.0.0")
+                self.assertEqual(payload["version"], "2.0.0")
+                self.assertEqual(payload["port"], 8899)
+                self.assertEqual(payload["pid"], os.getpid())
+                self.assertTrue(os.path.isdir(payload["root"]))
+                self.assertEqual(R.status()["installation"]["state"], "queued")
+
+    def test_external_executor_reads_and_unlinks_the_request(self):
+        import wb_update_external as E
+        with tempfile.TemporaryDirectory() as d:
+            request_file = os.path.join(d, "request.json")
+            with open(request_file, "w", encoding="utf-8") as fh:
+                json.dump({"tag": "v2.0.0", "version": "2.0.0",
+                           "pid": 1234, "port": 8788, "root": d}, fh)
+            os.chmod(request_file, 0o600)
+            payload = E.read_request(request_file)
+            self.assertEqual(payload["tag"], "v2.0.0")
+            self.assertFalse(os.path.exists(request_file))
+
+    def test_external_executor_calls_run_update_without_start(self):
+        import wb_update_external as E
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "wb_proxy.py"), "w") as fh:
+                fh.write("# app\n")
+            request_file = os.path.join(d, "request.json")
+            with open(request_file, "w", encoding="utf-8") as fh:
+                json.dump({"tag": "v2.0.0", "version": "2.0.0",
+                           "pid": 1234, "port": 8788, "root": d}, fh)
+            os.chmod(request_file, 0o600)
+            with mock.patch.object(E, "run_update", return_value=0) as run:
+                code = E.main(["--request-dir", d])
+            self.assertEqual(code, 0)
+            kwargs = run.call_args.kwargs
+            self.assertIsNone(kwargs["start_service_fn"])
+            self.assertEqual(kwargs["status_file"],
+                             os.path.join(d, "status.json"))
+            self.assertEqual(run.call_args.args[:2], (d, d))
+
+
+    def test_external_executor_recovers_a_half_applied_update(self):
+        import wb_update_external as E
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "app")
+            os.makedirs(os.path.join(root, "updates", "backup-2.0.0"))
+            with open(os.path.join(root, "wb_proxy.py"), "w") as fh:
+                fh.write("half\n")
+            with open(os.path.join(root, "updates", "backup-2.0.0",
+                                   "wb_proxy.py"), "w") as fh:
+                fh.write("old\n")
+            with open(os.path.join(root, "updates", "backup-2.0.0",
+                                   "backup.json"), "w") as fh:
+                json.dump({"version": "2.0.0", "saved": ["wb_proxy.py"],
+                           "absent": []}, fh)
+            status_file = os.path.join(d, "status.json")
+            with open(status_file, "w") as fh:
+                json.dump({"state": "applying", "version": "2.0.0"}, fh)
+            code = E.main(["--request-dir", d, "--root", root])
+            self.assertEqual(code, 0)
+            self.assertEqual(read(os.path.join(root, "wb_proxy.py")), "old\n")
+            with open(status_file, encoding="utf-8") as fh:
+                self.assertEqual(json.load(fh)["state"], "rolled_back")
 
 
 if __name__ == "__main__":

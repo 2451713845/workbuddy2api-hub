@@ -49,9 +49,27 @@ def _systemd_enabled():
     )
 
 
+def external_enabled():
+    """A deployment-provided executor polls request.json (issue #561).
+
+    The gateway still only writes a validated request; the executor is the
+    deployment's supervisor/entrypoint. Registration is either the
+    WB_UPDATE_EXECUTOR=external environment variable or an executor.json
+    marker in the request directory.
+    """
+    if str(os.environ.get("WB_UPDATE_INSTALL_ENABLED") or "").strip() != "1":
+        return False
+    if not os.path.isdir(REQUEST_DIR):
+        return False
+    mode = str(os.environ.get("WB_UPDATE_EXECUTOR") or "").strip().lower()
+    return (mode == "external"
+            or os.path.exists(os.path.join(REQUEST_DIR, "executor.json")))
+
+
 def install_enabled():
     """The panel may install when either the unit or a portable package is here."""
-    return _systemd_enabled() or wb_update_portable.available()
+    return (_systemd_enabled() or external_enabled()
+            or wb_update_portable.available())
 
 
 def _version_tuple(tag):
@@ -94,22 +112,25 @@ def _read_root_status():
 
 
 def status():
-    if _systemd_enabled():
-        result = {"install_enabled": True,
-                  "installation": _read_root_status()}
-        current = result["installation"]
-        if (os.path.exists(REQUEST_FILE)
-                and current.get("state") not in ACTIVE_STATES):
-            result["installation"] = {
-                "state": "queued", "version": current.get("version", ""),
-                "message": "",
-            }
-        return result
+    if _systemd_enabled() or external_enabled():
+        return _bridge_status()
     if wb_update_portable.available():
         return {"install_enabled": True,
                 "installation": wb_update_portable.status()}
     return {"install_enabled": False,
             "installation": {"state": "idle", "version": "", "message": ""}}
+
+
+def _bridge_status():
+    result = {"install_enabled": True, "installation": _read_root_status()}
+    current = result["installation"]
+    if (os.path.exists(REQUEST_FILE)
+            and current.get("state") not in ACTIVE_STATES):
+        result["installation"] = {
+            "state": "queued", "version": current.get("version", ""),
+            "message": "",
+        }
+    return result
 
 
 def request_install(tag, current_version, port=8788, lan=False, repo=None):
@@ -121,7 +142,7 @@ def request_install(tag, current_version, port=8788, lan=False, repo=None):
     if target is None or current is None or target <= current:
         raise UpdateRequestError("目标版本无效或不高于当前版本")
 
-    if not _systemd_enabled():
+    if not _systemd_enabled() and not external_enabled():
         try:
             return wb_update_portable.request_install(
                 tag, current_version, port=port, lan=lan, repo=repo)
@@ -136,6 +157,11 @@ def request_install(tag, current_version, port=8788, lan=False, repo=None):
         "tag": tag,
         "version": "%d.%d.%d" % target,
         "requested_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        # The external executor needs to know which process to stop and
+        # which directory to replace; the systemd worker ignores extras.
+        "pid": os.getpid(),
+        "port": int(port),
+        "root": os.path.dirname(os.path.abspath(__file__)),
     }, separators=(",", ":")).encode("utf-8")
     flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
              | getattr(os, "O_CLOEXEC", 0) | _NOFOLLOW)

@@ -32,6 +32,7 @@ ACTIVE_STATES = frozenset((
     "queued", "downloading", "verifying", "backing_up", "stopping",
     "applying", "restarting", "checking", "rolling_back",
 ))
+_UNSET = object()
 VISIBLE_STATES = ACTIVE_STATES | frozenset((
     "idle", "succeeded", "rolled_back", "failed", "unavailable",
 ))
@@ -76,10 +77,10 @@ def available():
     return True
 
 
-def _write_status(state, version="", message=""):
+def _write_status(state, version="", message="", path=None):
     if state not in VISIBLE_STATES:
         raise ValueError("invalid update state: %s" % state)
-    path = status_path()
+    path = path or status_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {
         "state": state,
@@ -233,6 +234,9 @@ def backup_current(root, package, files, version):
     current_manifest = os.path.join(package, MANIFEST_NAME)
     if os.path.isfile(current_manifest):
         shutil.copy2(current_manifest, os.path.join(backup, MANIFEST_NAME))
+    with open(os.path.join(backup, "backup.json"), "w",
+              encoding="utf-8", newline="\n") as fh:
+        json.dump({"version": version, "saved": saved, "absent": absent}, fh)
     return backup, saved, absent
 
 
@@ -262,6 +266,40 @@ def restore_backup(backup, root, package, saved, absent):
     backup_manifest = os.path.join(backup, MANIFEST_NAME)
     if os.path.isfile(backup_manifest):
         shutil.copy2(backup_manifest, os.path.join(package, MANIFEST_NAME))
+
+
+def recover_incomplete(root, package, status_file):
+    """Roll back a half-applied update found by the next executor run.
+
+    The supervisor should run the executor before starting the gateway. A
+    status still in an active state plus a backup directory means the
+    previous run died mid-replace; restoring it is safer than starting the
+    mixed tree.
+    """
+    try:
+        with open(status_file, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(state, dict) or state.get("state") not in ACTIVE_STATES:
+        return False
+    version = str(state.get("version") or "")
+    if not version:
+        return False
+    backup = os.path.join(root, UPDATES_DIR, "backup-" + version)
+    try:
+        with open(os.path.join(backup, "backup.json"), encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return False
+    saved = meta.get("saved") if isinstance(meta, dict) else None
+    absent = meta.get("absent") if isinstance(meta, dict) else None
+    if not isinstance(saved, list) or not isinstance(absent, list):
+        return False
+    restore_backup(backup, root, package, saved, absent)
+    _write_status("rolled_back", version, "上次更新未完成，已回滚",
+                  path=status_file)
+    return True
 
 
 def port_open(port):
@@ -385,18 +423,28 @@ def request_install(tag, current_version, port=8788, lan=False, repo=None):
     return {"state": "queued", "version": version, "message": "更新任务已排队"}
 
 
-def run_update(root, package, tag, version, port, lan, pid, repo):
+def run_update(root, package, tag, version, port, lan, pid, repo,
+               status_file=None, start_service_fn=_UNSET):
     """Helper entry point: download, verify, apply, restart, roll back."""
+    if start_service_fn is _UNSET:
+        start_service_fn = start_service
     state = {"applied": False, "stopped": False, "backup": None,
              "saved": [], "absent": []}
 
     def mark(name, message=""):
-        _write_status(name, version, message)
+        _write_status(name, version, message, path=status_file)
 
     try:
         mark("downloading", "正在下载 %s" % tag)
         updates = os.path.join(root, UPDATES_DIR, version)
-        os.makedirs(updates, exist_ok=True)
+        try:
+            os.makedirs(updates, exist_ok=True)
+            probe = os.path.join(updates, ".write-test")
+            with open(probe, "wb") as fh:
+                fh.write(b"")
+            os.remove(probe)
+        except OSError as exc:
+            raise UpdateError("应用目录不可写: %s" % exc)
         zip_url, sha_url, zip_name = asset_urls(repo or REPO_DEFAULT, tag, version)
         zip_path = os.path.join(updates, zip_name)
         sha_path = os.path.join(updates, "SHA256SUMS")
@@ -435,7 +483,8 @@ def run_update(root, package, tag, version, port, lan, pid, repo):
         state["applied"] = True
 
         mark("restarting", "正在重启网关")
-        start_service(root, port, lan, visible)
+        if start_service_fn is not None:
+            start_service_fn(root, port, lan, visible)
         if not wait_health(port):
             raise UpdateError("新版本未在 45 秒内就绪")
         mark("succeeded", "已更新到 %s" % version)
@@ -448,7 +497,8 @@ def run_update(root, package, tag, version, port, lan, pid, repo):
                 if state["backup"]:
                     restore_backup(state["backup"], root, package,
                                    state["saved"], state["absent"])
-                start_service(root, port, lan, visible)
+                if start_service_fn is not None:
+                    start_service_fn(root, port, lan, visible)
                 wait_health(port)
             except Exception as exc2:
                 mark("failed", message + " / 回滚失败: " + str(exc2)[:120])

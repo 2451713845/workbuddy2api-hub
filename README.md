@@ -113,13 +113,15 @@ services:
       - ./usage:/app/usage          # 用量流水日志（更新/重建容器不丢）
 ```
 
-更新：面板里点「拉取最新镜像并重启」，或 `docker compose pull && docker compose up -d`。
+更新：`docker compose pull && docker compose up -d`（重建容器）。面板的「安装更新」按钮在镜像部署里默认不可用——镜像里既没有 systemd unit，也没有让 `wb_update_portable.available()` 成立的应用内 `release-manifest.json`；需要注册外部执行者（见下一节），而它只替换应用层文件，不会重建镜像。
 
 **无 systemd 部署的面板一键更新**：容器 / LXC / 便携版没有 systemd 时，面板默认不能安装更新。部署方可以注册一个外部执行者：
 
 1. 让网关能写请求：挂载一个目录（例如 `/run/workbuddy2api-hub-updater`），设置 `WB_UPDATE_INSTALL_ENABLED=1`、`WB_UPDATE_REQUEST_DIR=<目录>`，并设置 `WB_UPDATE_EXECUTOR=external`（或在该目录放一个 `executor.json`）。
-2. 执行者监听 `<目录>/request.json`，读取 `tag` / `version` / `pid` / `port` / `root`，执行下载 → 校验 `SHA256SUMS` → 备份 → 停进程 → 替换 → 等 supervisor 拉起 → 探针 `/health`；失败回滚。参考实现：`wb_update_external.py --request-dir <目录>`（需要 supervisor 在网关退出后自动拉起）。
-3. 执行者写 `<目录>/status.json`，`state` 使用 `queued` / `downloading` / `verifying` / `backing_up` / `stopping` / `applying` / `restarting` / `succeeded` / `rolled_back` / `failed`，面板沿用现有状态机。
+2. 执行者监听 `<目录>/request.json`，读取 `action` / `tag` / `version` / `pid` / `port` / `root`，执行下载 → 校验 `SHA256SUMS` → 备份 → 停进程 → 替换 → 等 supervisor 拉起 → 探针 `/health`；失败回滚。`action` 缺省为 `install`，`rollback` 表示用本地备份恢复旧版本（不下载）。参考实现：`wb_update_external.py --request-dir <目录>`（需要 supervisor 在网关退出后自动拉起）。
+3. 执行者写 `<目录>/status.json`，`state` 使用 `queued` / `downloading` / `verifying` / `backing_up` / `stopping` / `applying` / `restoring` / `restarting` / `succeeded` / `restored` / `rolled_back` / `failed`，面板沿用现有状态机。
+
+保留历史版本备份：设置页可选 0–3 份（默认 1），更新成功后把旧版本的程序文件留在 `updates/backup-<这次更新去的版本>/`（内容其实是更新前的版本），面板「版本回退」据此列出可回退的版本。`0` = 不留备份，回退不可用。
 
 约束：`accounts/`、`usage/` 不参与替换；执行者必须有应用目录写权限；网关只写请求，不碰自己的代码。
 
@@ -153,7 +155,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 205 个套件：153 个 Python + 52 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 207 个套件：154 个 Python + 53 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -461,6 +463,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **保留历史版本备份 + 面板版本回退**：更新成功后把被替换的程序文件留一份在 `updates/backup-<这次更新去的版本>/`，份数由新增设置「保留历史版本备份」控制（0–3，**默认 1**；`0` = 与今天一致，不留备份、回退不可用）。设置页新增「版本回退」卡片：列出本机备份的版本、时间、文件数与完整性，点「回退到此版本」按本地文件恢复，不下载旧安装包，回退会重启网关但不动账号与用量数据。`request.json` 新增 `action`（`install` / `rollback`），便携版、外部执行者与 systemd 服务三个执行者都认；**旧执行者遇到 `action=rollback` 会当「重装该 tag」处理**（多一次下载，仍能回到旧版本）。回退前复核备份完整性（缺文件 / 版本不符 / `backup.json` 损坏都禁用并写出原因），回退后用 `Server: wb-proxy/<版本>` 校验确实在跑旧版本，探针失败自动恢复到回退前的版本。新增 26 项 Python 断言与 1 个 JS 套件（29 项）。 / Retained backups plus a panel rollback: after a successful update the replaced program files stay in `updates/backup-<the version that update went to>/`, and the new "keep previous versions" setting caps how many folders are kept (0-3, default 1; `0` keeps today's behaviour and disables rollback). A new "version rollback" card lists the local backups with version, time, file count and integrity; "roll back to this version" restores them from disk without downloading an old package, restarting the gateway but leaving accounts and usage data alone. `request.json` gains `action` (`install` / `rollback`), understood by all three executors (portable, external, systemd); an executor that predates this treats `action=rollback` as "reinstall that tag", which costs a download but still lands on the old version. Integrity is re-checked before a restore (missing files, mismatched version or an unreadable `backup.json` disable the row with a reason), the health probe compares `Server: wb-proxy/<version>`, and a rollback that never serves the old version is undone automatically. Covered by 26 new Python assertions and one new JS suite (29 checks).
 
 - **11-128：身份句渠道指纹的动词搭配补全**：v1.7.18 的正则只认 `agent powered by` / `assistant built on` 两种搭配，而同一判据下的 `built by`（如 `You are <Product> Agent, built by <Vendor>.`）、`created by` / `developed by` / `made by` / `trained by`，以及省略名词的 `You are powered by …` 都会漏检——上游只要补其中一条规则，这些句子就会重新命中 400 / 11-128。现按同一判据补全动词表：名词可省略、冠词后允许 0~3 个修饰词（专名 + 可选逗号）；`You are free to use tools built by …` 这类分词修饰宾语的句子保持不改写。新增 5 项断言（built by 变体、其余动词、省略名词、反误伤、角色作用域）。 / Broaden the identity-sentence channel fingerprint: v1.7.18 only matched `agent powered by` / `assistant built on`, so `built by` (`You are <Product> Agent, built by <Vendor>.`), `created by` / `developed by` / `made by` / `trained by`, and the noun-less `You are powered by …` slipped through — one rule added upstream would put them back on 400 / 11-128. The same rule now covers those verb forms, with an optional noun and up to three modifiers (proper names plus an optional comma), while participles modifying an object (`You are free to use tools built by …`) stay untouched. Five assertions added.
 - **网页活跃重试等待改为线性递增**：第 N 轮等待从「首轮 × 2^(N-1)」改为「首轮 × N」，默认 3 次从 120 / 240 / 480 秒变为 120 / 240 / 360 秒；最坏占用从指数级降到线性级。设置页说明同步更新。新增 4 项单测。 / The web-channel retry wait now grows linearly: round N waits base × N instead of base × 2^(N-1), so the default three tries are 120 / 240 / 360 seconds instead of 120 / 240 / 480. The worst case is linear rather than exponential. Covered by 4 new tests.

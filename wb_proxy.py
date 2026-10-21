@@ -10170,6 +10170,8 @@ def runtime_settings_view():
         "key_before_hidden": wb_settings.key_before_hidden(ACCOUNTS_DIR),
         "hidden_pages": wb_settings.hidden_pages(ACCOUNTS_DIR),
         "update_check_enabled": wb_settings.update_check_enabled(ACCOUNTS_DIR),
+        "keep_backups": wb_settings.keep_backups(ACCOUNTS_DIR),
+        "keep_backups_max": wb_settings.MAX_KEEP_BACKUPS,
         "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
         "usage": wb_settings.usage_config(ACCOUNTS_DIR),
         "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
@@ -18147,6 +18149,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_settings()
         if path == "/updates":
             return self._get_updates()
+        if path == "/updates/backups":
+            return self._get_update_backups()
         if path == "/proxy/slots":
             if not self._panel_ok():
                 return self._error(
@@ -18605,6 +18609,27 @@ class Handler(BaseHTTPRequestHandler):
                 "msg": "更新检查未运行",
             }
         payload.update(wb_update_request.status())
+        return self._json(200, payload)
+
+    def _get_update_backups(self):
+        """What a rollback could restore, for the panel's rollback card.
+
+        Read-only: it lists the backups the registered executor kept, says which
+        ones are complete (and why not, when they are not), and reports the
+        retention setting so the card can explain an empty list. The panel never
+        sees a path - only versions, sizes and times.
+        """
+        if not self._authorized():
+            return
+        try:
+            payload = wb_update_request.backups()
+        except Exception as exc:
+            payload = {"source": "", "backups": [],
+                       "msg": "无法读取备份列表: %s" % str(exc)[:120]}
+        payload["current_version"] = running_version()
+        payload["keep_backups"] = wb_settings.keep_backups(ACCOUNTS_DIR)
+        payload["keep_backups_max"] = wb_settings.MAX_KEEP_BACKUPS
+        payload["rollback_enabled"] = wb_update_request.install_enabled()
         return self._json(200, payload)
 
     def _get_logs(self, query):
@@ -19385,6 +19410,18 @@ class Handler(BaseHTTPRequestHandler):
             if UPDATES and raw:
                 # Turning it on should not wait out the rest of the poll sleep.
                 UPDATES.wake()
+        if "keep_backups" in payload:
+            # An integer count, not a boolean-ish string: "2" would otherwise
+            # be accepted by int() and "true" would silently become 1.
+            raw = payload.get("keep_backups")
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return self._error(400, "keep_backups must be an integer 0-3",
+                                   "invalid_request_error")
+            stored = wb_settings.set_keep_backups(ACCOUNTS_DIR, raw)
+            reply["keep_backups"] = stored
+            # The panel's hint promises this takes effect now: a lower value
+            # has to drop the extra folders immediately, not at the next update.
+            reply["pruned_backups"] = wb_update_request.apply_keep_backups(stored)
         if "upstream" in payload:
             raw = payload.get("upstream")
             if not isinstance(raw, dict):
@@ -20229,6 +20266,26 @@ class Handler(BaseHTTPRequestHandler):
                 status["latest_tag"], status["current_version"],
                 port=self.server.server_port, lan=lan,
                 repo=wb_updates.configured_repository())
+        except wb_update_request.UpdateRequestError as exc:
+            return self._json(409, {"ok": False, "msg": str(exc)})
+        queued["ok"] = True
+        return self._json(202, queued)
+
+    def _route_update_rollback(self, payload):
+        """Restore one retained backup, on the operator's explicit request.
+
+        409 with a Chinese reason for everything the panel could have got wrong:
+        an unknown version, a half-written backup, or a task already in flight.
+        """
+        version = str(payload.get("version") or "").strip()
+        if not version:
+            return self._json(409, {"ok": False, "msg": "请选择要回退的版本"})
+        try:
+            host = self.server.server_address[0]
+            lan = host not in ("127.0.0.1", "::1", "localhost")
+            queued = wb_update_request.request_rollback(
+                version, running_version(),
+                port=self.server.server_port, lan=lan)
         except wb_update_request.UpdateRequestError as exc:
             return self._json(409, {"ok": False, "msg": str(exc)})
         queued["ok"] = True
@@ -21208,6 +21265,16 @@ class Handler(BaseHTTPRequestHandler):
             if not self._panel_ok():
                 return self._error(401, "panel password required", "invalid_request_error")
             return self._route_update_install()
+        if path == "/updates/rollback":
+            # Same gate as the install button: the panel session may only queue
+            # a version that already has a complete local backup, and the
+            # executor re-checks everything before touching a file.
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            return self._route_update_rollback(payload)
         if path in ("/pricing/refresh", "/pricing/mapping"):
             # Panel-only management writes (the pricing table is the panel's
             # own view of the estimate). Registered here because the generic

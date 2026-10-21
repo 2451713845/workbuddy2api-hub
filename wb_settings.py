@@ -1960,7 +1960,7 @@ def set_daily_chat_model(accounts_dir, model):
 #: 网页通道一轮等多久（秒）的默认值。与 wb_accounts.WEB_TURN_TIMEOUT 同值：
 #: 没配过的部署保持既有行为，改过的部署按自己配的来。
 DAILY_CHAT_WEB_TIMEOUT_DEFAULT = 120
-#: 上限只是防手滑。每轮等待时间翻倍，配成几百秒会让单账号最坏情况跑到小时级。
+#: 上限只是防手滑。每轮等待时间按首轮递增，配成几百秒会让单账号最坏情况跑到小时级。
 DAILY_CHAT_WEB_TIMEOUT_MAX = 3600
 #: 网页通道总共试几次（含第一轮）的默认值，与 wb_accounts.WEB_TURN_ATTEMPTS 同值。
 DAILY_CHAT_WEB_ATTEMPTS_DEFAULT = 3

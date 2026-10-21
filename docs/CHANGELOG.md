@@ -1,3 +1,11 @@
+## v1.7.22
+
+账号任务参与独立开关（#521）：`enabled` 只管 API 取号，新增 `tasksEnabled` 控制签到、成长任务、连登管家、猫猫旅行和国际版每日活跃；停用账号可以只做任务，启用账号也可以不跑任务。套件 204 个（152 Python + 52 JS）。
+
+- **账号任务参与独立开关**（#521）：账号新增 `tasksEnabled`，`enabled` 仍控制 API 取号；调度器的签到 / 成长任务 / 连登管家 / 猫猫旅行 / 国际版活跃改为按 `task_active()` 选号，Token 保活不受影响。手动任务入口（`/tasks`、`/tasks/run`、`/tasks/streak`、`/tasks/travel`、`/accounts/daily-chat`）同样按任务开关过滤；显式指定单个 uid 时仍允许手动执行。
+- **面板「任务开 / 关」胶囊**：账号行新增任务开关，停用但参与任务的账号显示「已停用 · 任务中」；任务卡片和未活跃打卡名单按 `tasksEnabled` 过滤，旧网关没有该字段时回落到 `enabled`。
+- **默认与兼容**：旧账号没有 `tasksEnabled` 时跟随 `enabled`；停用账号默认不跑任务，需要保留任务时在账号行点一下「任务关」变成「任务开」。导出 / 导入会带上该字段。新增 `tests/_test_task_participation.py`（9 项）和 `tests/_test_task_toggle.js`，调度器与打卡名单用例同步覆盖。
+
 ## v1.7.21
 
 Windows 便携包补一个可选的前台窗口启动入口：默认仍是静默（pythonw + 日志窗口），需要「关窗即停」时用新的 `start-wb-proxy-visible.bat` / `start-wb-proxy-lan-visible.bat`。套件 202 个（151 Python + 51 JS）。

@@ -54,9 +54,12 @@ class PromptSelectionTests(unittest.TestCase):
         self.assertTrue(seen)
         self.assertTrue(seen <= set(wb_webprompts.BUILTIN_PROMPTS))
 
-    def test_custom_prompts_join_the_draw(self):
+    def test_configured_pool_is_the_draw_scope(self):
+        # The picker saves the full selection (builtin lines + custom lines);
+        # the draw must use exactly that selection, not "builtin plus custom".
         wb_settings.set_daily_chat_web_random_prompt(ACCOUNTS, True)
-        wb_settings.set_daily_chat_web_prompts(ACCOUNTS, ["自定义一号"])
+        builtin = wb_webprompts.BUILTIN_PROMPTS[0]
+        wb_settings.set_daily_chat_web_prompts(ACCOUNTS, [builtin, "自定义一号"])
         captured = []
 
         def fake_choice(pool):
@@ -65,8 +68,20 @@ class PromptSelectionTests(unittest.TestCase):
 
         with mock.patch.object(wb_accounts.random, "choice", side_effect=fake_choice):
             self.assertEqual(self.acc.daily_chat_web_prompt(), "自定义一号")
-        self.assertEqual(len(captured[0]), 301)
-        self.assertIn("自定义一号", captured[0])
+        self.assertEqual(captured[0], [builtin, "自定义一号"])
+
+    def test_empty_pool_means_all_builtin(self):
+        wb_settings.set_daily_chat_web_random_prompt(ACCOUNTS, True)
+        wb_settings.set_daily_chat_web_prompts(ACCOUNTS, [])
+        captured = []
+
+        def fake_choice(pool):
+            captured.append(list(pool))
+            return pool[0]
+
+        with mock.patch.object(wb_accounts.random, "choice", side_effect=fake_choice):
+            self.acc.daily_chat_web_prompt()
+        self.assertEqual(len(captured[0]), 300)
 
     def test_an_account_without_settings_stays_on_hi(self):
         acc = wb_accounts.Account({"uid": "u2", "realm": "intl",

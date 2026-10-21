@@ -1869,9 +1869,9 @@ def set_daily_chat_web_timeout(accounts_dir, seconds):
     return seconds
 
 
-#: 用户自定义提示词的条数上限。内置池已有 300 条，这里只限制额外添加的部分，
-#: 免得一个手滑的粘贴把每次巡检的随机池撑到无意义的大小。
-DAILY_CHAT_WEB_PROMPTS_MAX = 200
+#: 随机池的条数上限：内置 300 条全选 + 200 条自定义。池里存的是完整列表
+#: （选中的内置提示词与自定义提示词混在一起），所以上限按两者之和给。
+DAILY_CHAT_WEB_PROMPTS_MAX = 500
 #: 单条提示词的长度上限（UTF-8 字节）。与 Go 版的 200 字节保持一致。
 DAILY_CHAT_WEB_PROMPT_MAX_LEN = 200
 

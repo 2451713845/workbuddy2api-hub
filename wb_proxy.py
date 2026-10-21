@@ -73,6 +73,7 @@ import wb_ipintel
 import wb_logstore
 import wb_pricing
 import wb_settings
+import wb_webprompts
 import wb_upstream_pool
 import wb_webtools
 import wb_identity
@@ -10133,6 +10134,7 @@ def runtime_settings_view():
         "daily_chat_web_random_prompt":
             wb_settings.daily_chat_web_random_prompt(ACCOUNTS_DIR),
         "daily_chat_web_prompts": wb_settings.daily_chat_web_prompts(ACCOUNTS_DIR),
+        "daily_chat_web_builtin_prompts": wb_webprompts.builtin_prompts(),
         "daily_chat_web_prompts_max": wb_settings.DAILY_CHAT_WEB_PROMPTS_MAX,
         "daily_chat_model": wb_settings.daily_chat_model(ACCOUNTS_DIR),
         "daily_chat_model_default": wb_accounts.DAILY_CHAT_MODEL,

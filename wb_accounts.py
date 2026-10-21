@@ -1658,8 +1658,12 @@ class Account(object):
         directory = os.path.dirname(self.path)
         if not wb_settings.daily_chat_web_random_prompt(directory):
             return DAILY_CHAT_WEB_PROMPT
-        pool = wb_webprompts.builtin_prompts()
-        pool.extend(wb_settings.daily_chat_web_prompts(directory))
+        # The stored list is the full pool the operator picked (builtin lines
+        # and custom lines together). Empty means "never configured", which
+        # keeps the original behaviour of drawing from all 300 builtin lines.
+        pool = wb_settings.daily_chat_web_prompts(directory)
+        if not pool:
+            pool = wb_webprompts.builtin_prompts()
         return random.choice(pool) if pool else DAILY_CHAT_WEB_PROMPT
 
     def daily_chat_web(self, prompt=None, trigger="unknown"):

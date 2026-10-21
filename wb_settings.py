@@ -1890,6 +1890,76 @@ def set_daily_chat_web_timeout(accounts_dir, seconds):
     return seconds
 
 
+#: 回退模型组合的条数上限。网页活跃每次只发一句短提示词，组合过长的收益
+#: 只是把等待时间摊长，20 条已经覆盖目录里的免费与低价模型。
+DAILY_CHAT_WEB_FALLBACK_MAX_MODELS = 20
+#: 单个模型 id 的长度上限，与其它列表型设置保持一致。
+DAILY_CHAT_WEB_FALLBACK_MODEL_MAX_LEN = 128
+
+
+def _clean_fallback_models(value):
+    """Coerce a list / comma string into a deduplicated model-id list."""
+    if isinstance(value, str):
+        raw = value.replace("，", ",").split(",")
+    elif isinstance(value, (list, tuple)):
+        raw = list(value)
+    else:
+        return []
+    out = []
+    seen = set()
+    for item in raw:
+        model = str(item or "").strip()
+        if not model or len(model.encode("utf-8")) > DAILY_CHAT_WEB_FALLBACK_MODEL_MAX_LEN:
+            continue
+        if model in seen:
+            continue
+        seen.add(model)
+        out.append(model)
+        if len(out) >= DAILY_CHAT_WEB_FALLBACK_MAX_MODELS:
+            break
+    return out
+
+
+def daily_chat_web_fallback(accounts_dir):
+    """Whether a failed web turn falls back to the next model.
+
+    Off by default: an install that predates the setting keeps retrying the
+    same model, which is the behaviour that earned the daily credits until now.
+    """
+    return load(accounts_dir).get("daily_chat_web_fallback") is True
+
+
+def set_daily_chat_web_fallback(accounts_dir, enabled):
+    """Persist the web-channel model-fallback toggle. Returns the stored bool."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data["daily_chat_web_fallback"] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
+def daily_chat_web_fallback_models(accounts_dir):
+    """The model combination to fall back through; [] means "use the default".
+
+    Order is not significant: the caller sorts the candidates by catalogue
+    credits, so the free model runs before a low-credit one and that one before
+    an expensive one.
+    """
+    return _clean_fallback_models(
+        load(accounts_dir).get("daily_chat_web_fallback_models"))
+
+
+def set_daily_chat_web_fallback_models(accounts_dir, models):
+    """Persist the fallback combination. Returns the normalized list."""
+    cleaned = _clean_fallback_models(models)
+    with _lock:
+        data = load(accounts_dir)
+        data["daily_chat_web_fallback_models"] = cleaned
+        save(accounts_dir, data)
+    return cleaned
+
+
 def local_web_tools(accounts_dir):
     """Whether the gateway runs web_search / web_fetch calls itself.
 

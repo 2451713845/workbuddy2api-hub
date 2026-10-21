@@ -13,6 +13,7 @@ import uuid
 from wb_fingerprint import derive_id, generate_request_id, session_id
 import wb_activity
 import wb_atrest
+import wb_catalog
 import wb_identity
 import wb_settings
 import wb_upstream_pool
@@ -43,6 +44,11 @@ WEB_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
                   "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0")
 DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
 DAILY_CHAT_WEB_PROMPT = "Hi"
+#: 回退组合在没配置时的候选：账号首选模型之外，再带上各区域的免费模型。
+#: 实际顺序按目录倍率排序（免费 → 低积分 → 高积分），见 _model_credit_rank。
+DAILY_CHAT_WEB_FREE_FALLBACK_INTL = ("hy3", "hy4-preview-f", "hy4-preview",
+                                     "glm-5.3-flash")
+DAILY_CHAT_WEB_FREE_FALLBACK_CN = ("hy3", "hy4-preview-f", "hy4-preview")
 #: 网页通道一轮最多等多久（秒）。实测一次「Hi」十几秒就跑完，留足余量。
 #: 没配 settings 的账号（如单测里手工构造的）用它兜底。
 WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
@@ -562,6 +568,31 @@ def degrade_backoff(fails):
     """Degrade window for `fails` consecutive unknown failures."""
     return _exponential_backoff(fails, DEGRADE_COOLDOWN, DEGRADE_COOLDOWN_MAX,
                                 DEGRADE_THRESHOLD)
+
+
+def _model_credit_rank(model, realm):
+    """The catalogue multiplier as a number; unknown models sort last.
+
+    "x0.00" is the free tier, "x0.29" a cheap paid model, "x6.67" an expensive
+    one. The live catalogue is not available here (wb_accounts must not import
+    wb_proxy), so this reads the bundled table: every model the fallback
+    combination can name is in it, and an unknown id still gets a stable slot
+    after the known ones instead of being dropped.
+    """
+    table = (wb_catalog.STATIC_CN_MODELS if realm == "cn"
+             else wb_catalog.STATIC_INTL_MODELS)
+    for item in table:
+        if item.get("id") != model:
+            continue
+        raw = str(item.get("credits") or "").strip().lower()
+        if raw.startswith("x"):
+            try:
+                return float(raw[1:])
+            except ValueError:
+                pass
+        break
+    return float("inf")
+
 
 class Account(object):
     def __init__(self, data, path=None):
@@ -1643,6 +1674,40 @@ class Account(object):
                     return cand
         return candidates[0]
 
+    def web_fallback_models(self):
+        """The ordered model combination the web leg falls back through.
+
+        The panel's combination wins; when it is empty the account's preferred
+        model plus the realm's free models form the default. Either way the
+        result is sorted by catalogue multiplier, so a free model runs before a
+        cheap paid one and that one before an expensive one. The account's
+        preferred model is first when it shares the cheapest tier, because it
+        is what the operator picked.
+        """
+        configured = []
+        if self.path:
+            configured = wb_settings.daily_chat_web_fallback_models(
+                os.path.dirname(self.path))
+        if configured:
+            candidates = list(configured)
+        else:
+            candidates = [self.daily_chat_model()]
+            if self.realm == "cn":
+                candidates.extend(DAILY_CHAT_WEB_FREE_FALLBACK_CN)
+            else:
+                candidates.extend(DAILY_CHAT_WEB_FREE_FALLBACK_INTL)
+        preferred = self.daily_chat_model()
+        seen = set()
+        ordered = []
+        for model in candidates:
+            if not model or model in seen:
+                continue
+            seen.add(model)
+            ordered.append(model)
+        ordered.sort(key=lambda model: (_model_credit_rank(model, self.realm),
+                                        0 if model == preferred else 1))
+        return ordered
+
     def daily_chat_web(self, prompt=None, trigger="unknown"):
         """网页通道的每日活跃会话（issue #75 / #59 / #90）。
 
@@ -1675,6 +1740,30 @@ class Account(object):
         返回里带 attempts（实际跑了几轮），其余字段与 _daily_chat_web_once 一致。
         """
         base, total = self.daily_chat_web_policy()
+        directory = os.path.dirname(self.path) if self.path else ""
+        if directory and wb_settings.daily_chat_web_fallback(directory):
+            models = self.web_fallback_models()
+            if models:
+                # At least one try per candidate, so a combination the operator
+                # picked is actually walked; the configured attempt count still
+                # applies when it is larger (a second pass over the list).
+                attempts = max(total, len(models))
+                tried = []
+                last = None
+                for attempt in range(attempts):
+                    model = models[attempt % len(models)]
+                    res = self._daily_chat_web_once(
+                        prompt, wait_seconds=base * (2 ** attempt), model=model)
+                    res["attempts"] = attempt + 1
+                    res["models_tried"] = tried + [model]
+                    res["model"] = model
+                    if res.get("ok"):
+                        return res
+                    last = res
+                    if not res.get("retryable"):
+                        return res
+                    tried.append(model)
+                return last
         attempt = 0
         while True:
             res = self._daily_chat_web_once(prompt, wait_seconds=base * (2 ** attempt))
@@ -1701,15 +1790,16 @@ class Account(object):
         return (wb_settings.daily_chat_web_timeout(directory, default=WEB_TURN_TIMEOUT),
                 total)
 
-    def _daily_chat_web_once(self, prompt=None, wait_seconds=None):
+    def _daily_chat_web_once(self, prompt=None, wait_seconds=None, model=None):
         """网页通道的一轮尝试；返回形状见 daily_chat_web。
 
         结果里的 retryable 说明这一轮的失败值不值得再试一次（重试策略见
-        _daily_chat_web_upstream）。
+        _daily_chat_web_upstream）。model 为空时按账号首选模型；回退模式显式
+        传入当前候选，保证建会话与 session/set_model 用的是同一个模型。
         """
         if wait_seconds is None:
             wait_seconds = WEB_TURN_TIMEOUT
-        model = self.daily_chat_model()
+        model = model or self.daily_chat_model()
         body = {
             "prompt": prompt or DAILY_CHAT_WEB_PROMPT,
             "model": model,
@@ -1762,9 +1852,10 @@ class Account(object):
             wait_seconds=wait_seconds, proxy=self.proxy,
             model=model)
         result["conversation"] = conversation
+        result["model"] = model
         if result.get("ok"):
-            result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
-                result.get("chunks") or 0, result.get("elapsed_ms") or 0)
+            result["msg"] = "网页通道会话跑完（%s）：%d 段输出，%d ms" % (
+                model, result.get("chunks") or 0, result.get("elapsed_ms") or 0)
         else:
             result["retryable"] = True
         return result

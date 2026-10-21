@@ -10131,6 +10131,11 @@ def runtime_settings_view():
                                                default=wb_accounts.WEB_TURN_TIMEOUT),
         "daily_chat_web_timeout_default": wb_accounts.WEB_TURN_TIMEOUT,
         "daily_chat_web_timeout_max": wb_settings.DAILY_CHAT_WEB_TIMEOUT_MAX,
+        "daily_chat_web_fallback": wb_settings.daily_chat_web_fallback(ACCOUNTS_DIR),
+        "daily_chat_web_fallback_models":
+            wb_settings.daily_chat_web_fallback_models(ACCOUNTS_DIR),
+        "daily_chat_web_fallback_models_max":
+            wb_settings.DAILY_CHAT_WEB_FALLBACK_MAX_MODELS,
         "daily_chat_model": wb_settings.daily_chat_model(ACCOUNTS_DIR),
         "daily_chat_model_default": wb_accounts.DAILY_CHAT_MODEL,
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
@@ -19003,6 +19008,21 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._error(400, str(exc), "invalid_request_error")
             reply["daily_chat_web_timeout"] = raw
+        if "daily_chat_web_fallback" in payload:
+            raw = payload.get("daily_chat_web_fallback")
+            if not isinstance(raw, bool):
+                return self._error(400, "daily_chat_web_fallback must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_daily_chat_web_fallback(ACCOUNTS_DIR, raw)
+            reply["daily_chat_web_fallback"] = raw
+        if "daily_chat_web_fallback_models" in payload:
+            raw = payload.get("daily_chat_web_fallback_models")
+            if not isinstance(raw, (list, tuple, str)):
+                return self._error(
+                    400, "daily_chat_web_fallback_models must be a list or comma string",
+                    "invalid_request_error")
+            stored = wb_settings.set_daily_chat_web_fallback_models(ACCOUNTS_DIR, raw)
+            reply["daily_chat_web_fallback_models"] = stored
         if "daily_chat_model" in payload:
             raw = payload.get("daily_chat_model") or ""
             # Empty clears the override back to the built-in id. Anything else

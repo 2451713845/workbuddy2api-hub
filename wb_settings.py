@@ -2194,6 +2194,43 @@ def set_daily_chat_web_prompts(accounts_dir, prompts):
         data["daily_chat_web_prompts"] = cleaned
         save(accounts_dir, data)
     return cleaned
+#: 网页活跃同时跑几个账号。默认 1 = 保持逐账号串行的旧行为；调大后按这个
+#: 上限并发跑当天的国际版活跃，上限只是防手滑（每个并发都是一次真实上游会话）。
+DAILY_CHAT_WEB_CONCURRENCY_DEFAULT = 1
+DAILY_CHAT_WEB_CONCURRENCY_MAX = 10
+
+
+def daily_chat_web_concurrency(accounts_dir, default=None):
+    """How many intl daily-activity conversations may run at once.
+
+    ``default`` is what an unset install gets (1, the serial behaviour), so a
+    caller with its own built-in default keeps it. Out-of-range or non-integer
+    values fall back to it too, so a hand-edited settings.json cannot turn the
+    sweep into an unbounded burst.
+    """
+    if default is None:
+        default = DAILY_CHAT_WEB_CONCURRENCY_DEFAULT
+    value = load(accounts_dir).get("daily_chat_web_concurrency")
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or value < 1 or value > DAILY_CHAT_WEB_CONCURRENCY_MAX):
+        return default
+    return value
+
+
+def set_daily_chat_web_concurrency(accounts_dir, value):
+    """Persist the concurrency limit. Returns the stored whole number."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("daily_chat_web_concurrency must be a whole number")
+    if value < 1:
+        raise ValueError("daily_chat_web_concurrency cannot be less than 1")
+    if value > DAILY_CHAT_WEB_CONCURRENCY_MAX:
+        raise ValueError("daily_chat_web_concurrency cannot be more than %d"
+                         % DAILY_CHAT_WEB_CONCURRENCY_MAX)
+    with _lock:
+        data = load(accounts_dir)
+        data["daily_chat_web_concurrency"] = value
+        save(accounts_dir, data)
+    return value
 
 
 def local_web_tools(accounts_dir):

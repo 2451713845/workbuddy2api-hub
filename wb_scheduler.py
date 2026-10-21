@@ -42,6 +42,8 @@ class Scheduler:
         # Guards against overlapping runs: trigger_now() spawns a thread per
         # click, and a manual trigger can also land on top of the hourly job.
         self._run_lock = threading.Lock()
+        # The daily-activity batch can log from several workers at once.
+        self._log_lock = threading.Lock()
         self._reload_schedule()
         self._calc_next_fire()
         # Surface task-level failures (dead endpoints, upstream shape changes)
@@ -51,9 +53,10 @@ class Scheduler:
     def log(self, msg, tag=None):
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         entry = f"[{ts}] {msg}"
-        self.logs.append(entry)
-        if len(self.logs) > 60:
-            self.logs = self.logs[-60:]
+        with self._log_lock:
+            self.logs.append(entry)
+            if len(self.logs) > 60:
+                self.logs = self.logs[-60:]
         try:
             import wb_proxy
             # 任务/打卡/旅行类条目同时进入 tasks 模块日志，方便分类查看
@@ -288,6 +291,7 @@ class Scheduler:
         report_count = 0
         travel_count = 0
         daily_chat_count = 0
+        daily_chat_targets = []
         cycle_hour = time.localtime().tm_hour
         run_checkin = (not daily_chat_only
                        and (force or cycle_hour in self.checkin_hours))
@@ -382,18 +386,76 @@ class Scheduler:
             # 3. 如果是国际版账号，检查每日活跃对话 (送 30/50 积分福利)
             if acc.realm == "intl" and run_daily_chat:
                 if acc.can_daily_chat():
-                    self.log(f"检测到国际版账号 [{uid8}] 今日尚未活跃，执行每日活跃打卡对话...")
-                    res = acc.daily_chat(trigger="scheduler")
-                    if res.get("ok"):
-                        daily_chat_count += 1
-                        # 成功时也把网页通道那一轮的结果带上（completed：N 段输出），
-                        # 光看「成功」分不清是真跑完了还是只有桌面腿过了（issue #236）。
-                        self.log(f"✓ 账号 [{uid8}] 每日活跃对话成功: {res.get('msg')}")
-                    else:
-                        self.log(f"! 账号 [{uid8}] 每日活跃对话失败: {res.get('error') or res.get('msg')}")
-                    time.sleep(1.5)
+                    daily_chat_targets.append(acc)
+
+        if daily_chat_targets:
+            daily_chat_count = self._run_daily_chat_batch(daily_chat_targets)
 
         self.log(f"巡检完成：Token保活 {refreshed_count} 个，国内签到 {checkin_count} 个，活跃上报 {report_count} 个，猫猫日常 {travel_count} 个，国际活跃 {daily_chat_count} 个")
+
+    def _daily_chat_concurrency(self):
+        directory = getattr(self.pool, "dir", "") or ""
+        if not directory:
+            return wb_settings.DAILY_CHAT_WEB_CONCURRENCY_DEFAULT
+        try:
+            return wb_settings.daily_chat_web_concurrency(directory)
+        except Exception:
+            return wb_settings.DAILY_CHAT_WEB_CONCURRENCY_DEFAULT
+
+    def _run_one_daily_chat(self, acc):
+        """Run one account's daily activity; returns whether it succeeded."""
+        uid8 = acc.uid[:8] if acc.uid else "?"
+        self.log(f"检测到国际版账号 [{uid8}] 今日尚未活跃，执行每日活跃打卡对话...")
+        try:
+            res = acc.daily_chat(trigger="scheduler")
+        except Exception as exc:
+            self.log(f"! 账号 [{uid8}] 每日活跃对话异常: {exc}")
+            return False
+        if res.get("ok"):
+            # 成功时也把网页通道那一轮的结果带上（completed：N 段输出），
+            # 光看「成功」分不清是真跑完了还是只有桌面腿过了（issue #236）。
+            self.log(f"✓ 账号 [{uid8}] 每日活跃对话成功: {res.get('msg')}")
+            return True
+        self.log(f"! 账号 [{uid8}] 每日活跃对话失败: {res.get('error') or res.get('msg')}")
+        return False
+
+    def _run_daily_chat_batch(self, accounts):
+        """Run today's intl daily activity, honouring the concurrency setting.
+
+        Concurrency 1 keeps the historical one-account-at-a-time order with the
+        1.5 s gap. Above that, workers are started with a small stagger so the
+        first conversations do not hit the upstream in the same millisecond.
+        """
+        concurrency = self._daily_chat_concurrency()
+        if concurrency <= 1 or len(accounts) <= 1:
+            count = 0
+            for acc in accounts:
+                if self._run_one_daily_chat(acc):
+                    count += 1
+                time.sleep(1.5)
+            return count
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        count = 0
+        with ThreadPoolExecutor(max_workers=concurrency,
+                                thread_name_prefix="daily-chat") as pool:
+            futures = {}
+            for index, acc in enumerate(accounts):
+                delay = min(index * 0.3, 2.0)
+                futures[pool.submit(self._delayed_daily_chat, acc, delay)] = acc
+            for future in as_completed(futures):
+                try:
+                    if future.result():
+                        count += 1
+                except Exception as exc:
+                    acc = futures[future]
+                    uid8 = acc.uid[:8] if acc.uid else "?"
+                    self.log(f"! 账号 [{uid8}] 每日活跃并发执行异常: {exc}")
+        return count
+
+    def _delayed_daily_chat(self, acc, delay):
+        if delay:
+            time.sleep(delay)
+        return self._run_one_daily_chat(acc)
 
     def status(self):
         # 待触发的模型额度窗口：面板上要能看见「下一次到点是什么时候」，

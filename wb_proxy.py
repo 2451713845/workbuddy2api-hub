@@ -19159,6 +19159,13 @@ class Handler(BaseHTTPRequestHandler):
                     "invalid_request_error")
             reply["daily_chat_web_prompts"] = \
                 wb_settings.set_daily_chat_web_prompts(ACCOUNTS_DIR, raw)
+        if "daily_chat_web_concurrency" in payload:
+            raw = payload.get("daily_chat_web_concurrency")
+            try:
+                wb_settings.set_daily_chat_web_concurrency(ACCOUNTS_DIR, raw)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            reply["daily_chat_web_concurrency"] = raw
         if "daily_chat_model" in payload:
             raw = payload.get("daily_chat_model") or ""
             # Empty clears the override back to the built-in id. Anything else

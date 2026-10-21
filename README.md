@@ -145,7 +145,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 189 个套件：139 个 Python + 50 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 190 个套件：140 个 Python + 50 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -459,6 +459,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 - **修复「数据用途声明」文案反了**（#528）：`X-Private-Data` 是「数据私有」声明，`true` = 不参与模型优化、`false` = 允许参与；下拉选项与英文词条此前正好相反，用户按文案选择会得到相反的效果。已交换两处文案，并加 4 项断言。
 
 - **修复模型清单「消费倍率」列截断**（#527）：带「免费账号不可用」胶囊的行在 1366/1440/1512 宽度下被 `nowrap` 裁掉第二枚胶囊；该列改用 `rate-cell` 类允许换行，不再依赖会被 i18n 翻译的 `data-label` 选择器。
+- **思考等级档位映射（默认开启）**：客户端传入的 `reasoning_effort` 不在模型目录声明的 `supportedEfforts` 里时，改写为该模型的默认档位（`defaultEffort` → 固定档位 → 支持列表第一项），避免上游直接拒绝整个请求；固定档位模型只接受它自己的档位，目录明确声明 `canDisableThinking: false` 时 `off`/`none` 也改为默认档位。设置页可关闭映射，关闭后请求原样透传。新增 12 项单测。 / Map an unsupported `reasoning_effort` to the model's default level (default on): when the catalog declares the levels a model accepts and the request asks for another one, the value is rewritten to `defaultEffort`, then the pinned effort, then the first supported level; a model pinned to one level only accepts that level, and `off`/`none` is rewritten only when the catalog explicitly says thinking cannot be disabled. The settings page can turn the mapping off for a byte-faithful passthrough. Covered by 12 new tests.
 
 - **修复全量刷新积分在默认间隔下崩溃**：`_credits_sweep()` 在账号间使用 `random.uniform(0.8, 1.2)` 做拟人间隔，但 `wb_proxy.py` 漏了 `import random`，多账号点「一键刷新积分」会以 `NameError` 中断，单账号与 `WB_CREDITS_SWEEP_GAP_MS=0` 不受影响。补上导入，并新增 1 项回归测试，实际走默认 800~1200ms 抖动路径。 / Fix the full credit sweep crashing at the default pacing: `_credits_sweep()` used `random.uniform(0.8, 1.2)` between accounts, but `wb_proxy.py` never imported `random`, so "refresh all credits" failed with `NameError`; single-account refreshes and `WB_CREDITS_SWEEP_GAP_MS=0` were unaffected. Add the import and one regression test that exercises the default 800-1200 ms jitter path.
 - **成长任务补充「无畏契约拼豆专家」**：`WorkBuddy_Valorant` 登记为专家任务，事件固定使用真实专家 id `ex_xQHHD1u5Jkua`，不再走通用专家池；一键做任务时自动推进并领奖。实测一个国内版账号上报后进度 0→1，领奖 +100 积分、+5 能量。

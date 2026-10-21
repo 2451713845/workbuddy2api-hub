@@ -4692,6 +4692,24 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">思考等级挡位映射 <em id="setReasoningEffortMapState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              客户端传入的思考等级不在模型支持列表时，自动改写为该模型的默认档位，避免上游直接拒绝整个请求。档位来自上游模型目录；模型不允许关闭思考时，「关闭思考」也会改为默认档位。默认开启。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setReasoningEffortMap" type="checkbox" style="width:16px;height:16px">
+              启用映射
+            </label>
+            <button onclick="saveReasoningEffortMap(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">按 API Key 过滤模型列表 <em id="setFilterModelsByKeyState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               开启后，<code style="font-family:var(--mono,monospace)">/v1/models</code> 只返回当前 Key 允许的模型，避免自动获取模型列表的客户端选到会被本地拒绝的模型。Key 未配置模型限制时仍返回全部。默认关闭。
@@ -10757,6 +10775,14 @@ async function loadSettings(showToast){
       const creditFallback = data.free_model_credit_fallback === true;
       const anthropicMsg = data.enable_anthropic_messages === true;
       const filterModelsByKey = data.filter_models_by_key === true;
+      const reasoningEffortMap = data.reasoning_effort_map !== false;
+      const reasoningEffortMapInput = document.getElementById('setReasoningEffortMap');
+      if(reasoningEffortMapInput) reasoningEffortMapInput.checked = reasoningEffortMap;
+      const reasoningEffortMapState = document.getElementById('setReasoningEffortMapState');
+      if(reasoningEffortMapState){
+        reasoningEffortMapState.textContent = reasoningEffortMap ? '(已启用)' : '(未启用)';
+        reasoningEffortMapState.style.color = reasoningEffortMap ? 'var(--accent2)' : 'var(--dim)';
+      }
       const filterModelsByKeyInput = document.getElementById('setFilterModelsByKey');
       if(filterModelsByKeyInput) filterModelsByKeyInput.checked = filterModelsByKey;
       const filterModelsByKeyState = document.getElementById('setFilterModelsByKeyState');
@@ -11400,6 +11426,21 @@ async function saveAnthropicMessages(btn){
   try {
     await postJSON('/settings/save', {enable_anthropic_messages: value});
     toast(value ? '已启用：Anthropic Messages 接口' : '已关闭：Anthropic Messages 接口', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveReasoningEffortMap(btn){
+  const el = document.getElementById('setReasoningEffortMap');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {reasoning_effort_map: value});
+    toast(value ? '已启用：思考等级挡位映射' : '已关闭：思考等级原样透传', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

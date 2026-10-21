@@ -1437,6 +1437,27 @@ def set_filter_models_by_key(accounts_dir, enabled):
     return enabled
 
 
+def reasoning_effort_map(accounts_dir):
+    """Whether an unsupported reasoning_effort is mapped to the model default.
+
+    On by default: clients that expose a fixed level picker keep sending levels
+    a model does not accept, and the upstream rejects the whole request. An
+    install that predates the setting therefore keeps the new behaviour; only
+    an explicit false turns the mapping off.
+    """
+    return load(accounts_dir).get("reasoning_effort_map") is not False
+
+
+def set_reasoning_effort_map(accounts_dir, enabled):
+    """Persist the reasoning-effort mapping toggle. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data["reasoning_effort_map"] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
 def auto_switch_product(accounts_dir):
     """Whether an upstream 429 may rotate an account's outbound identity.
 

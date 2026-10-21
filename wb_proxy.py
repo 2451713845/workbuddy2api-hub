@@ -73,6 +73,7 @@ import wb_ipintel
 import wb_logstore
 import wb_pricing
 import wb_settings
+import wb_webprompts
 import wb_upstream_pool
 import wb_webtools
 import wb_identity
@@ -10137,6 +10138,11 @@ def runtime_settings_view():
             wb_settings.daily_chat_web_fallback_models(ACCOUNTS_DIR),
         "daily_chat_web_fallback_models_max":
             wb_settings.DAILY_CHAT_WEB_FALLBACK_MAX_MODELS,
+        "daily_chat_web_random_prompt":
+            wb_settings.daily_chat_web_random_prompt(ACCOUNTS_DIR),
+        "daily_chat_web_prompts": wb_settings.daily_chat_web_prompts(ACCOUNTS_DIR),
+        "daily_chat_web_builtin_prompts": wb_webprompts.builtin_prompts(),
+        "daily_chat_web_prompts_max": wb_settings.DAILY_CHAT_WEB_PROMPTS_MAX,
         "daily_chat_model": wb_settings.daily_chat_model(ACCOUNTS_DIR),
         "daily_chat_model_default": wb_accounts.DAILY_CHAT_MODEL,
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
@@ -19075,6 +19081,21 @@ class Handler(BaseHTTPRequestHandler):
                     "invalid_request_error")
             stored = wb_settings.set_daily_chat_web_fallback_models(ACCOUNTS_DIR, raw)
             reply["daily_chat_web_fallback_models"] = stored
+        if "daily_chat_web_random_prompt" in payload:
+            raw = payload.get("daily_chat_web_random_prompt")
+            if not isinstance(raw, bool):
+                return self._error(400, "daily_chat_web_random_prompt must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_daily_chat_web_random_prompt(ACCOUNTS_DIR, raw)
+            reply["daily_chat_web_random_prompt"] = raw
+        if "daily_chat_web_prompts" in payload:
+            raw = payload.get("daily_chat_web_prompts")
+            if not isinstance(raw, (list, tuple, str)):
+                return self._error(
+                    400, "daily_chat_web_prompts must be a list or newline string",
+                    "invalid_request_error")
+            reply["daily_chat_web_prompts"] = \
+                wb_settings.set_daily_chat_web_prompts(ACCOUNTS_DIR, raw)
         if "daily_chat_model" in payload:
             raw = payload.get("daily_chat_model") or ""
             # Empty clears the override back to the built-in id. Anything else

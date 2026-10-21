@@ -4875,6 +4875,47 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         <div style="font-size:12px;color:var(--dim);margin-top:6px">
           回退开启后，网页通道每失败一次就换下一个模型；组合按目录倍率自动排序（免费 → 低积分 → 高积分），先试免费的，再试便宜的，最后才是贵的。候选至少各试一次，配置的「最多尝试次数」更大时再从头跑第二轮。默认关闭。
         </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <label class="switch">
+            <input id="setDailyChatRandomPrompt" type="checkbox" onchange="saveDailyChatRandomPrompt()">
+            <span class="switch-track"></span>
+            <span>随机提示词</span>
+          </label>
+          <span id="setDailyChatRandomPromptState" style="font-size:12px;color:var(--dim)"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <label style="font-size:13px;color:var(--dim)">随机池</label>
+          <span id="setDailyChatPromptsState" style="font-size:12px;color:var(--dim)"></span>
+          <button class="sec mini" onclick="openPromptPicker()">选择提示词</button>
+        </div>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          开启后每次网页活跃从勾选的提示词里随机抽一条；一条都不勾时使用全部内置 300 条。关闭时仍旧只发 Hi。
+        </div>
+        <div id="promptPickerMask" class="modal-mask" style="display:none">
+          <div class="modal" role="dialog" aria-modal="true" style="width:min(760px,100%)">
+            <div class="modal-hd"><h2>选择网页活跃提示词</h2><button class="modal-x" aria-label="关闭" onclick="closePromptPicker()">×</button></div>
+            <div class="modal-bd">
+              <div style="font-size:12px;color:var(--dim);line-height:1.7;margin-bottom:10px">
+                勾选的提示词参与随机抽取；一条都不勾 = 使用全部内置 300 条。内置池只含不需要联网、不容易引出长答案的小问题。
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+                <input id="promptPickerSearch" placeholder="搜索提示词" oninput="filterPromptPicker()" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+                <button class="sec mini" onclick="setPromptPickerAll(true)">全选</button>
+                <button class="sec mini" onclick="setPromptPickerAll(false)">全不选</button>
+              </div>
+              <div id="promptPickerList" style="max-height:46vh;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:4px 10px"></div>
+              <div style="margin-top:10px">
+                <div style="font-size:12px;color:var(--dim);margin-bottom:4px">添加自定义提示词（一行一条）</div>
+                <textarea id="promptPickerCustom" rows="3" placeholder="每行一条提示词" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg);resize:vertical"></textarea>
+                <div style="display:flex;justify-content:flex-end;margin-top:6px"><button class="sec mini" onclick="addPromptPickerCustom()">加入列表</button></div>
+              </div>
+            </div>
+            <div class="modal-ft">
+              <button class="sec" onclick="closePromptPicker()">取消</button>
+              <button onclick="savePromptPicker(this)">保存</button>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section>
@@ -10904,6 +10945,24 @@ async function loadSettings(showToast){
           : '(未启用)';
         dailyWebFallbackState.style.color = dailyWebFallback ? 'var(--accent2)' : 'var(--dim)';
       }
+      const dailyWebRandomPrompt = data.daily_chat_web_random_prompt === true;
+      const dailyWebRandomPromptInput = document.getElementById('setDailyChatRandomPrompt');
+      if(dailyWebRandomPromptInput) dailyWebRandomPromptInput.checked = dailyWebRandomPrompt;
+      PROMPT_PICKER_BUILTIN = Array.isArray(data.daily_chat_web_builtin_prompts)
+        ? data.daily_chat_web_builtin_prompts.slice() : [];
+      window.DAILY_CHAT_PROMPTS_STORED = Array.isArray(data.daily_chat_web_prompts)
+        ? data.daily_chat_web_prompts.slice() : [];
+      updatePromptPickerState();
+      const dailyWebRandomPromptState = document.getElementById('setDailyChatRandomPromptState');
+      if(dailyWebRandomPromptState){
+        dailyWebRandomPromptState.textContent = dailyWebRandomPrompt
+          ? ('已启用 · ' + (window.DAILY_CHAT_PROMPTS_STORED.length
+              ? window.DAILY_CHAT_PROMPTS_STORED.length + ' 条候选'
+              : '默认全部内置 300 条'))
+          : '(未启用 · 固定发 Hi)';
+        dailyWebRandomPromptState.style.color = dailyWebRandomPrompt
+          ? 'var(--accent2)' : 'var(--dim)';
+      }
       const localWeb = data.local_web_tools === true;
       const localWebInput = document.getElementById('setLocalWebTools');
       if(localWebInput) localWebInput.checked = localWeb;
@@ -11579,6 +11638,120 @@ async function saveDailyChatWeb(btn){
 
 /* 网页通道失败重试。后端只接受严格布尔，所以这里直接发勾选状态；存失败时
    把开关拨回去，免得界面显示一个其实没落盘的状态。 */
+async function saveDailyChatRandomPrompt(){
+  const el = document.getElementById('setDailyChatRandomPrompt');
+  const value = !!(el && el.checked);
+  try {
+    await postJSON('/settings/save', {daily_chat_web_random_prompt: value});
+    toast(value ? '已启用：网页活跃随机提示词'
+                : '已关闭：网页活跃固定发 Hi', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+    if(el) el.checked = !value;
+  }
+}
+
+let PROMPT_PICKER_BUILTIN = [];
+let PROMPT_PICKER_SELECTED = new Set();
+let PROMPT_PICKER_CUSTOM = new Set();
+
+function promptPickerItems(){
+  const out = [];
+  const seen = new Set();
+  PROMPT_PICKER_BUILTIN.concat(Array.from(PROMPT_PICKER_CUSTOM)).forEach(function(p){
+    if(p && !seen.has(p)){ seen.add(p); out.push(p); }
+  });
+  return out;
+}
+function updatePromptPickerState(){
+  const el = document.getElementById('setDailyChatPromptsState');
+  if(!el) return;
+  el.textContent = PROMPT_PICKER_SELECTED.size
+    ? ('已选 ' + PROMPT_PICKER_SELECTED.size + ' 条')
+    : '默认全部内置 300 条';
+}
+function renderPromptPicker(){
+  const list = document.getElementById('promptPickerList');
+  if(!list) return;
+  const items = promptPickerItems();
+  list.innerHTML = items.map(function(p){
+    const checked = PROMPT_PICKER_SELECTED.has(p) ? ' checked' : '';
+    return '<label class="prompt-pick-row" data-search="' + esc(p.toLowerCase()) + '" style="display:flex;align-items:flex-start;gap:8px;padding:4px 2px;font-size:13px;cursor:pointer"><input type="checkbox" value="' + esc(p) + '"' + checked + ' onchange="togglePromptPicker(this)"><span>' + esc(p) + '</span></label>';
+  }).join('') || '<div style="font-size:12px;color:var(--dim);padding:4px">没有提示词</div>';
+  updatePromptPickerState();
+}
+function openPromptPicker(){
+  const stored = Array.isArray(window.DAILY_CHAT_PROMPTS_STORED)
+    ? window.DAILY_CHAT_PROMPTS_STORED : [];
+  PROMPT_PICKER_CUSTOM = new Set(stored.filter(function(p){
+    return PROMPT_PICKER_BUILTIN.indexOf(p) < 0;
+  }));
+  PROMPT_PICKER_SELECTED = new Set(stored.length ? stored : PROMPT_PICKER_BUILTIN);
+  renderPromptPicker();
+  const mask = document.getElementById('promptPickerMask');
+  if(mask) mask.style.display = 'flex';
+  const search = document.getElementById('promptPickerSearch');
+  if(search) search.value = '';
+}
+function closePromptPicker(){
+  const mask = document.getElementById('promptPickerMask');
+  if(mask) mask.style.display = 'none';
+}
+function togglePromptPicker(el){
+  if(el.checked) PROMPT_PICKER_SELECTED.add(el.value);
+  else PROMPT_PICKER_SELECTED.delete(el.value);
+  updatePromptPickerState();
+}
+function setPromptPickerAll(on){
+  const list = document.getElementById('promptPickerList');
+  if(!list) return;
+  list.querySelectorAll('input[type=checkbox]').forEach(function(el){
+    el.checked = on;
+    if(on) PROMPT_PICKER_SELECTED.add(el.value);
+    else PROMPT_PICKER_SELECTED.delete(el.value);
+  });
+  updatePromptPickerState();
+}
+function filterPromptPicker(){
+  const input = document.getElementById('promptPickerSearch');
+  const list = document.getElementById('promptPickerList');
+  if(!list) return;
+  const q = String((input && input.value) || '').trim().toLowerCase();
+  list.querySelectorAll('.prompt-pick-row').forEach(function(el){
+    el.style.display = !q || (el.getAttribute('data-search') || '').indexOf(q) >= 0 ? 'flex' : 'none';
+  });
+}
+function addPromptPickerCustom(){
+  const ta = document.getElementById('promptPickerCustom');
+  const lines = String((ta && ta.value) || '').split('\n')
+    .map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
+  lines.forEach(function(p){
+    PROMPT_PICKER_CUSTOM.add(p);
+    PROMPT_PICKER_SELECTED.add(p);
+  });
+  if(ta) ta.value = '';
+  renderPromptPicker();
+}
+async function savePromptPicker(btn){
+  const prompts = Array.from(PROMPT_PICKER_SELECTED);
+  if(btn) btn.disabled = true;
+  try {
+    const res = await postJSON('/settings/save', {daily_chat_web_prompts: prompts});
+    const stored = Array.isArray(res && res.daily_chat_web_prompts)
+      ? res.daily_chat_web_prompts : prompts;
+    window.DAILY_CHAT_PROMPTS_STORED = stored;
+    toast(stored.length ? ('已保存 ' + stored.length + ' 条候选提示词')
+                        : '已清空：使用全部内置 300 条', 'ok');
+    closePromptPicker();
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function saveDailyChatWebRetry(){
   const el = document.getElementById('setDailyChatWebRetry');
   const value = !!(el && el.checked);

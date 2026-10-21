@@ -11527,10 +11527,24 @@ SANITIZE_OMO_JUNIOR_RE = re.compile(
 #
 # 只作用于 system / developer 角色（见 sanitize_messages）：user / tool 里的品牌词
 # 是用户数据，改写会让模型看到与磁盘不一致的内容（#537）。
+#
+# 1.7.18 及以前只认 "agent powered by" / "assistant built on" 两种动词搭配，而同一类
+# 经纬句还有 "built by"（如 "You are <Product> Agent, built by <Vendor>."）、
+# "created by" / "developed by" / "made by" / "trained by" 等变体，以及省掉名词的
+# "You are powered by ..."。上游只补其中一条规则就能让这些句子重新 400，所以在
+# 同一判据内把动词表补全；名词可省略，冠词后允许 0~3 个修饰词（专名也算，如
+# "<Product> Agent"），逗号可有可无。窗口有界，避免 "You are free to use tools built
+# by ..." 这类分词修饰宾语的句子被误伤。
+SANITIZE_IDENTITY_VERBS = (
+    "powered by", "built on", "built by", "created by",
+    "developed by", "made by", "trained by",
+)
 SANITIZE_IDENTITY_RE = re.compile(
-    r"You are an?(?:\s+AI)?(?:\s+coding)?\s+"
-    r"(?:agent\s+powered by|assistant\s+built on)[^\n]*?"
-    r"(?:\.(?=\s|$)|(?=\n|$))",
+    r"You are\s+"
+    r"(?:an?\s+|the\s+)?(?:[\w.-]+\s+){0,3}?"
+    r"(?:agent|assistant|model|AI|LLM)?[\s,]*"
+    r"(?:powered by|built on|built by|created by|developed by|made by|trained by)"
+    r"[^\n]*?(?:\.(?=\s|$)|(?=\n|$))",
     re.IGNORECASE)
 SANITIZE_IDENTITY_REPLACEMENT = "You are a helpful AI assistant."
 # 指纹判定的字面量快路径（见 has_fingerprint）：原先对每段文本跑两个 (?i) 正则，
@@ -11553,7 +11567,7 @@ SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_RE.pattern
 if SANITIZE_BARE_HDR_LOWER.startswith("(?i)"):
     SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_LOWER[4:]
 SANITIZE_OMO_JUNIOR_LOWER = SANITIZE_OMO_JUNIOR_RE.pattern.lower()
-SANITIZE_IDENTITY_LOWER = ("agent powered by", "assistant built on")
+SANITIZE_IDENTITY_LOWER = SANITIZE_IDENTITY_VERBS
 def has_fingerprint(text, identity=True):
     if not isinstance(text, str) or not text:
         return False
@@ -11569,8 +11583,14 @@ def has_fingerprint(text, identity=True):
     if (SANITIZE_BARE_HDR_LOWER in low
             or SANITIZE_OMO_JUNIOR_LOWER in low):
         return True
-    return bool(identity) and any(needle in low
-                                  for needle in SANITIZE_IDENTITY_LOWER)
+    if not identity:
+        return False
+    # 动词短语只是廉价前置筛：真命中与否交给正则判定。这样 "powered by" 出现在
+    # 与自我介绍无关的句子（工具/插件的产品描述）时不会走进 sanitize_text 的其余
+    # 清洗步骤，也不会白白改写。
+    if not any(needle in low for needle in SANITIZE_IDENTITY_LOWER):
+        return False
+    return SANITIZE_IDENTITY_RE.search(text) is not None
 def sanitize_text(text, identity=True):
     if not isinstance(text, str) or not text:
         return text

@@ -127,6 +127,55 @@ class DshHarnessChannelFingerprintTests(unittest.TestCase):
         self.assertEqual(out[4]["content"], self.FP)
 
 
+class IdentityVerbVariantsTests(unittest.TestCase):
+    """同类自述句的其它动词搭配（built by / created by / …）与省略名词的形态。
+
+    上游只按「自我介绍句式 + 品牌」判，不区分动词；1.7.18 只覆盖 powered by /
+    built on 两种，补全动词表后这些变体同样应被中性化，而分词修饰宾语的句子
+    （"tools built by …"）不能被误伤。
+    """
+
+    CLEAN = "You are a helpful AI assistant."
+
+    def test_built_by_variant_rewritten(self):
+        # 专名 + 逗号 + built by 的形态（客户端默认身份句常见写法）。
+        self.assertEqual(
+            P.sanitize_text("You are Example Agent, built by Example Corp. Be direct."),
+            self.CLEAN + " Be direct.")
+
+    def test_created_developed_made_trained_variants(self):
+        for sentence in (
+            "You are a coding assistant created by Example Corp.",
+            "You are an AI agent developed by Example Corp.",
+            "You are a chat model made by Example Corp.",
+            "You are an assistant trained by Example Corp.",
+        ):
+            self.assertEqual(P.sanitize_text(sentence), self.CLEAN, sentence)
+
+    def test_bare_powered_by_without_noun(self):
+        self.assertEqual(
+            P.sanitize_text("You are powered by the model named glm-5.3-flash."),
+            self.CLEAN)
+
+    def test_participle_modifying_object_is_untouched(self):
+        for sentence in (
+            "You are free to use tools built by the user.",
+            "You are a coding agent pairing with the user inside their codebase.",
+        ):
+            self.assertEqual(P.sanitize_text(sentence), sentence, sentence)
+
+    def test_variants_scoped_to_system_and_developer(self):
+        fp = "You are Example Agent, built by Example Corp."
+        out = P.sanitize_messages([
+            {"role": "system", "content": fp},
+            {"role": "developer", "content": fp},
+            {"role": "user", "content": fp},
+        ])
+        self.assertEqual(out[0]["content"], self.CLEAN)
+        self.assertEqual(out[1]["content"], self.CLEAN)
+        self.assertEqual(out[2]["content"], fp)
+
+
 if __name__ == "__main__":
     unittest.main()
 

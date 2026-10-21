@@ -454,6 +454,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### Unreleased
 
+- **11-128：身份句渠道指纹的动词搭配补全**：v1.7.18 的正则只认 `agent powered by` / `assistant built on` 两种搭配，而同一判据下的 `built by`（如 `You are <Product> Agent, built by <Vendor>.`）、`created by` / `developed by` / `made by` / `trained by`，以及省略名词的 `You are powered by …` 都会漏检——上游只要补其中一条规则，这些句子就会重新命中 400 / 11-128。现按同一判据补全动词表：名词可省略、冠词后允许 0~3 个修饰词（专名 + 可选逗号）；`You are free to use tools built by …` 这类分词修饰宾语的句子保持不改写。新增 5 项断言（built by 变体、其余动词、省略名词、反误伤、角色作用域）。 / Broaden the identity-sentence channel fingerprint: v1.7.18 only matched `agent powered by` / `assistant built on`, so `built by` (`You are <Product> Agent, built by <Vendor>.`), `created by` / `developed by` / `made by` / `trained by`, and the noun-less `You are powered by …` slipped through — one rule added upstream would put them back on 400 / 11-128. The same rule now covers those verb forms, with an optional noun and up to three modifiers (proper names plus an optional comma), while participles modifying an object (`You are free to use tools built by …`) stay untouched. Five assertions added.
+
 - **修复「数据用途声明」文案反了**（#528）：`X-Private-Data` 是「数据私有」声明，`true` = 不参与模型优化、`false` = 允许参与；下拉选项与英文词条此前正好相反，用户按文案选择会得到相反的效果。已交换两处文案，并加 4 项断言。
 
 - **修复模型清单「消费倍率」列截断**（#527）：带「免费账号不可用」胶囊的行在 1366/1440/1512 宽度下被 `nowrap` 裁掉第二枚胶囊；该列改用 `rate-cell` 类允许换行，不再依赖会被 i18n 翻译的 `data-label` 选择器。

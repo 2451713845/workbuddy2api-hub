@@ -12,6 +12,8 @@ import re
 import stat
 import time
 
+import wb_update_portable
+
 
 REQUEST_DIR = os.environ.get(
     "WB_UPDATE_REQUEST_DIR", "/run/workbuddy2api-hub-updater")
@@ -37,14 +39,19 @@ class UpdateRequestError(Exception):
     """A safe, user-visible reason an install request was refused."""
 
 
-def install_enabled():
-    """Only enable the panel action after the administrator installs its unit."""
+def _systemd_enabled():
+    """Only enable the systemd path after the administrator installs its unit."""
     return (
         str(os.environ.get("WB_UPDATE_INSTALL_ENABLED") or "").strip() == "1"
         and os.path.isdir(REQUEST_DIR)
         and os.path.exists(PATH_UNIT_FILE)
         and os.path.exists(ENABLED_UNIT_LINK)
     )
+
+
+def install_enabled():
+    """The panel may install when either the unit or a portable package is here."""
+    return _systemd_enabled() or wb_update_portable.available()
 
 
 def _version_tuple(tag):
@@ -87,19 +94,25 @@ def _read_root_status():
 
 
 def status():
-    result = {"install_enabled": install_enabled(),
-              "installation": _read_root_status()}
-    current = result["installation"]
-    if (os.path.exists(REQUEST_FILE)
-            and current.get("state") not in ACTIVE_STATES):
-        result["installation"] = {
-            "state": "queued", "version": current.get("version", ""),
-            "message": "",
-        }
-    return result
+    if _systemd_enabled():
+        result = {"install_enabled": True,
+                  "installation": _read_root_status()}
+        current = result["installation"]
+        if (os.path.exists(REQUEST_FILE)
+                and current.get("state") not in ACTIVE_STATES):
+            result["installation"] = {
+                "state": "queued", "version": current.get("version", ""),
+                "message": "",
+            }
+        return result
+    if wb_update_portable.available():
+        return {"install_enabled": True,
+                "installation": wb_update_portable.status()}
+    return {"install_enabled": False,
+            "installation": {"state": "idle", "version": "", "message": ""}}
 
 
-def request_install(tag, current_version):
+def request_install(tag, current_version, port=8788, lan=False, repo=None):
     """Queue a stable tag for the root updater; caller must panel-authenticate."""
     if not install_enabled():
         raise UpdateRequestError("安装更新服务尚未配置")
@@ -107,6 +120,13 @@ def request_install(tag, current_version):
     current = _version_tuple("v" + str(current_version or "").strip().lstrip("v"))
     if target is None or current is None or target <= current:
         raise UpdateRequestError("目标版本无效或不高于当前版本")
+
+    if not _systemd_enabled():
+        try:
+            return wb_update_portable.request_install(
+                tag, current_version, port=port, lan=lan, repo=repo)
+        except wb_update_portable.UpdateError as exc:
+            raise UpdateRequestError(str(exc))
 
     existing = status()["installation"]
     if existing.get("state") in ACTIVE_STATES or os.path.exists(REQUEST_FILE):

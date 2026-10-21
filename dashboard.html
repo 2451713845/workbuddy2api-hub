@@ -4845,6 +4845,17 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           清单是国际版目录里的全部模型，标价 0.00x 的标成免费并排在前面。每日活跃只是一次「Hi」的会话，默认用内置的免费模型；换一个是为了把活跃挪出真实流量正在用的那个模型的窗口额度。选到付费模型的话，活跃就会按那个模型花积分。
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <label style="font-size:13px;color:var(--dim)">每日活跃定时</label>
+          <span id="setDailyChatTimesState" style="font-size:12px;color:var(--dim)"></span>
+          <input id="setDailyChatTimeInput" type="time" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">
+          <button class="sec mini" onclick="addDailyChatTime()">添加时间</button>
+          <button onclick="saveDailyChatTimes(this)">保存</button>
+        </div>
+        <div id="setDailyChatTimesList" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          可填多个 HH:MM（逗号分隔，最多 24 个）。留空时跟随「签到」整点（默认 09:00/21:00）；填写后每日活跃只在这些时刻触发，不再跟签到走。改完无需重启，调度器每 30 秒重读一次。
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
           <label class="switch">
             <input id="setDailyChatWebRetry" type="checkbox" onchange="saveDailyChatWebRetry()">
             <span class="switch-track"></span>
@@ -10952,6 +10963,9 @@ async function loadSettings(showToast){
         dailyWebState.style.color = dailyWeb ? 'var(--accent2)' : 'var(--dim)';
       }
       renderDailyChatModel(data.daily_chat_model || '', data.daily_chat_model_default || '');
+      const scheduleCfg = (data.schedule && typeof data.schedule === 'object') ? data.schedule : {};
+      const dailyChatTimes = Array.isArray(scheduleCfg.daily_chat) ? scheduleCfg.daily_chat : [];
+      renderDailyChatTimes(dailyChatTimes);
       // 网页通道重试：没配过时后端给的是「开」，只有显式 false 才当关闭。
       const dailyWebRetry = data.daily_chat_web_retry !== false;
       const dailyWebRetryInput = document.getElementById('setDailyChatWebRetry');
@@ -12029,6 +12043,55 @@ async function saveGlobalPrompt(btn){
     await postJSON('/settings/save', {prompt: {mode: mode, text: text}});
     toast(mode === 'passthrough' ? '已保存：全局提示词透传'
         : ('已保存：全局提示词' + (mode === 'append' ? '追加到 system' : '替换 system')), 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+let DAILY_CHAT_TIMES_SELECTED = [];
+function renderDailyChatTimes(times){
+  DAILY_CHAT_TIMES_SELECTED = Array.isArray(times) ? times.slice().sort() : [];
+  const list = document.getElementById('setDailyChatTimesList');
+  if(list){
+    list.innerHTML = DAILY_CHAT_TIMES_SELECTED.map(function(t){
+      return '<span class="badge s" style="font-size:12px;padding:4px 8px;display:inline-flex;align-items:center;gap:6px">' + esc(t) + '<button class="key-action-btn" style="padding:0 4px" data-time="' + esc(t) + '" onclick="removeDailyChatTime(this)">×</button></span>';
+    }).join('') || '<span style="font-size:12px;color:var(--dim)">未设置，跟随签到整点</span>';
+  }
+  const state = document.getElementById('setDailyChatTimesState');
+  if(state){
+    state.textContent = DAILY_CHAT_TIMES_SELECTED.length
+      ? ('独立时段 · ' + DAILY_CHAT_TIMES_SELECTED.join(' / '))
+      : '跟随签到整点';
+    state.style.color = DAILY_CHAT_TIMES_SELECTED.length
+      ? 'var(--accent2)' : 'var(--dim)';
+  }
+}
+function addDailyChatTime(){
+  const input = document.getElementById('setDailyChatTimeInput');
+  const value = String((input && input.value) || '').trim();
+  if(!value){ toast('请先选择时间', 'warn'); return; }
+  if(DAILY_CHAT_TIMES_SELECTED.indexOf(value) < 0){
+    DAILY_CHAT_TIMES_SELECTED.push(value);
+    DAILY_CHAT_TIMES_SELECTED.sort();
+  }
+  renderDailyChatTimes(DAILY_CHAT_TIMES_SELECTED);
+  if(input) input.value = '';
+}
+function removeDailyChatTime(el){
+  const value = (el && el.getAttribute) ? el.getAttribute('data-time') : '';
+  DAILY_CHAT_TIMES_SELECTED = DAILY_CHAT_TIMES_SELECTED.filter(function(t){ return t !== value; });
+  renderDailyChatTimes(DAILY_CHAT_TIMES_SELECTED);
+}
+async function saveDailyChatTimes(btn){
+  const times = DAILY_CHAT_TIMES_SELECTED.slice();
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {schedule: {daily_chat: times}});
+    toast(times.length ? ('已保存每日活跃时段：' + times.join(' / '))
+                       : '已清空：每日活跃跟随签到整点', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

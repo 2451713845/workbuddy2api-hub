@@ -5964,6 +5964,12 @@ def _credits_sweep(targets, paced=True):
 # Release discovery only - the checker never downloads or installs anything.
 UPDATES = None
 ACCOUNTS_DIR = os.environ.get("ACCOUNTS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
+try:
+    # Panel-set version overrides ride on top of the verified defaults; the
+    # identity module only changes the version strings it sends.
+    wb_identity.configure_versions(wb_settings.identity_versions(ACCOUNTS_DIR))
+except Exception:
+    pass
 def realm_state_file():
     """Path of the persisted realm switch.
 
@@ -10125,6 +10131,7 @@ def runtime_settings_view():
         "reasoning_effort_map": wb_settings.reasoning_effort_map(ACCOUNTS_DIR),
         "models_only_available": wb_settings.models_only_available(ACCOUNTS_DIR),
         "identity": wb_settings.identity_config(ACCOUNTS_DIR),
+        "identity_version_defaults": wb_identity.default_versions(),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
         "daily_chat_web_attempts":
@@ -19065,6 +19072,21 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     return self._error(400, str(exc), "invalid_request_error")
                 reply["identity_private_data"] = value
+        if "identity_versions" in payload:
+            password = payload.get("panel_password") or ""
+            if not wb_settings.verify_panel_password(ACCOUNTS_DIR, password):
+                return self._error(401, "invalid panel password",
+                                   "invalid_request_error")
+            raw = payload.get("identity_versions")
+            if not isinstance(raw, dict):
+                return self._error(400, "identity_versions must be an object",
+                                   "invalid_request_error")
+            try:
+                stored = wb_settings.set_identity_versions(ACCOUNTS_DIR, raw)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            wb_identity.configure_versions(stored)
+            reply["identity_versions"] = stored
         if "free_model_credit_fallback" in payload:
             raw = payload.get("free_model_credit_fallback")
             if not isinstance(raw, bool):

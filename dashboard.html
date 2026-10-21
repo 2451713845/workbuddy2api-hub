@@ -4822,6 +4822,59 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">出站身份版本号 <em id="setIdentityVersionsState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              三套身份当前发出去的版本号。默认值来自抓包与官方包解包核对，只有默认值有对应的头族与请求体配套。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              修改版本号只改字符串，不会同步头族/请求体/ID 形态；与默认值不一致时可能触发上游校验，存在封号风险。修改需要输入面板密码。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <button class="sec mini" onclick="toggleIdentityVersionEditor()">修改版本号</button>
+          </div>
+        </div>
+        <div id="identityVersionSummary" style="font-size:12px;color:var(--dim);line-height:1.9"></div>
+        <div id="identityVersionEditor" style="display:none;margin-top:10px;border:1px solid var(--line);border-radius:8px;padding:10px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px">
+            <label style="font-size:12px;color:var(--dim)">WorkBuddy 国际版
+              <input id="setIdentityVerDesktopIntl" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">WorkBuddy 国内版
+              <input id="setIdentityVerDesktopCn" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">桌面端内置 CLI
+              <input id="setIdentityVerDesktopCli" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">VSCode 扩展
+              <input id="setIdentityVerVscodeProduct" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">宿主 VSCode
+              <input id="setIdentityVerVscodeIde" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">CodeBuddy CLI
+              <input id="setIdentityVerCli" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">OpenAI Node SDK
+              <input id="setIdentityVerSdk" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">Node 版本
+              <input id="setIdentityVerNode" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px">
+            <label style="font-size:13px;color:var(--dim)">面板密码
+              <input id="setIdentityVersionPassword" type="password" autocomplete="current-password" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <button onclick="saveIdentityVersions(this)">保存版本号</button>
+            <span style="font-size:12px;color:var(--warn)">保存后立即生效；输入框留空表示恢复默认</span>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">国际版每日活跃打卡 <em id="setDailyChatWebState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               国际版账号每日打卡时，除桌面端身分的轻量对话外，再走一次网页通道的会话。默认开启。
@@ -10949,6 +11002,11 @@ async function loadSettings(showToast){
         const input = document.getElementById(pair[0]);
         if(input) input.checked = autoSwitchProducts.indexOf(pair[1]) >= 0;
       });
+      IDENTITY_VERSION_DEFAULTS = (data.identity_version_defaults && typeof data.identity_version_defaults === 'object')
+        ? data.identity_version_defaults : {};
+      IDENTITY_VERSION_CURRENT = (data.identity && data.identity.versions && typeof data.identity.versions === 'object')
+        ? data.identity.versions : {};
+      renderIdentityVersions();
       const privateData = (data.identity && data.identity.private_data) || 'auto';
       const privateDataInput = document.getElementById('setPrivateData');
       if(privateDataInput) privateDataInput.value = privateData;
@@ -11697,6 +11755,69 @@ async function saveAutoSwitchProduct(btn){
     await postJSON('/settings/save', {auto_switch_product: value,
                                       auto_switch_products: products});
     toast(value ? '已启用：429 时自动切换出站身份' : '已关闭自动切换出站身份', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+let IDENTITY_VERSION_DEFAULTS = {};
+let IDENTITY_VERSION_CURRENT = {};
+const IDENTITY_VERSION_FIELDS = [
+  ['desktop_intl', 'WorkBuddy 国际版', 'setIdentityVerDesktopIntl'],
+  ['desktop_cn', 'WorkBuddy 国内版', 'setIdentityVerDesktopCn'],
+  ['desktop_cli', '桌面端内置 CLI', 'setIdentityVerDesktopCli'],
+  ['vscode_product', 'VSCode 扩展', 'setIdentityVerVscodeProduct'],
+  ['vscode_ide', '宿主 VSCode', 'setIdentityVerVscodeIde'],
+  ['cli', 'CodeBuddy CLI', 'setIdentityVerCli'],
+  ['sdk', 'OpenAI Node SDK', 'setIdentityVerSdk'],
+  ['node', 'Node 版本', 'setIdentityVerNode'],
+];
+function renderIdentityVersions(){
+  const summary = document.getElementById('identityVersionSummary');
+  if(summary){
+    summary.innerHTML = IDENTITY_VERSION_FIELDS.map(function(item){
+      const key = item[0], label = item[1];
+      const fallback = IDENTITY_VERSION_DEFAULTS[key] || '-';
+      const current = IDENTITY_VERSION_CURRENT[key] || fallback;
+      const changed = IDENTITY_VERSION_CURRENT[key]
+        && IDENTITY_VERSION_CURRENT[key] !== IDENTITY_VERSION_DEFAULTS[key];
+      return '<div>' + esc(label) + '：<span class="mono" style="color:var(--fg)">'
+        + esc(current) + '</span> '
+        + (changed
+            ? '<span class="badge warn" style="font-size:10px">已修改（默认 ' + esc(fallback) + '）</span>'
+            : '<span style="color:var(--dim-light)">默认</span>')
+        + '</div>';
+    }).join('');
+  }
+  IDENTITY_VERSION_FIELDS.forEach(function(item){
+    const el = document.getElementById(item[2]);
+    if(el) el.value = IDENTITY_VERSION_CURRENT[item[0]] || '';
+  });
+}
+function toggleIdentityVersionEditor(){
+  const el = document.getElementById('identityVersionEditor');
+  if(el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+async function saveIdentityVersions(btn){
+  const passwordEl = document.getElementById('setIdentityVersionPassword');
+  const password = String((passwordEl && passwordEl.value) || '');
+  if(!password){ toast('请输入面板密码', 'warn'); return; }
+  const versions = {};
+  IDENTITY_VERSION_FIELDS.forEach(function(item){
+    const el = document.getElementById(item[2]);
+    const value = String((el && el.value) || '').trim();
+    if(value) versions[item[0]] = value;
+  });
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {identity_versions: versions, panel_password: password});
+    toast('出站身份版本号已保存', 'ok');
+    if(passwordEl) passwordEl.value = '';
+    const editor = document.getElementById('identityVersionEditor');
+    if(editor) editor.style.display = 'none';
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

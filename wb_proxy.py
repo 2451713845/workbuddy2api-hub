@@ -74,6 +74,7 @@ import wb_logstore
 import wb_pricing
 import wb_settings
 import wb_webprompts
+import wb_tiers
 import wb_upstream_pool
 import wb_webtools
 import wb_identity
@@ -10120,6 +10121,7 @@ def runtime_settings_view():
         "enable_anthropic_messages": wb_settings.enable_anthropic_messages(ACCOUNTS_DIR),
         "filter_models_by_key": wb_settings.filter_models_by_key(ACCOUNTS_DIR),
         "reasoning_effort_map": wb_settings.reasoning_effort_map(ACCOUNTS_DIR),
+        "models_only_available": wb_settings.models_only_available(ACCOUNTS_DIR),
         "identity": wb_settings.identity_config(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
@@ -10747,6 +10749,27 @@ def catalog_meta(realm=None):
         return dict(meta) if meta else None
 
 
+def models_available_for(model, realm):
+    """Whether at least one account in the pool can serve this model.
+
+    A PRO-only model needs a paid account; any other model only needs one
+    enabled, credential-bearing account in the realm. Readiness (cooldowns,
+    quotas) is deliberately not part of the test: a model vanishing because its
+    only account is cooling for a minute would make auto-discovering clients
+    re-read the catalogue over and over. With no pool at all this returns True,
+    so a fresh install still advertises the full catalogue.
+    """
+    if POOL is None:
+        return True
+    usable = [a for a in POOL.accounts
+              if a.realm == realm and a.enabled and a.access_token]
+    if not usable:
+        return False
+    if wb_tiers.requires_pro(model, realm):
+        return any(getattr(a, "is_paid_user", False) for a in usable)
+    return True
+
+
 def fetch_models(realm=None):
     r = realm or CURRENT_REALM
     with _lock:
@@ -11147,6 +11170,10 @@ def fetch_remote_product_config(realm):
             continue
         parsed = parse_remote_catalog(payload)
         if parsed:
+            # Keep the PRO-only map from the same payload; it is what the
+            # scheduler and /v1/models use to keep free accounts off models
+            # the upstream would answer 11158 for.
+            wb_tiers.ingest(realm, payload)
             # 成功副本落盘留档（catalog/，纯存档；见 persist_remote_catalog）。
             persist_remote_catalog(realm, payload)
             return parsed
@@ -11321,6 +11348,7 @@ def read_cached_remote_catalog(realm):
             payload = json.load(fh)
     except Exception:
         return None
+    wb_tiers.ingest(realm, payload)
     return parse_remote_catalog(payload)
 
 
@@ -18153,6 +18181,12 @@ class Handler(BaseHTTPRequestHandler):
         if wb_settings.filter_models_by_key(ACCOUNTS_DIR) and self.key_entry:
             data = [m for m in data
                     if wb_settings.key_allows_model(self.key_entry, m.get("id"))]
+        # 可选：清单只宣告当前账号池里至少有一个账号能服务的模型。默认关闭
+        # 保持全量目录；PRO ONLY 模型只有在池里有付费账号时才列出。
+        if wb_settings.models_only_available(ACCOUNTS_DIR):
+            data = [m for m in data
+                    if models_available_for(m.get("id"),
+                                            req_realm or CURRENT_REALM)]
         marks = wb_entitlements.snapshot(ACCOUNTS_DIR, req_realm or CURRENT_REALM)
         for m in data:
             ent = (marks.get(req_realm or CURRENT_REALM) or {}).get(m.get("id"))
@@ -18990,6 +19024,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "reasoning_effort_map must be true or false", "invalid_request_error")
             wb_settings.set_reasoning_effort_map(ACCOUNTS_DIR, raw)
             reply["reasoning_effort_map"] = raw
+        if "models_only_available" in payload:
+            raw = payload.get("models_only_available")
+            if not isinstance(raw, bool):
+                return self._error(400, "models_only_available must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_models_only_available(ACCOUNTS_DIR, raw)
+            reply["models_only_available"] = raw
         if "identity" in payload:
             raw = payload.get("identity")
             if not isinstance(raw, dict):

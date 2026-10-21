@@ -4728,6 +4728,24 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">只列出可用模型 <em id="setModelsOnlyAvailableState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              开启后，<code style="font-family:var(--mono,monospace)">/v1/models</code> 只返回当前账号池里至少有一个账号能服务的模型。国际版的 PRO ONLY 模型只有在池里存在付费账号时才列出；免费账号不会被派到这类模型上（上游会回 11158）。默认关闭，保持全量目录。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setModelsOnlyAvailable" type="checkbox" style="width:16px;height:16px">
+              只列可用
+            </label>
+            <button onclick="saveModelsOnlyAvailable(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">免费额度耗尽回退积分版 <em id="setCreditFallbackState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               国际版 deepseek-v4.1-flash 免费额度在所有账号均耗尽（6004 撞线）后，自动回退到 deepseek-v4.1-flash-sg 付费通道。默认关闭。
@@ -10856,6 +10874,14 @@ async function loadSettings(showToast){
         filterModelsByKeyState.textContent = filterModelsByKey ? '(已启用)' : '(未启用)';
         filterModelsByKeyState.style.color = filterModelsByKey ? 'var(--accent2)' : 'var(--dim)';
       }
+      const modelsOnlyAvailable = data.models_only_available === true;
+      const modelsOnlyAvailableInput = document.getElementById('setModelsOnlyAvailable');
+      if(modelsOnlyAvailableInput) modelsOnlyAvailableInput.checked = modelsOnlyAvailable;
+      const modelsOnlyAvailableState = document.getElementById('setModelsOnlyAvailableState');
+      if(modelsOnlyAvailableState){
+        modelsOnlyAvailableState.textContent = modelsOnlyAvailable ? '(已启用)' : '(未启用)';
+        modelsOnlyAvailableState.style.color = modelsOnlyAvailable ? 'var(--accent2)' : 'var(--dim)';
+      }
       const anthropicMsgInput = document.getElementById('setAnthropicMessages');
       if(anthropicMsgInput) anthropicMsgInput.checked = anthropicMsg;
       const anthropicMsgState = document.getElementById('setAnthropicMessagesState');
@@ -11541,6 +11567,21 @@ async function saveReasoningEffortMap(btn){
   try {
     await postJSON('/settings/save', {reasoning_effort_map: value});
     toast(value ? '已启用：思考等级挡位映射' : '已关闭：思考等级原样透传', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveModelsOnlyAvailable(btn){
+  const el = document.getElementById('setModelsOnlyAvailable');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {models_only_available: value});
+    toast(value ? '已启用：/v1/models 只列出可用模型' : '已关闭：/v1/models 返回全量目录', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

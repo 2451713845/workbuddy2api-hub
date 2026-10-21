@@ -1514,6 +1514,27 @@ def set_reasoning_effort_map(accounts_dir, enabled):
     return enabled
 
 
+def models_only_available(accounts_dir):
+    """Whether /v1/models hides models no account in the pool can serve.
+
+    Off by default: the endpoint has always advertised the upstream catalogue,
+    and an install that predates this setting keeps that behaviour. When on,
+    a PRO-only model is only listed while a paid account exists, and any other
+    model needs at least one enabled account in the realm.
+    """
+    return load(accounts_dir).get("models_only_available") is True
+
+
+def set_models_only_available(accounts_dir, enabled):
+    """Persist the availability filter toggle. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data["models_only_available"] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
 def auto_switch_product(accounts_dir):
     """Whether an upstream 429 may rotate an account's outbound identity.
 

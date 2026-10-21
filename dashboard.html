@@ -12317,13 +12317,19 @@ async function loadKeyModelCatalog(){
   }
   const out = [];
   const seen = new Set();
+  const add = function(list){
+    for(const m of (list || [])){
+      const id = String((m && m.id) || '');
+      if(id && !seen.has(id)){ seen.add(id); out.push(m); }
+    }
+  };
+  // The unscoped listing is the widest catalogue the gateway advertises; the
+  // per-realm calls fill in anything it omits.
+  try { const r = await getJSON('/v1/models'); add(r.data); } catch(e) { /* keep going */ }
   for(const realm of ['intl', 'cn']){
     try {
       const r = await getJSON('/v1/models?realm=' + realm);
-      for(const m of (r.data || [])){
-        const id = String((m && m.id) || '');
-        if(id && !seen.has(id)){ seen.add(id); out.push(m); }
-      }
+      add(r.data);
     } catch(e) { /* one realm failing must not blank the picker */ }
   }
   if(!out.length && Array.isArray(window.MODELS_DATA)) out.push(...window.MODELS_DATA);

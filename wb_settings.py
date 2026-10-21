@@ -1515,8 +1515,53 @@ def identity_private_data(accounts_dir):
     return value if value in IDENTITY_PRIVATE_DATA_VALUES else "auto"
 
 
+IDENTITY_VERSION_KEYS = (
+    "desktop_intl", "desktop_cn", "desktop_cli",
+    "vscode_product", "vscode_ide", "cli", "sdk", "node",
+)
+IDENTITY_VERSION_MAX_LEN = 64
+_IDENTITY_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$")
+
+
+def _clean_identity_versions(raw):
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for key in IDENTITY_VERSION_KEYS:
+        value = str(raw.get(key) or "").strip()
+        if not value:
+            continue
+        if (len(value.encode("utf-8")) > IDENTITY_VERSION_MAX_LEN
+                or not _IDENTITY_VERSION_RE.match(value)):
+            raise ValueError("identity_versions.%s must be a version string" % key)
+        out[key] = value
+    return out
+
+
+def identity_versions(accounts_dir):
+    """Panel-set version overrides; {} means "use the verified defaults"."""
+    try:
+        return _clean_identity_versions(load(accounts_dir).get("identity_versions"))
+    except ValueError:
+        return {}
+
+
+def set_identity_versions(accounts_dir, versions):
+    """Persist version overrides; an empty dict clears them."""
+    clean = _clean_identity_versions(versions)
+    with _lock:
+        data = load(accounts_dir)
+        if clean:
+            data["identity_versions"] = clean
+        else:
+            data.pop("identity_versions", None)
+        save(accounts_dir, data)
+    return clean
+
+
 def identity_config(accounts_dir):
-    return {"private_data": identity_private_data(accounts_dir)}
+    return {"private_data": identity_private_data(accounts_dir),
+            "versions": identity_versions(accounts_dir)}
 
 
 def set_identity_private_data(accounts_dir, value):

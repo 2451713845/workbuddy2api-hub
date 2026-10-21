@@ -153,7 +153,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 205 个套件：153 个 Python + 52 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 206 个套件：154 个 Python + 52 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -461,6 +461,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **跨出口回退：国际版限流 → 国内版（默认关闭）**：两个出口是两套独立上游（`www.workbuddy.ai` / `copilot.tencent.com`）、两套配额、两套积分，而 `AccountPool.pick()` 一直严格按 realm 过滤——国际版整池被限流时，即使国内版还有空号，请求也只能等一个 429。设置页新增「跨出口回退（国际版 → 国内版）」：国际版对某模型限流、24h 额度窗口用满、整池都在冷却，或该出口池子空掉时，把这次请求改用同名的国内版出口重放一次。只对两个出口都提供的模型生效（`gpt-*` / `gemini-*` 等国际版独占模型不回退）；方向单向，国内版永远不会回退到国际版；出口被显式指定的请求（Key 绑定了 realm，或客户端带了 `X-Realm` / `?realm=`）不受影响；403 11140 这类非配额失败不重放。两边都限流时按国内版给出的重置时钟回报退避。新增 16 项单测。 / Cross-exit fallback from the Global to the China exit (off by default): the exits are separate upstreams with separate quota and credit ledgers, while `AccountPool.pick()` only ever dispatched same-realm accounts, so a fully throttled Global pool had to wait out a 429 even with idle China accounts. A new settings switch replays the request once on the same model at the China exit when the Global exit throttles a model, spends its 24h window, has every account cooling, or has an empty pool. Only models both exits serve are eligible (Global-only `gpt-*` / `gemini-*` never fall back); the direction is one-way (China never falls back to Global); requests naming an exit explicitly (a key bound to a realm, `X-Realm`, `?realm=`) are left alone; non-quota failures such as 403 11140 are not replayed. When both exits throttle, the reported backoff follows the China exit's reset clock. Covered by 16 new tests.
 
 - **11-128：身份句渠道指纹的动词搭配补全**：v1.7.18 的正则只认 `agent powered by` / `assistant built on` 两种搭配，而同一判据下的 `built by`（如 `You are <Product> Agent, built by <Vendor>.`）、`created by` / `developed by` / `made by` / `trained by`，以及省略名词的 `You are powered by …` 都会漏检——上游只要补其中一条规则，这些句子就会重新命中 400 / 11-128。现按同一判据补全动词表：名词可省略、冠词后允许 0~3 个修饰词（专名 + 可选逗号）；`You are free to use tools built by …` 这类分词修饰宾语的句子保持不改写。新增 5 项断言（built by 变体、其余动词、省略名词、反误伤、角色作用域）。 / Broaden the identity-sentence channel fingerprint: v1.7.18 only matched `agent powered by` / `assistant built on`, so `built by` (`You are <Product> Agent, built by <Vendor>.`), `created by` / `developed by` / `made by` / `trained by`, and the noun-less `You are powered by …` slipped through — one rule added upstream would put them back on 400 / 11-128. The same rule now covers those verb forms, with an optional noun and up to three modifiers (proper names plus an optional comma), while participles modifying an object (`You are free to use tools built by …`) stay untouched. Five assertions added.
 - **网页活跃重试等待改为线性递增**：第 N 轮等待从「首轮 × 2^(N-1)」改为「首轮 × N」，默认 3 次从 120 / 240 / 480 秒变为 120 / 240 / 360 秒；最坏占用从指数级降到线性级。设置页说明同步更新。新增 4 项单测。 / The web-channel retry wait now grows linearly: round N waits base × N instead of base × 2^(N-1), so the default three tries are 120 / 240 / 360 seconds instead of 120 / 240 / 480. The worst case is linear rather than exponential. Covered by 4 new tests.

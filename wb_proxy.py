@@ -10161,6 +10161,8 @@ def runtime_settings_view():
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
         "egress_backoff_enabled":
             wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
+        "realm_fallback_enabled":
+            wb_settings.realm_fallback_enabled(ACCOUNTS_DIR),
         "log_db_enabled": wb_settings.log_db_enabled(ACCOUNTS_DIR),
         "log_db_max_rows": wb_settings.log_db_max_rows(ACCOUNTS_DIR),
         "log_db_max_days": wb_settings.log_db_max_days(ACCOUNTS_DIR),
@@ -14698,6 +14700,93 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     raise RuntimeError("no usable account for realm '%s': all are disabled, cooling down, "
                        "expired or parked by the daily token limit%s"
                        % (realm, pool_unavailable_detail(realm, model)))
+
+
+# ---- 跨出口回退：国际版 → 国内版（开关默认关）--------------------------------
+#
+# 两个出口是两套独立的上游（www.workbuddy.ai / copilot.tencent.com）、两套
+# 配额、两套积分。派发路径一直把它们当两个互不相干的池子：realm 在请求入口
+# 定死，AccountPool.pick() 只挑同 realm 的账号，跨 realm 的候选会直接跳过。
+# 这条规则保证了「这个 Key 只花国际额度」这类部署，但代价是——国际版整池被
+# 限流时，明明国内版还有号，请求也只会等 429。
+#
+# 下面这层是那个缺口的兜底，只在运营者显式打开时生效。
+
+def realm_fallback_enabled():
+    """持久化开关，与 remaining_priority_enabled() 同一形状。"""
+    return wb_settings.realm_fallback_enabled(ACCOUNTS_DIR) is True
+
+
+def realm_fallback_target(realm, model):
+    """回退的目标 realm；返回 "" 表示这次请求不该回退。
+
+    三个条件同时成立：
+      * 当前走的是国际版出口 —— 单向，永不 cn→intl（国内号是免费的/便宜的一侧，
+        把流量悄悄挪到国际出口会花掉运营者没打算花的额度）；
+      * 模型两个出口都提供（`exclusive_realm` 为空）—— gpt-* / gemini-* 只有
+        国际版有，换过去只会把一个 429 变成一个更难解释的 403；
+      * 国内版此刻确实有账号能服务这个模型 —— 否则重试只是一次白跑的上游往返，
+        还会把「限流」换成一个「没有可用账号」。
+    """
+    if realm != "intl":
+        return ""
+    if exclusive_realm(model):
+        return ""
+    if POOL is None:
+        return ""
+    try:
+        if POOL.count_ready(realm="cn", model=model) <= 0:
+            return ""
+    except Exception:
+        return ""
+    return "cn"
+
+
+def open_upstream_with_fallback(payload, session_key=None, target_realm=None,
+                                allow_realm_fallback=True, **kwargs):
+    """open_upstream()，外围加一次「国际版限流 → 国内版」的回退。
+
+    只在两条失败上回退：
+      * `RateLimited` —— 上游 429、24h 额度窗口用满（code 6004）、网关本地合成
+        的「所有账号都在冷却该模型」。共同点是**这条出口的配额线暂时走不通**；
+      * `no usable account` 的 RuntimeError —— 该出口的账号全部停用/过期/熔断，
+        池子空了。
+
+    别的失败照原样抛出。403 11140（账号被上游风控限制）尤其不能跨出口重打：
+    项目对它有一条红线（见 RESTRICTED_403_ROTATE_MAX 附近），换出口继续打同一台
+    设备正是它要防的那件事。pinned / 参数错误更不是换出口能修的。
+
+    `allow_realm_fallback=False` 表示这次请求的出口是**显式指定**的（Key 绑定了
+    realm，或客户端带了 X-Realm / ?realm=）：那是运营者写下来的意图，兜底不该
+    越过它。
+    """
+    realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
+
+    def _backup_or_raise(exc):
+        if not allow_realm_fallback or not realm_fallback_enabled():
+            raise exc
+        backup = realm_fallback_target(realm, payload.get("model"))
+        if not backup:
+            raise exc
+        detail = getattr(exc, "detail", "") or getattr(exc, "message", "") \
+            or str(exc)
+        log("realm fallback: %s cannot serve '%s' (%s), retrying on %s"
+            % (realm, payload.get("model") or "-", detail[:120], backup))
+        return backup
+
+    try:
+        return open_upstream(payload, session_key=session_key,
+                             target_realm=target_realm, **kwargs)
+    except RateLimited as exc:
+        backup = _backup_or_raise(exc)
+    except RuntimeError as exc:
+        if not str(exc).startswith("no usable account"):
+            raise
+        backup = _backup_or_raise(exc)
+    # 第二次尝试的失败原样抛出：两边都限流时，客户端该等多久由**国内版**给出的
+    # 重置时钟决定，那比国际版那条更接近「下一次能成」的时刻。
+    return open_upstream(payload, session_key=session_key,
+                         target_realm=backup, **kwargs)
 
 def pool_unavailable_detail(realm, model=None):
     """把该区域每个账号不可用的原因拼成一句，附在「没有可用账号」后面。
@@ -19308,6 +19397,15 @@ class Handler(BaseHTTPRequestHandler):
                 # 由下一个请求照常推（此刻就算推也要先折一次剩余估算，没必要
                 # 为一个开关多付这一趟）。
                 POOL.apply_remaining_weights(None)
+        if "realm_fallback_enabled" in payload:
+            # 跨出口回退（默认关）：与 remaining_priority_enabled 同一形状——
+            # 严格 JSON 布尔，字符串 "false" 会是真值。
+            raw = payload.get("realm_fallback_enabled")
+            if not isinstance(raw, bool):
+                return self._error(400, "realm_fallback_enabled must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_realm_fallback_enabled(ACCOUNTS_DIR, raw)
+            reply["realm_fallback_enabled"] = raw
         if "log_db_enabled" in payload or "log_db_max_rows" in payload \
                 or "log_db_max_days" in payload or "log_db_max_bytes" in payload:
             # 日志落库（默认关闭）：开关与三条保留上限一次提交里可以任选子集，
@@ -20777,7 +20875,8 @@ class Handler(BaseHTTPRequestHandler):
                sorted(custom_names) or "-", key_label(self._key_id()) or "-")
         )
         try:
-            req_realm = self._request_realm() or CURRENT_REALM
+            explicit_realm = self._request_realm()
+            req_realm = explicit_realm or CURRENT_REALM
             blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
             if blocked:
                 return self._error(400, blocked, "invalid_request_error")
@@ -20787,8 +20886,9 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(chat_req.get("model"))
             if key_blocked:
                 return self._error(400, key_blocked, "invalid_request_error")
-            upstream, account, effort = open_upstream(
+            upstream, account, effort = open_upstream_with_fallback(
                 chat_req, session_key=session_key, target_realm=req_realm,
+                allow_realm_fallback=not explicit_realm,
                 **key_open_kwargs(getattr(self, "key_entry", None)))
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
@@ -21021,7 +21121,8 @@ class Handler(BaseHTTPRequestHandler):
                chat_req.get("reasoning_effort"), len(chat_req.get("tools") or []),
                key_label(self._key_id()) or "-"))
         try:
-            req_realm = self._request_realm() or CURRENT_REALM
+            explicit_realm = self._request_realm()
+            req_realm = explicit_realm or CURRENT_REALM
             blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
             if blocked:
                 return self._anthropic_error(400, blocked, "invalid_request_error")
@@ -21031,8 +21132,9 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(chat_req.get("model"))
             if key_blocked:
                 return self._anthropic_error(400, key_blocked, "invalid_request_error")
-            upstream, account, effort = open_upstream(
+            upstream, account, effort = open_upstream_with_fallback(
                 chat_req, session_key=session_key, target_realm=req_realm,
+                allow_realm_fallback=not explicit_realm,
                 **key_open_kwargs(getattr(self, "key_entry", None)))
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
@@ -21387,7 +21489,8 @@ class Handler(BaseHTTPRequestHandler):
         model = payload.get("model") or "hy4-preview"
         t_start = time.time()
         try:
-            req_realm = self._request_realm() or CURRENT_REALM
+            explicit_realm = self._request_realm()
+            req_realm = explicit_realm or CURRENT_REALM
             blocked = self._cross_realm_error(payload.get("model"), req_realm)
             if blocked:
                 return self._error(400, blocked, "invalid_request_error")
@@ -21397,8 +21500,9 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(payload.get("model"))
             if key_blocked:
                 return self._error(400, key_blocked, "invalid_request_error")
-            upstream, account, effort = open_upstream(
+            upstream, account, effort = open_upstream_with_fallback(
                 payload, session_key=session_key, target_realm=req_realm,
+                allow_realm_fallback=not explicit_realm,
                 prebuilt_body=forwarded, defer_egress_success=True,
                 **key_open_kwargs(getattr(self, "key_entry", None)))
         except PinnedAccountError as exc:

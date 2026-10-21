@@ -1915,6 +1915,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '最快到期优先': 'Expiring soonest first',
     '出口级瞬时失败退避': 'Egress-level transient backoff',
     '启用出口级退避': 'Enable egress backoff',
+    '跨出口回退（国际版 → 国内版）': 'Cross-exit fallback (Global → China)',
+    '启用跨出口回退': 'Enable cross-exit fallback',
+    '已启用：国际版限流时回退到国内版': 'Enabled: retrying on the China exit when Global is throttled',
+    '已关闭跨出口回退': 'Cross-exit fallback disabled',
+    '国际版出口把某个模型限流、当日额度用满、或整池都在冷却时，允许改用同名的国内版出口再试一次。默认关闭——两个出口是两套上游、两套额度、两套积分口径，混用会让「这个 Key 只花国际额度」的部署失去保证。': 'When the Global exit throttles a model, spends its daily quota, or has every account cooling down, the same model may be retried on the China exit. Off by default: the two exits are separate upstreams with separate quota and separate credit ledgers, so mixing them breaks deployments that spend Global credit only.',
+    '只对两个出口都提供的模型生效（gpt-* / gemini-* 等国际版独占模型不回退）；方向是单向的，国内版永远不会回退到国际版。出口被显式指定的请求（Key 绑定了出口，或客户端带了 X-Realm / ?realm=）不受影响。': 'Only for models both exits serve (Global-only models such as gpt-* / gemini-* never fall back). The direction is one-way: the China exit never falls back to Global. Requests that name an exit explicitly (a key bound to one, or an X-Realm / ?realm= header) are left alone.',
     '传输类失败与 502/503/504 改记在「出口」而不是账号上：同一个出口的账号共用一个计数器，退避是秒级（1 秒起、翻倍、封顶 15 秒、带抖动），任一次成功即清零；账号级熔断（30 分钟起、翻倍到 6 小时）不再被一次链路抖动触发。500 与 401/403/429 仍走原路径。默认关闭。': 'Transport failures and 502/503/504 are charged to the egress instead of the account: accounts sharing one egress share one counter, the backoff is seconds-scale (1s, doubling, capped at 15s, jittered) and any success clears it; the account breaker (30 minutes, doubling to 6h) is no longer tripped by a link hiccup. 500 and 401/403/429 keep their old paths. Off by default.',
     '已启用：出口级瞬时失败退避': 'On: egress-level transient backoff',
     '已关闭出口级瞬时失败退避': 'Egress-level transient backoff off',
@@ -3050,6 +3056,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "剩余用量优先调度": "剩餘用量優先排程",
     "出口级瞬时失败退避": "出口級瞬時失敗退避",
     "启用出口级退避": "啟用出口級退避",
+    "跨出口回退（国际版 → 国内版）": "跨出口回退（國際版 → 國內版）",
+    "启用跨出口回退": "啟用跨出口回退",
+    "已启用：国际版限流时回退到国内版": "已啟用：國際版限流時回退到國內版",
+    "已关闭跨出口回退": "已關閉跨出口回退",
+    "国际版出口把某个模型限流、当日额度用满、或整池都在冷却时，允许改用同名的国内版出口再试一次。默认关闭——两个出口是两套上游、两套额度、两套积分口径，混用会让「这个 Key 只花国际额度」的部署失去保证。": "國際版出口把某個模型限流、當日額度用滿、或整池都在冷卻時，允許改用同名的國內版出口再試一次。預設關閉——兩個出口是兩套上游、兩套額度、兩套積分口徑，混用會讓「這個 Key 只花國際額度」的部署失去保證。",
+    "只对两个出口都提供的模型生效（gpt-* / gemini-* 等国际版独占模型不回退）；方向是单向的，国内版永远不会回退到国际版。出口被显式指定的请求（Key 绑定了出口，或客户端带了 X-Realm / ?realm=）不受影响。": "只對兩個出口都提供的模型生效（gpt-* / gemini-* 等國際版獨佔模型不回退）；方向是單向的，國內版永遠不會回退到國際版。出口被明確指定的請求（Key 綁定了出口，或客戶端帶了 X-Realm / ?realm=）不受影響。",
     "传输类失败与 502/503/504 改记在「出口」而不是账号上：同一个出口的账号共用一个计数器，退避是秒级（1 秒起、翻倍、封顶 15 秒、带抖动），任一次成功即清零；账号级熔断（30 分钟起、翻倍到 6 小时）不再被一次链路抖动触发。500 与 401/403/429 仍走原路径。默认关闭。": "傳輸類失敗與 502/503/504 改記在「出口」而不是帳號上：同一個出口的帳號共用一個計數器，退避是秒級（1 秒起、翻倍、封頂 15 秒、帶抖動），任一次成功即清零；帳號級熔斷（30 分鐘起、翻倍到 6 小時）不再被一次鏈路抖動觸發。500 與 401/403/429 仍走原路徑。預設關閉。",
     "已启用：出口级瞬时失败退避": "已啟用：出口級瞬時失敗退避",
     "已关闭出口级瞬时失败退避": "已關閉出口級瞬時失敗退避",
@@ -5072,6 +5084,27 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
               启用优先调度
             </label>
             <button onclick="saveRemainingPriority(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">跨出口回退（国际版 → 国内版） <em id="setRealmFallbackState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              国际版出口把某个模型限流、当日额度用满、或整池都在冷却时，允许改用同名的国内版出口再试一次。默认关闭——两个出口是两套上游、两套额度、两套积分口径，混用会让「这个 Key 只花国际额度」的部署失去保证。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              只对两个出口都提供的模型生效（gpt-* / gemini-* 等国际版独占模型不回退）；方向是单向的，国内版永远不会回退到国际版。出口被显式指定的请求（Key 绑定了出口，或客户端带了 X-Realm / ?realm=）不受影响。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setRealmFallback" type="checkbox" style="width:16px;height:16px">
+              启用跨出口回退
+            </label>
+            <button onclick="saveRealmFallback(this)">保存</button>
           </div>
         </div>
       </section>
@@ -11148,6 +11181,14 @@ async function loadSettings(showToast){
         remainingPriorityState.textContent = remainingPriority ? '(已启用)' : '(未启用)';
         remainingPriorityState.style.color = remainingPriority ? 'var(--accent2)' : 'var(--dim)';
       }
+      const realmFallback = data.realm_fallback_enabled === true;
+      const realmFallbackInput = document.getElementById('setRealmFallback');
+      if(realmFallbackInput) realmFallbackInput.checked = realmFallback;
+      const realmFallbackState = document.getElementById('setRealmFallbackState');
+      if(realmFallbackState){
+        realmFallbackState.textContent = realmFallback ? '(已启用)' : '(未启用)';
+        realmFallbackState.style.color = realmFallback ? 'var(--accent2)' : 'var(--dim)';
+      }
       const windowProbe = data.window_probe !== false;
       const windowProbeInput = document.getElementById('setWindowProbe');
       if(windowProbeInput) windowProbeInput.checked = windowProbe;
@@ -12284,6 +12325,21 @@ async function saveRemainingPriority(btn){
   try {
     await postJSON('/settings/save', {remaining_priority_enabled: value});
     toast(value ? '已启用：剩余用量接近耗尽的组合优先调度' : '已关闭剩余用量优先调度', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveRealmFallback(btn){
+  const el = document.getElementById('setRealmFallback');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {realm_fallback_enabled: value});
+    toast(value ? '已启用：国际版限流时回退到国内版' : '已关闭跨出口回退', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

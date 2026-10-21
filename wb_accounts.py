@@ -46,7 +46,7 @@ DAILY_CHAT_WEB_PROMPT = "Hi"
 #: 网页通道一轮最多等多久（秒）。实测一次「Hi」十几秒就跑完，留足余量。
 #: 没配 settings 的账号（如单测里手工构造的）用它兜底。
 WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
-#: 网页通道一共试几次（含第一轮）。第 N 轮的等待是首轮的 2^(N-1) 倍，所以
+#: 网页通道一共试几次（含第一轮）。第 N 轮的等待是首轮的 N 倍，所以
 #: 3 次 = 最多等 base×(1+2+4) 秒。设置页可改（见 wb_settings.daily_chat_web_attempts）。
 WEB_TURN_ATTEMPTS = 3
 
@@ -1667,8 +1667,8 @@ class Account(object):
         """网页通道的实际流程；返回形状见 daily_chat_web。
 
         失败会再试（见 daily_chat_web_policy）：一共最多 attempts 次（含第一轮），
-        第 N 轮的等待是首轮的 2^(N-1) 倍 —— 默认 3 次、首轮 120 秒，也就是
-        120 / 240 / 480。最典型的失败是「会话还没跑完」（状态=working），它往往
+        第 N 轮的等待是首轮的 N 倍 —— 默认 3 次、首轮 120 秒，也就是
+        120 / 240 / 360。最典型的失败是「会话还没跑完」（状态=working），它往往
         只是慢，多等一轮就好，所以这里把等待时间当成重试的代价，不再额外 sleep。
         业务拒绝（建会话返回非 0 code）不再试：同一个被拒的请求再发一次也一样被拒。
 
@@ -1677,7 +1677,7 @@ class Account(object):
         base, total = self.daily_chat_web_policy()
         attempt = 0
         while True:
-            res = self._daily_chat_web_once(prompt, wait_seconds=base * (2 ** attempt))
+            res = self._daily_chat_web_once(prompt, wait_seconds=base * (attempt + 1))
             res["attempts"] = attempt + 1
             if res.get("ok") or attempt + 1 >= total or not res.get("retryable"):
                 return res

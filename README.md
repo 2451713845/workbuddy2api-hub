@@ -145,7 +145,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 189 个套件：139 个 Python + 50 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 190 个套件：140 个 Python + 50 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -453,6 +453,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 ### Unreleased
+
+- **网页活跃重试等待改为线性递增**：第 N 轮等待从「首轮 × 2^(N-1)」改为「首轮 × N」，默认 3 次从 120 / 240 / 480 秒变为 120 / 240 / 360 秒；最坏占用从指数级降到线性级。设置页说明同步更新。新增 4 项单测。 / The web-channel retry wait now grows linearly: round N waits base × N instead of base × 2^(N-1), so the default three tries are 120 / 240 / 360 seconds instead of 120 / 240 / 480. The worst case is linear rather than exponential. Covered by 4 new tests.
 
 - **修复「数据用途声明」文案反了**（#528）：`X-Private-Data` 是「数据私有」声明，`true` = 不参与模型优化、`false` = 允许参与；下拉选项与英文词条此前正好相反，用户按文案选择会得到相反的效果。已交换两处文案，并加 4 项断言。
 

@@ -1724,9 +1724,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     ' 次 · ': ' attempts · ',
     '只跑一轮': 'Single attempt',
     '每轮等待': 'Wait per attempt',
-    '网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间是上一轮的两倍——默认 3 次、首轮 120 秒，也就是 120 / 240 / 480 秒。默认开启；会话只是慢的时候多等一轮通常就过了。': 'When a web-channel attempt does not finish (the session is still working), try again: up to N tries in total (the first one included, configurable), with each wait twice the previous one - 3 tries and a 120-second first wait by default, i.e. 120 / 240 / 480. On by default; a session that is merely slow usually finishes on the next attempt.',
-    '注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。': 'Note: the wait doubles each round, so raising either the try count or the first wait costs you on a quadratic scale - an account that never finishes can hold the sweep for base×(2^tries−1) seconds (120×7 = 840 seconds, about 14 minutes, by default). Keep it within how long a client is willing to wait.',
-    '已启用：网页通道失败后会再试（等待时间翻倍）': 'On: the web channel tries again after a failure (wait doubles each time)',
+    '网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间在上一轮基础上增加一个首轮时长——默认 3 次、首轮 120 秒，也就是 120 / 240 / 360 秒。默认开启；会话只是慢的时候多等一轮通常就过了。': 'When a web-channel attempt does not finish (the session is still working), try again: up to N tries in total (the first one included, configurable), with each wait one more first-wait step than the previous one - 3 tries and a 120-second first wait by default, i.e. 120 / 240 / 360. On by default; a session that is merely slow usually finishes on the next attempt.',
+    '注意：等待时间逐轮递增，「次数」与「首轮等待」调大都是线性累加的代价——一个始终跑不完的账号最坏能占住巡检 base×(1+2+…+次数) 秒（默认 120×(1+2+3) = 720 秒 = 12 分钟）。建议不超过客户端愿意空等的时长。': 'Note: the wait grows by one first-wait step each round, so raising either the try count or the first wait costs you on a linear scale - an account that never finishes can hold the sweep for base×(1+2+…+tries) seconds (120×(1+2+3) = 720 seconds, 12 minutes, by default). Keep it within how long a client is willing to wait.',
+    '已启用：网页通道失败后会再试（等待时间递增）': 'On: the web channel tries again after a failure (wait doubles each time)',
     '已关闭：网页通道只跑一轮': 'Off: the web channel runs a single attempt',
     '已保存：最多尝试 ': 'Saved: up to ',
     ' 次，首轮等待 ': ' tries, first wait ',
@@ -2797,9 +2797,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     " 次 · ": " 次 · ",
     "只跑一轮": "只跑一輪",
     "每轮等待": "每輪等待",
-    "网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间是上一轮的两倍——默认 3 次、首轮 120 秒，也就是 120 / 240 / 480 秒。默认开启；会话只是慢的时候多等一轮通常就过了。": "網頁通道一輪沒跑完（會話還在 working）就再來一輪：最多嘗試幾次（含第一輪，可改），每輪等待時間是上一輪的兩倍——預設 3 次、首輪 120 秒，也就是 120 / 240 / 480 秒。預設開啟；會話只是慢的時候多等一輪通常就過了。",
-    "注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。": "注意：等待時間逐輪翻倍，「次數」與「首輪等待」調大都是平方級的代價——一個始終跑不完的帳號最壞能佔住巡檢 base×(2^次數−1) 秒（預設 120×7 = 840 秒 ≈ 14 分鐘）。建議不超過客戶端願意空等的時長。",
-    "已启用：网页通道失败后会再试（等待时间翻倍）": "已啟用：網頁通道失敗後會再試（等待時間翻倍）",
+    "网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间在上一轮基础上增加一个首轮时长——默认 3 次、首轮 120 秒，也就是 120 / 240 / 360 秒。默认开启；会话只是慢的时候多等一轮通常就过了。": "網頁通道一輪沒跑完（會話還在 working）就再來一輪：最多嘗試幾次（含第一輪，可改），每輪等待時間在上一輪基礎上增加一個首輪時長——預設 3 次、首輪 120 秒，也就是 120 / 240 / 360 秒。預設開啟；會話只是慢的時候多等一輪通常就過了。",
+    "注意：等待时间逐轮递增，「次数」与「首轮等待」调大都是线性累加的代价——一个始终跑不完的账号最坏能占住巡检 base×(1+2+…+次数) 秒（默认 120×(1+2+3) = 720 秒 = 12 分钟）。建议不超过客户端愿意空等的时长。": "注意：等待時間逐輪遞增，「次數」與「首輪等待」調大都是線性累加的代價——一個始終跑不完的帳號最壞能佔住巡檢 base×(1+2+…+次數) 秒（預設 120×(1+2+3) = 720 秒 = 12 分鐘）。建議不超過客戶端願意空等的時長。",
+    "已启用：网页通道失败后会再试（等待时间递增）": "已啟用：網頁通道失敗後會再試（等待時間遞增）",
     "已关闭：网页通道只跑一轮": "已關閉：網頁通道只跑一輪",
     "已保存：最多尝试 ": "已保存：最多嘗試 ",
     " 次，首轮等待 ": " 次，首輪等待 ",
@@ -4827,10 +4827,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           <span id="setDailyChatWebRetryState" style="font-size:12px;color:var(--dim)"></span>
         </div>
         <div style="font-size:12px;color:var(--dim);margin-top:6px">
-          网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间是上一轮的两倍——默认 3 次、首轮 120 秒，也就是 120 / 240 / 480 秒。默认开启；会话只是慢的时候多等一轮通常就过了。
+          网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间在上一轮基础上增加一个首轮时长——默认 3 次、首轮 120 秒，也就是 120 / 240 / 360 秒。默认开启；会话只是慢的时候多等一轮通常就过了。
         </div>
         <div style="font-size:12px;color:var(--warn);margin-top:4px">
-          注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。
+          注意：等待时间逐轮递增，「次数」与「首轮等待」调大都是线性累加的代价——一个始终跑不完的账号最坏能占住巡检 base×(1+2+…+次数) 秒（默认 120×(1+2+3) = 720 秒 = 12 分钟）。建议不超过客户端愿意空等的时长。
         </div>
       </section>
 

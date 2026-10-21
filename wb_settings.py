@@ -351,6 +351,61 @@ def key_allows_model(entry, model):
     return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
 
 
+#: One key can name at most this many accounts. The pool is smaller than this
+#: in practice; the cap only stops a hand-edited file from growing the
+#: per-request filter without bound.
+KEY_ACCOUNTS_MAX = 200
+#: Account ids are UUIDs (36 chars); the length cap leaves room for a future
+#: shorter ref without accepting arbitrary text.
+KEY_ACCOUNT_MAX_LEN = 128
+
+
+def _clean_account_refs(value):
+    """Normalize one key's account allow-list into a list of account ids.
+
+    The panel posts a list; a hand-edited settings.json tends to hold a
+    comma-separated string, so both shapes are accepted. Matching is exact
+    (account uid), because a wildcard here would silently widen a restriction
+    meant to pin traffic to named accounts. An empty result means "no
+    restriction", which is what every key written before this field existed
+    reads back as.
+    """
+    if isinstance(value, str):
+        raw = [part for part in re.split(r"[,;\n]", value)]
+    elif isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        return []
+    out = []
+    for item in raw:
+        ref = str(item or "").strip()
+        if not ref or len(ref.encode("utf-8")) > KEY_ACCOUNT_MAX_LEN:
+            continue
+        if ref not in out:
+            out.append(ref)
+        if len(out) >= KEY_ACCOUNTS_MAX:
+            break
+    return out
+
+
+def key_allowed_accounts(entry):
+    """The account ids a key may use, or None when it places no restriction.
+
+    None (not an empty set) is what the scheduler treats as "every account",
+    so an unrestricted key keeps the exact code path it had before.
+    """
+    refs = _clean_account_refs((entry or {}).get("accounts"))
+    return set(refs) if refs else None
+
+
+def key_allows_account(entry, uid):
+    """True when `entry` places no account restriction, or names `uid`."""
+    refs = _clean_account_refs((entry or {}).get("accounts"))
+    if not refs:
+        return True
+    return str(uid or "").strip() in refs
+
+
 def _clean_key_entry(entry):
     """Normalize one stored key entry; returns None when unusable.
 
@@ -379,6 +434,7 @@ def _clean_key_entry(entry):
         "key": key,
         "realm": realm,
         "models": _clean_model_patterns(entry.get("models")),
+        "accounts": _clean_account_refs(entry.get("accounts")),
         "concurrency_limit": concurrency,
         "enabled": False if deleted_at else entry.get("enabled", True) is not False,
         "created_at": entry.get("created_at") or time.strftime("%Y/%m/%d %H:%M"),

@@ -10977,6 +10977,7 @@ async function loadSettings(showToast){
       masked: k.masked || '',
       realm: k.realm || '',
       models: Array.isArray(k.models) ? k.models.slice() : [],
+      accounts: Array.isArray(k.accounts) ? k.accounts.slice() : [],
       concurrency_limit: parseInt(k.concurrency_limit || 0, 10) || 0,
       enabled: k.enabled !== false,
       created_at: k.created_at || '',
@@ -12270,6 +12271,19 @@ function modelPatternsText(patterns){
   return Array.isArray(patterns) ? patterns.join(', ') : '';
 }
 
+/* 允许账号按精确 uid 匹配（不做通配），所以这里只做去空白与去重。 */
+function parseAccountRefs(text){
+  const out = [];
+  String(text || '').split(/[,;\n]/).forEach(part => {
+    const ref = part.trim();
+    if(ref && out.indexOf(ref) === -1) out.push(ref);
+  });
+  return out;
+}
+function accountRefsText(refs){
+  return Array.isArray(refs) ? refs.join(', ') : '';
+}
+
 /* 已删除的 Key 是只读历史：密钥已被抹掉，所以这里不提供复制，也不提供恢复。 */
 function renderDeletedKeyRows(){
   const box = document.getElementById('deletedKeySection');
@@ -12331,9 +12345,33 @@ function renderKeyRows(){
         +       'style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
         +   '</div>'
         +   '<div style="grid-column:1 / -1">'
-        +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">模型限制 <span style="color:var(--dim-light)">(选填，留空 = 不限制)</span></div>'
-          +     '<input type="text" id="editKeyModels_' + i + '" value="' + esc(modelPatternsText(row.models)) + '" placeholder="如 deepseek* 或 gpt-6-astra；多个用逗号分隔，支持 * 通配" '
-        +       'style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
+        +     '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">'
+        +       '<div style="font-size:12px;color:var(--dim);font-weight:500">模型准入 <span id="editKeyModelsSummary_' + i + '" style="color:var(--dim-light)"></span></div>'
+        +       '<button class="sec mini" style="border-radius:8px;padding:4px 12px" onclick="toggleKeyPicker(\'model\',' + i + ')">选择模型</button>'
+        +     '</div>'
+        +     '<div id="editKeyModelPicker_' + i + '" style="display:none;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:4px">'
+        +       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">'
+        +         '<input id="editKeyModelSearch_' + i + '" placeholder="搜索模型" oninput="filterKeyModelPicker(' + i + ')" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">'
+        +         '<button class="sec mini" onclick="setKeyModelsAll(' + i + ',true)">全选</button>'
+        +         '<button class="sec mini" onclick="setKeyModelsAll(' + i + ',false)">全不选</button>'
+        +       '</div>'
+        +       '<div id="editKeyModelList_' + i + '" style="max-height:220px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px 8px"></div>'
+        +     '</div>'
+        +     '<div id="editKeyModelWildcards_' + i + '" style="font-size:11px;color:var(--warn);margin-top:4px"></div>'
+        +   '</div>'
+        +   '<div style="grid-column:1 / -1">'
+        +     '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">'
+        +       '<div style="font-size:12px;color:var(--dim);font-weight:500">允许账号 <span id="editKeyAccountsSummary_' + i + '" style="color:var(--dim-light)"></span></div>'
+        +       '<button class="sec mini" style="border-radius:8px;padding:4px 12px" onclick="toggleKeyPicker(\'account\',' + i + ')">选择账号</button>'
+        +     '</div>'
+        +     '<div id="editKeyAccountPicker_' + i + '" style="display:none;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:4px">'
+        +       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">'
+        +         '<input id="editKeyAccountSearch_' + i + '" placeholder="搜索昵称或 UID" oninput="filterKeyAccountPicker(' + i + ')" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">'
+        +         '<button class="sec mini" onclick="setKeyAccountsAll(' + i + ',true)">全选</button>'
+        +         '<button class="sec mini" onclick="setKeyAccountsAll(' + i + ',false)">全不选</button>'
+        +       '</div>'
+        +       '<div id="editKeyAccountList_' + i + '" style="max-height:220px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:2px 8px"></div>'
+        +     '</div>'
         +   '</div>'
         +   '<div style="grid-column:1 / -1">'
         +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">API Key 内容 ' + (row.masked ? '<span style="color:var(--dim-light)">(已保存: ' + esc(row.masked) + '，留空表示不改)</span>' : '') + '</div>'
@@ -12367,6 +12405,9 @@ function renderKeyRows(){
     const modelBadge = (Array.isArray(row.models) && row.models.length)
       ? '<span class="badge s" style="font-size:11px">限 ' + esc(modelPatternsText(row.models)) + '</span>'
       : '';
+    const accountBadge = (Array.isArray(row.accounts) && row.accounts.length)
+      ? '<span class="badge s" style="font-size:11px">限 ' + row.accounts.length + ' 个账号</span>'
+      : '';
 
     const displayKey = row.masked || (row.key ? (row.key.slice(0, 4) + '******' + row.key.slice(-4)) : '未设置');
     const createdStr = row.created_at ? ('创建时间 ' + esc(row.created_at)) : '';
@@ -12379,6 +12420,7 @@ function renderKeyRows(){
       +       statusBadge
       +       realmBadge
       +       modelBadge
+        +       accountBadge
         +       concBadge
       +     '</div>'
       +     '<div style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
@@ -12395,6 +12437,161 @@ function renderKeyRows(){
       + '</div>'
       + '</div>';
   }).join('');
+  API_KEY_ROWS.forEach((row, i) => { if(row._editing) renderKeyPickers(i); });
+}
+
+function keyModelWildcards(row){
+  return (row.models || []).filter(p => String(p).indexOf('*') >= 0);
+}
+function keyModelExact(row){
+  return (row.models || []).filter(p => String(p).indexOf('*') < 0);
+}
+function updateKeyModelSummary(i){
+  const row = API_KEY_ROWS[i];
+  if(!row) return;
+  const exact = keyModelExact(row).length;
+  const wild = keyModelWildcards(row).length;
+  const el = document.getElementById('editKeyModelsSummary_' + i);
+  if(el){
+    el.textContent = (exact || wild)
+      ? ('（已选 ' + exact + ' 个' + (wild ? ' + ' + wild + ' 个通配符' : '') + '）')
+      : '（不限制）';
+  }
+  const wildEl = document.getElementById('editKeyModelWildcards_' + i);
+  if(wildEl) wildEl.textContent = wild.length ? ('保留通配符：' + wild.join(', ')) : '';
+}
+function updateKeyAccountSummary(i){
+  const row = API_KEY_ROWS[i];
+  if(!row) return;
+  const n = (row.accounts || []).length;
+  const el = document.getElementById('editKeyAccountsSummary_' + i);
+  if(el) el.textContent = n ? ('（已选 ' + n + ' 个账号）') : '（不限制）';
+}
+function toggleKeyPicker(kind, i){
+  const id = kind === 'model' ? 'editKeyModelPicker_' + i : 'editKeyAccountPicker_' + i;
+  const el = document.getElementById(id);
+  if(el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+async function loadKeyModelCatalog(){
+  if(Array.isArray(window.KEY_MODEL_CATALOG) && window.KEY_MODEL_CATALOG.length){
+    return window.KEY_MODEL_CATALOG;
+  }
+  const out = [];
+  const seen = new Set();
+  const add = function(list){
+    for(const m of (list || [])){
+      const id = String((m && m.id) || '');
+      if(id && !seen.has(id)){ seen.add(id); out.push(m); }
+    }
+  };
+  // The unscoped listing is the widest catalogue the gateway advertises; the
+  // per-realm calls fill in anything it omits.
+  try { const r = await getJSON('/v1/models'); add(r.data); } catch(e) { /* keep going */ }
+  for(const realm of ['intl', 'cn']){
+    try {
+      const r = await getJSON('/v1/models?realm=' + realm);
+      add(r.data);
+    } catch(e) { /* one realm failing must not blank the picker */ }
+  }
+  if(!out.length && Array.isArray(window.MODELS_DATA)) out.push(...window.MODELS_DATA);
+  window.KEY_MODEL_CATALOG = out;
+  return out;
+}
+async function renderKeyPickers(i){
+  const row = API_KEY_ROWS[i];
+  if(!row) return;
+  const modelList = document.getElementById('editKeyModelList_' + i);
+  if(modelList){
+    modelList.innerHTML = '<div style="font-size:12px;color:var(--dim);padding:4px">正在加载模型清单…</div>';
+    let models = [];
+    try { models = await loadKeyModelCatalog(); } catch(e) { models = []; }
+    // The all-realm listing is the primary source; fall back to the models tab
+    // cache so the picker is never blank just because that one call failed.
+    if(!(models || []).length && Array.isArray(window.MODELS_DATA)){
+      models = window.MODELS_DATA;
+    }
+    if(!(models || []).length){
+      modelList.innerHTML = '<div style="font-size:12px;color:var(--warn);padding:4px">模型清单为空或加载失败，<a href="javascript:void(0)" onclick="renderKeyPickers(' + i + ')">重试</a></div>';
+    } else {
+      modelList.innerHTML = models.map(m => {
+        const id = String((m && m.id) || '');
+        if(!id) return '';
+        const checked = keyModelExact(row).indexOf(id) >= 0 ? ' checked' : '';
+        return '<label class="key-pick-row" data-search="' + esc(id.toLowerCase()) + '" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 4px"><input type="checkbox" value="' + esc(id) + '"' + checked + ' onchange="toggleKeyModel(' + i + ',this)">' + esc(id) + '</label>';
+      }).join('');
+    }
+    updateKeyModelSummary(i);
+  }
+  const accountList = document.getElementById('editKeyAccountList_' + i);
+  if(accountList){
+    if(!(window.ACCOUNTS || []).length){
+      try { await loadAccounts(); } catch(e) { /* keep the empty hint */ }
+    }
+    const accts = window.ACCOUNTS || [];
+    accountList.innerHTML = accts.map(a => {
+      const uid = String((a && a.uid) || '');
+      if(!uid) return '';
+      const label = (a.nickname || uid.slice(0, 8)) + ' · ' + uid.slice(0, 8) + (a.realm ? ' · ' + a.realm : '');
+      const checked = (row.accounts || []).indexOf(uid) >= 0 ? ' checked' : '';
+      return '<label class="key-pick-row" data-search="' + esc((label + ' ' + uid).toLowerCase()) + '" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 4px"><input type="checkbox" value="' + esc(uid) + '"' + checked + ' onchange="toggleKeyAccount(' + i + ',this)">' + esc(label) + '</label>';
+    }).join('') || '<div style="font-size:12px;color:var(--warn);padding:4px">账号列表为空或加载失败，<a href="javascript:void(0)" onclick="renderKeyPickers(' + i + ')">重试</a></div>';
+    updateKeyAccountSummary(i);
+  }
+}
+function toggleKeyModel(i, el){
+  const row = API_KEY_ROWS[i];
+  if(!row) return;
+  const exact = new Set(keyModelExact(row));
+  if(el.checked) exact.add(el.value); else exact.delete(el.value);
+  row.models = keyModelWildcards(row).concat(Array.from(exact).sort());
+  updateKeyModelSummary(i);
+}
+function toggleKeyAccount(i, el){
+  const row = API_KEY_ROWS[i];
+  if(!row) return;
+  const set = new Set(row.accounts || []);
+  if(el.checked) set.add(el.value); else set.delete(el.value);
+  row.accounts = Array.from(set).sort();
+  updateKeyAccountSummary(i);
+}
+function setKeyModelsAll(i, on){
+  const list = document.getElementById('editKeyModelList_' + i);
+  const row = API_KEY_ROWS[i];
+  if(!list || !row) return;
+  list.querySelectorAll('input[type=checkbox]').forEach(el => { el.checked = on; });
+  const exact = on
+    ? Array.from(list.querySelectorAll('input[type=checkbox]')).map(el => el.value).sort()
+    : [];
+  row.models = keyModelWildcards(row).concat(exact);
+  updateKeyModelSummary(i);
+}
+function setKeyAccountsAll(i, on){
+  const list = document.getElementById('editKeyAccountList_' + i);
+  const row = API_KEY_ROWS[i];
+  if(!list || !row) return;
+  list.querySelectorAll('input[type=checkbox]').forEach(el => { el.checked = on; });
+  row.accounts = on
+    ? Array.from(list.querySelectorAll('input[type=checkbox]')).map(el => el.value).sort()
+    : [];
+  updateKeyAccountSummary(i);
+}
+function filterKeyModelPicker(i){
+  const input = document.getElementById('editKeyModelSearch_' + i);
+  const list = document.getElementById('editKeyModelList_' + i);
+  if(!list) return;
+  const q = String((input && input.value) || '').trim().toLowerCase();
+  list.querySelectorAll('.key-pick-row').forEach(el => {
+    el.style.display = !q || (el.getAttribute('data-search') || '').indexOf(q) >= 0 ? 'flex' : 'none';
+  });
+}
+function filterKeyAccountPicker(i){
+  const input = document.getElementById('editKeyAccountSearch_' + i);
+  const list = document.getElementById('editKeyAccountList_' + i);
+  if(!list) return;
+  const q = String((input && input.value) || '').trim().toLowerCase();
+  list.querySelectorAll('.key-pick-row').forEach(el => {
+    el.style.display = !q || (el.getAttribute('data-search') || '').indexOf(q) >= 0 ? 'flex' : 'none';
+  });
 }
 
 function openEditKey(index){
@@ -12426,7 +12623,6 @@ async function saveSingleKey(index, btn){
   const nameInput = document.getElementById('editKeyName_' + index);
   const realmSelect = document.getElementById('editKeyRealm_' + index);
   const keyInput = document.getElementById('editKeyValue_' + index);
-  const modelsInput = document.getElementById('editKeyModels_' + index);
     const concInput = document.getElementById('editKeyConc_' + index);
 
   const name = nameInput ? nameInput.value.trim() : (row.name || '');
@@ -12440,7 +12636,8 @@ async function saveSingleKey(index, btn){
 
   row.name = name || '未命名';
   row.realm = realm;
-  row.models = parseModelPatterns(modelsInput ? modelsInput.value : modelPatternsText(row.models));
+  row.models = Array.isArray(row.models) ? row.models.slice() : [];
+  row.accounts = Array.isArray(row.accounts) ? row.accounts.slice() : [];
     row.concurrency_limit = Math.max(0, parseInt((concInput ? concInput.value : row.concurrency_limit) || 0, 10) || 0);
   if(keyVal) row.key = keyVal;
   row._editing = false;
@@ -12606,6 +12803,7 @@ async function saveApiKeys(btn){
       name: row.name || '',
       realm: row.realm || '',
       models: row.models || [],
+      accounts: row.accounts || [],
         concurrency_limit: parseInt(row.concurrency_limit || 0, 10) || 0,
       enabled: row.enabled !== false,
       // Blank means "keep the stored key", which the server honours per row.

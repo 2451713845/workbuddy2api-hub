@@ -3520,13 +3520,15 @@ class AccountPool(object):
                 account.save(self.dir)
         self.apply_proxy_slots()
 
-    def count_ready(self, realm=None, model=None):
+    def count_ready(self, realm=None, model=None, allowed=None):
         with self._lock:
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
-        return sum(1 for a in snapshot if a.enabled and a.access_token and a.ready(model=model))
+        return sum(1 for a in snapshot
+                   if a.enabled and a.access_token and a.ready(model=model)
+                   and (allowed is None or a.uid in allowed))
 
     def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None,
-                         page=None):
+                         page=None, allowed=None):
         """Pick the account for one turn of a conversation.
 
         Three shapes, in order of preference:
@@ -3548,15 +3550,22 @@ class AccountPool(object):
             for uid in self.affinity.recent(session_key):
                 if uid in exclude:
                     continue
+                # A bound conversation must not route around the key's account
+                # restriction: the binding was made by a request that was
+                # allowed to use it, but this one may not be.
+                if allowed is not None and uid not in allowed:
+                    continue
                 account = self.get(uid)
                 if account and account.realm == realm and account.ready(model=model):
                     self.affinity.bind(session_key, uid)
                     return account
-        account = self.pick(realm=realm, exclude=exclude, model=model, page=page)
+        account = self.pick(realm=realm, exclude=exclude, model=model, page=page,
+                            allowed=allowed)
         if account is None and page is not None:
             # The page has nobody usable right now. Serving the conversation
             # from outside it beats not serving it at all.
-            account = self.pick(realm=realm, exclude=exclude, model=model)
+            account = self.pick(realm=realm, exclude=exclude, model=model,
+                                allowed=allowed)
         # A page conversation is not bound on purpose: its rotation is what keeps
         # every account of the page warm, and a binding would pin it back to one
         # (the state it was released from). The page cursor carries its rotation.
@@ -3564,10 +3573,12 @@ class AccountPool(object):
             self.affinity.bind(session_key, account.uid)
         return account
 
-    def pick(self, realm=None, exclude=None, model=None, page=None):
+    def pick(self, realm=None, exclude=None, model=None, page=None, allowed=None):
         exclude = exclude or set()
         with self._lock:
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
+        if allowed is not None:
+            snapshot = [a for a in snapshot if a.uid in allowed]
         if page is not None:
             snapshot = self._page_slice(snapshot, page)
         if not snapshot:

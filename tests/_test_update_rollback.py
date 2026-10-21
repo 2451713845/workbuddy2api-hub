@@ -317,6 +317,393 @@ class WaitHealthVersionTests(unittest.TestCase):
             self.assertTrue(U.wait_health(8788, timeout=5))
 
 
+class PanelRequestTests(unittest.TestCase):
+    """The request layer: what the panel may queue, and what it refuses."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="rollback-panel-")
+        self.request = os.path.join(self.d, "request.json")
+        self.status = os.path.join(self.d, "status.json")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _bridge(self, backups, systemd=True):
+        """Patch the request layer into a systemd-style deployment."""
+        return [
+            mock.patch.object(R, "REQUEST_DIR", self.d),
+            mock.patch.object(R, "REQUEST_FILE", self.request),
+            mock.patch.object(R, "STATUS_FILE", self.status),
+            mock.patch.object(R, "install_enabled", return_value=True),
+            mock.patch.object(R, "_systemd_enabled", return_value=systemd),
+            mock.patch.object(R, "backups", return_value={
+                "source": "systemd", "backups": backups}),
+            mock.patch.object(R, "status", return_value={
+                "install_enabled": True,
+                "installation": {"state": "idle", "version": "", "message": ""}}),
+        ]
+
+    def test_a_rollback_request_carries_the_action_and_the_tag(self):
+        patches = self._bridge([{"version": "1.0.0", "complete": True}])
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        queued = R.request_rollback("1.0.0", "2.0.0", port=8788)
+        with open(self.request, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual(queued["state"], "queued")
+        self.assertEqual(queued["version"], "1.0.0")
+        self.assertEqual(saved["action"], "rollback")
+        # The tag is what makes an executor that predates this feature treat
+        # the same request as "reinstall that tag" instead of refusing it.
+        self.assertEqual(saved["tag"], "v1.0.0")
+        self.assertEqual(saved["version"], "1.0.0")
+
+    def test_a_second_rollback_cannot_queue_while_one_is_pending(self):
+        patches = self._bridge([{"version": "1.0.0", "complete": True}])
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        R.request_rollback("1.0.0", "2.0.0")
+        with self.assertRaises(R.UpdateRequestError):
+            R.request_rollback("1.0.0", "2.0.0")
+
+    def test_a_rollback_needs_a_complete_backup_of_that_version(self):
+        for backups in ([], [{"version": "1.0.0", "complete": False}]):
+            patches = self._bridge(backups)
+            for item in patches:
+                item.start()
+                self.addCleanup(item.stop)
+            with self.subTest(backups=backups), \
+                    self.assertRaises(R.UpdateRequestError) as caught:
+                R.request_rollback("1.0.0", "2.0.0")
+            self.assertIn("没有可回退", str(caught.exception))
+            self.assertFalse(os.path.exists(self.request))
+
+    def test_a_rollback_to_the_running_version_is_refused(self):
+        patches = self._bridge([{"version": "2.0.0", "complete": True}])
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        with self.assertRaises(R.UpdateRequestError) as caught:
+            R.request_rollback("2.0.0", "2.0.0")
+        self.assertIn("当前版本相同", str(caught.exception))
+        self.assertFalse(os.path.exists(self.request))
+
+    def test_the_target_must_be_a_plain_semver(self):
+        patches = self._bridge([{"version": "1.0.0", "complete": True}])
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        for value in ("", "1.7", "1.7.24.1", "../1.7.24", "abc", "1.7.x"):
+            with self.subTest(value=value), \
+                    self.assertRaises(R.UpdateRequestError):
+                R.request_rollback(value, "2.0.0")
+        self.assertFalse(os.path.exists(self.request))
+
+    def test_restore_states_are_visible_and_restoring_is_active(self):
+        for module in (R, U):
+            with self.subTest(module=module.__name__):
+                self.assertIn("restoring", module.ACTIVE_STATES)
+                self.assertIn("restoring", module.VISIBLE_STATES)
+                self.assertIn("restored", module.VISIBLE_STATES)
+                self.assertNotIn("restored", module.ACTIVE_STATES)
+
+    def test_a_rollback_without_an_executor_is_refused(self):
+        with mock.patch.object(R, "install_enabled", return_value=False):
+            with self.assertRaises(R.UpdateRequestError) as caught:
+                R.request_rollback("1.0.0", "2.0.0")
+        self.assertIn("尚未配置", str(caught.exception))
+
+
+class PortableRequestRollbackTests(unittest.TestCase):
+    """The portable package queues its own detached helper instead."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="rollback-portable-")
+        self.root = make_install(self.d, "2.0.0")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_the_helper_is_spawned_with_the_rollback_action(self):
+        make_backup(self.root, "2.0.0", "1.0.0")
+        spawned = []
+        with mock.patch.object(U, "available", return_value=True), \
+                mock.patch.object(U, "app_root", return_value=self.root), \
+                mock.patch.object(U, "package_root", return_value=self.root), \
+                mock.patch.object(U, "status", return_value={"state": "idle"}), \
+                mock.patch.object(U, "_write_status"), \
+                mock.patch.object(U, "_spawn_helper",
+                                  side_effect=lambda cmd, *a: spawned.append(cmd)):
+            queued = U.request_rollback("1.0.0", "2.0.0")
+        self.assertEqual(queued["version"], "1.0.0")
+        self.assertEqual(spawned[0][spawned[0].index("--action") + 1], "rollback")
+        self.assertIn("1.0.0", spawned[0])
+        self.assertNotIn("--tag", spawned[0])
+
+    def test_a_missing_backup_is_refused_before_anything_is_spawned(self):
+        spawned = []
+        with mock.patch.object(U, "available", return_value=True), \
+                mock.patch.object(U, "app_root", return_value=self.root), \
+                mock.patch.object(U, "status", return_value={"state": "idle"}), \
+                mock.patch.object(U, "_write_status"), \
+                mock.patch.object(U, "_spawn_helper",
+                                  side_effect=lambda cmd, *a: spawned.append(cmd)):
+            with self.assertRaises(U.UpdateError) as caught:
+                U.request_rollback("9.9.9", "2.0.0")
+        self.assertIn("没有可回退", str(caught.exception))
+        self.assertEqual(spawned, [])
+
+
+class SystemdBackupInventoryTests(unittest.TestCase):
+    """The root updater's own backups: what it records and what it publishes."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="ops-backups-")
+        self.backup_root = os.path.join(self.d, "backups")
+        self.app_dir = os.path.join(self.d, "app")
+        os.makedirs(self.backup_root)
+        os.makedirs(os.path.join(self.app_dir, "accounts"))
+        self._patches = [
+            mock.patch.object(OPS, "BACKUP_ROOT", self.backup_root),
+            mock.patch.object(OPS, "APP_DIR", self.app_dir),
+        ]
+        for item in self._patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _backup(self, name, version, files=("wb_proxy.py", "dashboard.html"),
+                drop=None):
+        path = os.path.join(self.backup_root, name)
+        for rel in files:
+            if rel == drop:
+                continue
+            write(os.path.join(path, "app", *rel.split("/")), "x\n")
+        write(os.path.join(path, "restore-state.json"),
+              json.dumps({rel: True for rel in files}))
+        if version is not None:
+            write(os.path.join(path, "backup-meta.json"),
+                  json.dumps({"version": version,
+                              "created_at": "2026-10-21 10:00:00"}))
+        return path
+
+    def test_a_recorded_backup_is_listed_with_the_version_it_restores(self):
+        self._backup("backup-20261021-100000-1", "1.7.23")
+        entries = OPS._list_local_backups()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["version"], "1.7.23")
+        self.assertTrue(entries[0]["complete"], entries[0]["reason"])
+        self.assertEqual(entries[0]["files"], 2)
+
+    def test_a_backup_without_a_version_record_is_skipped(self):
+        self._backup("backup-20261021-100000-1", None)
+        self.assertEqual(OPS._list_local_backups(), [])
+
+    def test_a_backup_missing_a_file_is_not_complete(self):
+        self._backup("backup-20261021-100000-1", "1.7.23", drop="dashboard.html")
+        entries = OPS._list_local_backups()
+        self.assertFalse(entries[0]["complete"])
+        self.assertIn("dashboard.html", entries[0]["reason"])
+
+    def test_pruning_keeps_the_newest_and_reports_what_it_dropped(self):
+        for stamp in ("100000", "110000", "120000"):
+            self._backup("backup-20261021-%s-1" % stamp, "1.7.%s" % stamp[:2])
+        removed = OPS._prune_backups(1)
+        self.assertEqual(len(removed), 2)
+        self.assertEqual([e["version"] for e in OPS._list_local_backups()],
+                         ["1.7.12"])
+
+    def test_the_retention_setting_comes_from_the_apps_settings_file(self):
+        settings = os.path.join(self.app_dir, "accounts", "settings.json")
+        self.assertEqual(OPS._keep_backups_setting(), 1)
+        write(settings, json.dumps({"keep_backups": 2}))
+        self.assertEqual(OPS._keep_backups_setting(), 2)
+        write(settings, json.dumps({"keep_backups": 9}))
+        self.assertEqual(OPS._keep_backups_setting(), 3)
+        write(settings, json.dumps({"keep_backups": "many"}))
+        self.assertEqual(OPS._keep_backups_setting(), 1)
+
+
+@unittest.skipIf(os.name == "nt", "the systemd updater is Linux-only")
+class SystemdRequestTests(unittest.TestCase):
+    """`action` in request.json, and the refusal rules around a rollback.
+
+    The root updater is Linux-only (its own `main()` refuses anything else) and
+    its request reader checks POSIX ownership and mode bits, which a Windows
+    checkout cannot reproduce - so this class is skipped there.
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="ops-request-")
+        self.request = os.path.join(self.d, "request.json")
+        uid = getattr(os, "geteuid", lambda: 0)()
+        gid = getattr(os, "getgid", lambda: 0)()
+        self._patches = [
+            mock.patch.object(OPS, "REQUEST_DIR", self.d),
+            mock.patch.object(OPS, "REQUEST_FILE", self.request),
+            mock.patch.object(OPS, "_wbproxy_ids", return_value=(uid, gid)),
+        ]
+        for item in self._patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _queue(self, payload):
+        with open(self.request, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.chmod(self.request, 0o600)
+
+    def test_an_absent_action_means_install(self):
+        self._queue({"tag": "v1.7.25", "version": "1.7.25"})
+        self.assertEqual(OPS._read_request()["action"], "install")
+
+    def test_a_rollback_request_is_accepted(self):
+        self._queue({"action": "rollback", "tag": "v1.7.23", "version": "1.7.23"})
+        parsed = OPS._read_request()
+        self.assertEqual(parsed["action"], "rollback")
+        self.assertEqual(parsed["version"], "1.7.23")
+
+    def test_an_unknown_action_is_rejected(self):
+        self._queue({"action": "downgrade", "tag": "v1.7.23", "version": "1.7.23"})
+        with self.assertRaises(OPS.UpdateError):
+            OPS._read_request()
+
+    def test_a_rollback_needs_a_backup_this_host_kept(self):
+        data = {"action": "rollback", "tag": "v1.7.23", "version": "1.7.23"}
+        with mock.patch.object(OPS, "_current_version", return_value="1.7.24"), \
+                mock.patch.object(OPS, "_list_local_backups", return_value=[]), \
+                mock.patch("os.geteuid", return_value=0), \
+                mock.patch.object(OPS, "_repo", return_value="owner/repo"):
+            with self.assertRaises(OPS.UpdateError) as caught:
+                OPS._do_update(data)
+        self.assertIn("没有可回退", str(caught.exception))
+
+    def test_a_rollback_to_the_running_version_is_refused(self):
+        data = {"action": "rollback", "tag": "v1.7.24", "version": "1.7.24"}
+        with mock.patch.object(OPS, "_current_version", return_value="1.7.24"), \
+                mock.patch.object(OPS, "_list_local_backups",
+                                  return_value=[{"version": "1.7.24",
+                                                 "complete": True}]), \
+                mock.patch("os.geteuid", return_value=0), \
+                mock.patch.object(OPS, "_repo", return_value="owner/repo"):
+            with self.assertRaises(OPS.UpdateError) as caught:
+                OPS._do_update(data)
+        self.assertIn("当前版本相同", str(caught.exception))
+
+
+class InventoryReadTests(unittest.TestCase):
+    """What the gateway believes out of the root-published inventory."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="inventory-")
+        self.path = os.path.join(self.d, "backups.json")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _write(self, payload, mode=0o644):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.chmod(self.path, mode)
+
+    def _read(self):
+        fake = mock.Mock()
+        fake.st_mode = stat.S_IFREG | 0o640
+        fake.st_uid = 0
+        fake.st_size = 512
+        with mock.patch.object(R, "BACKUPS_FILE", self.path), \
+                mock.patch.object(R.os, "fstat", return_value=fake):
+            return R._root_backups()
+
+    def test_an_inventory_becomes_panel_entries(self):
+        self._write({"backups": [{"version": "1.7.23", "files": 12,
+                                  "complete": True, "reason": "",
+                                  "created_at": "2026-10-21 10:00:00"}]})
+        entries = self._read()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["version"], "1.7.23")
+        self.assertEqual(entries[0]["source"], "systemd")
+        self.assertTrue(entries[0]["complete"])
+
+    def test_junk_entries_and_versions_are_dropped(self):
+        self._write({"backups": [{"version": "../../etc/passwd"},
+                                 {"version": "1.7"},
+                                 "not-an-object",
+                                 {"version": "1.7.22", "complete": True}]})
+        entries = self._read()
+        self.assertEqual([e["version"] for e in entries], ["1.7.22"])
+
+    def test_a_group_or_world_writable_inventory_is_ignored(self):
+        self._write({"backups": [{"version": "1.7.23", "complete": True}]})
+        fake = mock.Mock()
+        fake.st_mode = stat.S_IFREG | 0o666
+        fake.st_uid = 0
+        fake.st_size = 512
+        with mock.patch.object(R, "BACKUPS_FILE", self.path), \
+                mock.patch.object(R.os, "fstat", return_value=fake):
+            self.assertEqual(R._root_backups(), [])
+
+    def test_a_missing_inventory_is_an_empty_list(self):
+        with mock.patch.object(R, "BACKUPS_FILE", self.path):
+            self.assertEqual(R._root_backups(), [])
+
+
+class RetentionApplyTests(unittest.TestCase):
+    """Changing the setting takes effect now, not at the next update."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="retention-")
+        self.root = make_install(self.d, "3.0.0")
+        make_backup(self.root, "2.0.0", "1.0.0")
+        make_backup(self.root, "3.0.0", "2.0.0")
+        base = os.path.join(self.root, "updates")
+        now = time.time()
+        os.utime(os.path.join(base, "backup-2.0.0"), (now - 200, now - 200))
+        os.utime(os.path.join(base, "backup-3.0.0"), (now - 100, now - 100))
+        # A failed rollback leaves this transient copy behind.
+        write(os.path.join(base, U.SAFETY_DIR, "wb_proxy.py"), proxy_source("3.0.0"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _apply(self, keep):
+        with mock.patch.object(R, "_systemd_enabled", return_value=False), \
+                mock.patch.object(R, "__file__",
+                                  os.path.join(self.root, "wb_update_request.py")):
+            return R.apply_keep_backups(keep)
+
+    def test_zero_drops_every_folder_and_the_stale_safety_copy(self):
+        removed = self._apply(0)
+        self.assertEqual(sorted(removed), ["2.0.0", "3.0.0"])
+        self.assertEqual(U.list_backups(self.root), [])
+        self.assertFalse(os.path.isdir(
+            os.path.join(self.root, "updates", U.SAFETY_DIR)))
+
+    def test_one_keeps_the_newest_and_still_drops_the_safety_copy(self):
+        removed = self._apply(1)
+        self.assertEqual(removed, ["2.0.0"])
+        self.assertEqual([e["dir_version"] for e in U.list_backups(self.root)],
+                         ["3.0.0"])
+        self.assertFalse(os.path.isdir(
+            os.path.join(self.root, "updates", U.SAFETY_DIR)))
+
+    def test_the_systemd_layout_prunes_its_own_copies(self):
+        with mock.patch.object(R, "_systemd_enabled", return_value=True):
+            self.assertEqual(R.apply_keep_backups(0), [])
+        self.assertEqual(len(U.list_backups(self.root)), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

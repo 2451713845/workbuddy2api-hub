@@ -1764,6 +1764,11 @@ class Account(object):
         """
         if self.realm != "intl":
             return {"ok": False, "error": "web daily chat is only for international accounts"}
+        # 当日已经成功过一次就不再开新会话：多个定时点、手动触发与并发调度
+        # 可能在同一账号上重叠，重复跑只会多消耗一次网页活跃额度。
+        if not self.can_daily_chat():
+            return {"ok": True, "skipped": True,
+                    "msg": "今日活跃已完成，跳过网页活跃"}
         res = self._daily_chat_web_upstream(prompt)
         wb_activity.record_attempt(self, wb_activity.TASK_DAILY_CHAT, trigger, res)
         return res
@@ -1930,6 +1935,11 @@ class Account(object):
         """
         if self.realm != "intl":
             return {"ok": False, "error": "daily chat is only for international accounts"}
+        # 当日活跃成功后再触发（下一个定时点、手动补跑、并发重复调度）直接
+        # 跳过，连桌面腿也不发：这一天的 30/50 积分已经拿到了。
+        if not self.can_daily_chat():
+            return {"ok": True, "skipped": True,
+                    "msg": "今日活跃已完成，跳过本轮"}
         res = self._daily_chat_upstream(web)
         wb_activity.record_attempt(self, wb_activity.TASK_DAILY_CHAT, trigger, res)
         return res

@@ -114,6 +114,13 @@ REMAINING_PRIORITY_ENABLED_KEY = "remaining_priority_enabled"
 # 派发路径上的失败归账与退避尺度，老安装保持原样（传输错误仍喂账号熔断）。
 EGRESS_BACKOFF_ENABLED_KEY = "egress_backoff_enabled"
 
+# 跨出口回退（国际版 → 国内版）：国际版出口把某个模型限流 / 当日额度用满 /
+# 整池冷却时，允许拿同名的国内版出口再试一次。缺失键读作关 —— 两个出口是两套
+# 上游、两套额度、两套积分口径，混用会让「这个 Key 只花国际额度」的部署失去
+# 保证，所以老安装保持出口严格隔离（realm 一次定死，账号池按 realm 过滤）。
+# 打开后方向仍是单向的：只有 intl → cn，永远不会把请求从国内版打到国际版。
+REALM_FALLBACK_ENABLED_KEY = "realm_fallback_enabled"
+
 # 日志落库：把运行日志追加写进 usage/logs.sqlite3，重启后仍能回看，方便事后
 # debug。缺失键读作关 —— 关着的时候日志只留在内存环形缓冲里，与上游一字不差；
 # 只有显式 true 才建库、落盘。
@@ -1814,6 +1821,40 @@ def set_egress_backoff_enabled(accounts_dir, enabled):
     with _lock:
         data = load(accounts_dir)
         data[EGRESS_BACKOFF_ENABLED_KEY] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
+def realm_fallback_enabled(accounts_dir):
+    """Whether a throttled international exit may fail over to the domestic one.
+
+    Off unless the operator turns it on, because it crosses a boundary the
+    gateway otherwise keeps absolute: an account belongs to one exit, and the
+    pool only ever dispatches that exit's accounts (see AccountPool.pick). The
+    two exits are separate upstreams with separate quota and separate credit
+    ledgers, so serving a request from the other one changes which balance was
+    spent.
+
+    It is still worth having: the exits throttle independently. When every
+    international account is cooling a model - upstream frequency limit, a used
+    up 24h window, or the gateway's own synthesized "usage exceeds frequency
+    limit" - the domestic exit can usually serve the same model right away,
+    because it is a different host with its own rate limiter.
+
+    The direction is deliberately one-way (intl -> cn). A request that started
+    on the domestic exit never fails over to the international one: domestic
+    accounts are the cheaper/free side, and silently moving traffic onto the
+    international exit would spend a balance the operator did not ask to spend.
+    """
+    return load(accounts_dir).get(REALM_FALLBACK_ENABLED_KEY) is True
+
+
+def set_realm_fallback_enabled(accounts_dir, enabled):
+    """Persist the cross-exit fallback switch. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data[REALM_FALLBACK_ENABLED_KEY] = enabled
         save(accounts_dir, data)
     return enabled
 

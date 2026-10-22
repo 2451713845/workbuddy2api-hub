@@ -286,6 +286,36 @@ TIER_TTL_SECONDS = 24 * 3600.0
 LOGIN_PENDING = 11217
 LOGIN_TTL_SECONDS = 600
 USER_AGENT = REALM_CONFIGS['intl']['chat_ua']
+
+#: 签到文案判据。10001 在本仓库**不是**「签到成功」专属码：活动补偿的
+#: 「每人限领一次，您已领取过」与 content rejected 都用它，上游还会在
+#: code=0 下回「签到失败，已签到天数不足 7 天」。原先 `code == 0 or
+#: code == 10001` 一律当成功，把「请求处理中，请勿重复操作」这种明确没签成
+#: 的回执也记成了成功（实测一轮 27 个账号里 4 条，当天真签成 8 个）。
+CHECKIN_PENDING_HINTS = ("处理中", "请勿重复操作", "系统繁忙", "稍后再试")
+CHECKIN_ALREADY_HINTS = ("已签到",)
+CHECKIN_FAILURE_HINTS = ("失败",)
+
+
+def checkin_state(code, msg):
+    """把签到回执归成 checked / already / pending / failed。
+
+    只有 checked / already 能写 last_checkin：写早了（旧实现拿到 HTTP 200 就
+    先写盘）会让当天 can_checkin() 恒为 False，这次失败被永久放弃，9 点与
+    21 点两轮再也不会重试，面板还显示「今日已领」。
+    """
+    text = str(msg or "")
+    if any(k in text for k in CHECKIN_PENDING_HINTS):
+        return "pending"
+    if code == 0:
+        # 「失败」是唯一的硬词：CHECKIN_FAILURE_HINTS 之外的口径太宽，
+        # 「签到成功，距离 7 天奖励还不足」里的「不足」会把成功判成失败。
+        return "failed" if any(k in text for k in CHECKIN_FAILURE_HINTS) else "checked"
+    if code == 10001:
+        return "already" if any(k in text for k in CHECKIN_ALREADY_HINTS) else "failed"
+    return "failed"
+
+
 #: 国际版桌面端的版本号。以前这里硬编码 5.5.2，和 wb_identity 的
 #: DESKTOP_VERSION_INTL 各写一份，改版本时容易只改一处（5.8.4 对齐时
 #: 就漏了这个常量）。现在统一从 wb_identity 取，保持单一来源。
@@ -2112,24 +2142,30 @@ class Account(object):
                                 proxy=self.proxy)
             code = payload.get("code", -1)
             msg = payload.get("msg") or "ok"
-            self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
-            if self.path and os.path.exists(os.path.dirname(self.path)):
-                self.save(os.path.dirname(self.path))
-            return {"ok": (code == 0 or code == 10001), "code": code, "msg": msg, "data": payload.get("data")}
+            state = checkin_state(code, msg)
+            if state in ("checked", "already"):
+                self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
+                if self.path and os.path.exists(os.path.dirname(self.path)):
+                    self.save(os.path.dirname(self.path))
+                return {"ok": True, "state": state, "code": code, "msg": msg,
+                        "data": payload.get("data")}
+            return {"ok": False, "state": state, "code": code, "msg": msg, "error": msg}
         except urllib.error.HTTPError as exc:
             try:
                 raw_b = exc.read().decode("utf-8") or "{}"
                 body = json.loads(raw_b)
                 code = body.get("code")
                 msg = body.get("msg") or ("HTTP %d" % exc.code)
-                # 上游如果在今日已签到时返回 HTTP 400 且 code 为 10001 / "今天已签到"
-                # 这说明今日事实上已经处于签到完成状态，按成功处理，并记录最后签到时间
-                if code == 10001 or "今天已签到" in msg or "已签到" in msg:
+                # 上游如果在今日已签到时返回 HTTP 400 且文案写「今天已签到」，
+                # 说明今日事实上已处于签到完成状态，按成功处理并记录时间。
+                state = checkin_state(code, msg)
+                if state == "already":
                     self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
                     if self.path and os.path.exists(os.path.dirname(self.path)):
                         self.save(os.path.dirname(self.path))
-                    return {"ok": True, "code": code, "msg": msg, "data": body.get("data")}
-                return {"ok": False, "error": msg}
+                    return {"ok": True, "state": state, "code": code, "msg": msg,
+                            "data": body.get("data")}
+                return {"ok": False, "state": state, "code": code, "msg": msg, "error": msg}
             except Exception:
                 return {"ok": False, "error": "HTTP %d" % exc.code}
         except Exception as exc:

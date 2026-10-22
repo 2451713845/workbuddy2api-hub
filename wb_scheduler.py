@@ -1,12 +1,14 @@
 """wb_scheduler.py —— 后台定时调度器 (Scheduler)
 
 负责常驻后台自动执行：
-1. Token 保活 (Keepalive)：定期检查 Token 剩余寿命，不足 2 小时自动调用 Refresh Token。
+1. Token 保活 (Keepalive)：定期检查 Token 剩余寿命，低于提前量自动调用 Refresh Token
+   （提前量默认 48 小时，可用 WB_KEEPALIVE_LEAD_HOURS 调整）。
 2. 每日签到 (Daily Checkin)：每日定时为所有国内版账号自动签到领积分。
 3. 对话活跃上报 (Activity Report)：每日定时为国内版账号上报轻量会话事件，点亮连登与热力墙。
 4. 猫猫旅行与日常结算 (Cat Travel & Welfare)：自动派出猫猫旅行或领取归来奖励。
 5. 状态持久化与看板展示：暴露状态、执行记录、支持手动立即触发与开关切换。
 """
+import os
 import threading
 import time
 import random
@@ -14,6 +16,52 @@ import wb_tasks
 import wb_quota_scan
 import wb_settings
 from wb_tasks import do_cat_travel
+
+
+# Token 保活的提前量：距离到期多久就该续。
+#
+# 这个值必须大于巡检间隔，否则到期时刻落在两次巡检之间时，只能等到过期之后
+# 才发现（保活变成「过期后补救」）。巡检默认每天 22:00 一次（keepalive_hours
+# 只有 [22]），间隔 24 小时；旧代码写死 7200 秒（2 小时），于是只有到期时刻
+# 恰好落在 20:00~22:00 的账号能提前续上，其余 ~92% 的到期时刻都要先在过期
+# 状态下待 0~24 小时，期间所有上游请求都是 401。
+KEEPALIVE_LEAD_DEFAULT_HOURS = 48.0
+KEEPALIVE_LEAD_MIN_HOURS = 1.0
+KEEPALIVE_LEAD_MAX_HOURS = 24.0 * 30
+
+
+def keepalive_lead_seconds():
+    """返回 Token 保活提前量（秒）。非法或越界的 WB_KEEPALIVE_LEAD_HOURS 回落默认值。"""
+    raw = os.environ.get("WB_KEEPALIVE_LEAD_HOURS")
+    if raw is None or not str(raw).strip():
+        return KEEPALIVE_LEAD_DEFAULT_HOURS * 3600
+    try:
+        hours = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return KEEPALIVE_LEAD_DEFAULT_HOURS * 3600
+    if not (KEEPALIVE_LEAD_MIN_HOURS <= hours <= KEEPALIVE_LEAD_MAX_HOURS):
+        return KEEPALIVE_LEAD_DEFAULT_HOURS * 3600
+    return hours * 3600
+
+
+def keepalive_due(expires_at, now=None, lead=None):
+    """Token 是否该续期。
+
+    expires_at <= 0 表示拿不到到期时间（opaque token，或上游回执里没有
+    expiresAt），此时无法判断剩余寿命，按「该续」处理 —— 这正是保活的意义。
+    旧代码写成 `if exp and ...`，这类账号因此永远不会被续期。
+    """
+    if lead is None:
+        lead = keepalive_lead_seconds()
+    if now is None:
+        now = time.time()
+    try:
+        exp = float(expires_at or 0)
+    except (TypeError, ValueError):
+        exp = 0.0
+    if exp <= 0:
+        return True
+    return (exp - now) < lead
 
 
 class Scheduler:
@@ -331,11 +379,16 @@ class Scheduler:
             # daily activity (issue #521). Keepalive below stays on for every
             # account - it only keeps the credential fresh.
             task_active = acc.task_active()
-            # 1. 检查 Token 剩余寿命 (小于 2 小时自动刷新保活)
+            # 1. 检查 Token 剩余寿命（低于提前量就刷新保活）
             if run_keepalive:
                 exp = acc.expires_at or 0
-                if exp and (exp - time.time()) < 7200:
-                    self.log(f"账号 [{uid8}] Token 即将到期，执行主动保活刷新...")
+                if keepalive_due(exp):
+                    if exp:
+                        left = int(exp - time.time())
+                        detail = f"剩余 {left}s" if left > 0 else f"已过期 {-left}s"
+                    else:
+                        detail = "到期时间未知"
+                    self.log(f"账号 [{uid8}] Token {detail}，执行主动保活刷新...")
                     if acc.refresh():
                         refreshed_count += 1
                         self.log(f"✓ 账号 [{uid8}] Token 自动保活刷新成功")

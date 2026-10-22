@@ -2179,7 +2179,8 @@ class Account(object):
                         "retryable": False}
         if failure:
             return {"ok": False, "error": failure.get("message") or "建会话失败",
-                    "retryable": bool(failure.get("retryable"))}
+                    "retryable": bool(failure.get("retryable")),
+                    "phase": "create"}
 
         keep = False
         try:

@@ -226,8 +226,8 @@ class RealCreateFailureTests(unittest.TestCase):
         acc = make_account("real", attempts=2)
         try:
             with mock.patch.object(wb_accounts, "WEB_CONVERSATIONS_URL", url), \
-                    mock.patch.object(wb_accounts, "WEB_RETRY_BACKOFF", 0.05), \
-                    mock.patch.object(wb_accounts, "WEB_RETRY_BACKOFF_MAX", 0.05):
+                    mock.patch.object(wb_accounts, "WEB_RETRY_BACKOFF", 0.2), \
+                    mock.patch.object(wb_accounts, "WEB_RETRY_BACKOFF_MAX", 0.2):
                 started = time.monotonic()
                 res = acc._daily_chat_web_upstream()
                 elapsed = time.monotonic() - started
@@ -238,8 +238,9 @@ class RealCreateFailureTests(unittest.TestCase):
         self.assertEqual(res.get("phase"), "create")
         self.assertIn("14220", res.get("error") or "")
         self.assertEqual(res.get("attempts"), 2)
-        # 两轮之间真的睡了一次（0.05s），不是背靠背。
-        self.assertGreaterEqual(elapsed, 0.05)
+        # 两轮之间真的睡了一次（0.2s），不是背靠背。阈值留出调度抖动：
+        # Windows 上 time.sleep(0.05) 实测偶尔只走 47ms，卡在边界上会假红。
+        self.assertGreaterEqual(elapsed, 0.15)
 
 
 if __name__ == "__main__":

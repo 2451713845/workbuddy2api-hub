@@ -1832,6 +1832,14 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间在上一轮基础上增加一个首轮时长——默认 3 次、首轮 120 秒，也就是 120 / 240 / 360 秒。默认开启；会话只是慢的时候多等一轮通常就过了。': 'When a web-channel attempt does not finish (the session is still working), try again: up to N tries in total (the first one included, configurable), with each wait one more first-wait step than the previous one - 3 tries and a 120-second first wait by default, i.e. 120 / 240 / 360. On by default; a session that is merely slow usually finishes on the next attempt.',
     '注意：等待时间逐轮递增，「次数」与「首轮等待」调大都是线性累加的代价——一个始终跑不完的账号最坏能占住巡检 base×(1+2+…+次数) 秒（默认 120×(1+2+3) = 720 秒 = 12 分钟）。建议不超过客户端愿意空等的时长。': 'Note: the wait grows by one first-wait step each round, so raising either the try count or the first wait costs you on a linear scale - an account that never finishes can hold the sweep for base×(1+2+…+tries) seconds (120×(1+2+3) = 720 seconds, 12 minutes, by default). Keep it within how long a client is willing to wait.',
     '已启用：网页通道失败后会再试（等待时间递增）': 'On: the web channel tries again after a failure (wait doubles each time)',
+    '建会话失败退避': 'Backoff after a create failure',
+    '建会话（或取沙箱）就失败的那一轮只花几百毫秒，重试不消耗「首轮等待」的预算，所以这里单独退避：第 N 轮等 base×2^(N-1) 秒，单次上限取 30 秒与基数的较大者，默认 5 秒；填 0 = 不退避（旧行为：一秒内把所有候选打光）。跑过一轮会话的失败不受影响，它们已经用等待时间付过账。': 'A round that fails while creating the conversation (or fetching the sandbox) costs a few hundred milliseconds and never touches the first-wait budget, so it backs off on its own: round N waits base×2^(N-1) seconds, capped per wait at the larger of 30 seconds and the base, 5 seconds by default. 0 disables it, which is the old timing (every candidate burned inside one second). Rounds that did reach the turn are unaffected - they already paid with the wait time.',
+    '建会话失败后等 ': 'Waits ',
+    '不退避：建会话失败后立即重试': 'No backoff: a failed create is retried immediately',
+    '请输入不小于 0 的整数秒（0 = 不退避）': 'Enter a whole number of seconds, 0 or more (0 = no backoff)',
+    '已保存：建会话失败后先等 ': 'Saved: wait ',
+    ' 秒再重试': ' seconds before retrying a failed create',
+    '已关闭退避：建会话失败后立即重试': 'Backoff off: a failed create is retried immediately',
     '已关闭：网页通道只跑一轮': 'Off: the web channel runs a single attempt',
     '已保存：最多尝试 ': 'Saved: up to ',
     ' 次，首轮等待 ': ' tries, first wait ',
@@ -2946,6 +2954,14 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间在上一轮基础上增加一个首轮时长——默认 3 次、首轮 120 秒，也就是 120 / 240 / 360 秒。默认开启；会话只是慢的时候多等一轮通常就过了。": "網頁通道一輪沒跑完（會話還在 working）就再來一輪：最多嘗試幾次（含第一輪，可改），每輪等待時間在上一輪基礎上增加一個首輪時長——預設 3 次、首輪 120 秒，也就是 120 / 240 / 360 秒。預設開啟；會話只是慢的時候多等一輪通常就過了。",
     "注意：等待时间逐轮递增，「次数」与「首轮等待」调大都是线性累加的代价——一个始终跑不完的账号最坏能占住巡检 base×(1+2+…+次数) 秒（默认 120×(1+2+3) = 720 秒 = 12 分钟）。建议不超过客户端愿意空等的时长。": "注意：等待時間逐輪遞增，「次數」與「首輪等待」調大都是線性累加的代價——一個始終跑不完的帳號最壞能佔住巡檢 base×(1+2+…+次數) 秒（預設 120×(1+2+3) = 720 秒 = 12 分鐘）。建議不超過客戶端願意空等的時長。",
     "已启用：网页通道失败后会再试（等待时间递增）": "已啟用：網頁通道失敗後會再試（等待時間遞增）",
+    "建会话失败退避": "建會話失敗退避",
+    "建会话（或取沙箱）就失败的那一轮只花几百毫秒，重试不消耗「首轮等待」的预算，所以这里单独退避：第 N 轮等 base×2^(N-1) 秒，单次上限取 30 秒与基数的较大者，默认 5 秒；填 0 = 不退避（旧行为：一秒内把所有候选打光）。跑过一轮会话的失败不受影响，它们已经用等待时间付过账。": "建會話（或取沙箱）就失敗的那一輪只花幾百毫秒，重試不消耗「首輪等待」的預算，所以這裡單獨退避：第 N 輪等 base×2^(N-1) 秒，單次上限取 30 秒與基數的較大者，預設 5 秒；填 0 = 不退避（舊行為：一秒內把所有候選打光）。跑過一輪會話的失敗不受影響，它們已經用等待時間付過帳。",
+    "建会话失败后等 ": "建會話失敗後等 ",
+    "不退避：建会话失败后立即重试": "不退避：建會話失敗後立即重試",
+    "请输入不小于 0 的整数秒（0 = 不退避）": "請輸入不小於 0 的整數秒（0 = 不退避）",
+    "已保存：建会话失败后先等 ": "已儲存：建會話失敗後先等 ",
+    " 秒再重试": " 秒再重試",
+    "已关闭退避：建会话失败后立即重试": "已關閉退避：建會話失敗後立即重試",
     "已关闭：网页通道只跑一轮": "已關閉：網頁通道只跑一輪",
     "已保存：最多尝试 ": "已保存：最多嘗試 ",
     " 次，首轮等待 ": " 次，首輪等待 ",
@@ -5113,6 +5129,16 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         </div>
         <div style="font-size:12px;color:var(--dim);margin-top:6px">
           回退开启后，网页通道每失败一次就换下一个模型；组合按目录倍率自动排序（免费 → 低积分 → 高积分），先试免费的，再试便宜的，最后才是贵的。候选至少各试一次，配置的「最多尝试次数」更大时再从头跑第二轮。默认关闭。
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <label style="font-size:13px;color:var(--dim)">建会话失败退避</label>
+          <input id="setDailyChatWebRetryBackoff" type="number" min="0" step="1" style="width:70px">
+          <span style="font-size:12px;color:var(--dim)">秒</span>
+          <button onclick="saveDailyChatWebRetryBackoff(this)">保存</button>
+          <span id="setDailyChatWebRetryBackoffState" style="font-size:12px;color:var(--dim)"></span>
+        </div>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          建会话（或取沙箱）就失败的那一轮只花几百毫秒，重试不消耗「首轮等待」的预算，所以这里单独退避：第 N 轮等 base×2^(N-1) 秒，单次上限取 30 秒与基数的较大者，默认 5 秒；填 0 = 不退避（旧行为：一秒内把所有候选打光）。跑过一轮会话的失败不受影响，它们已经用等待时间付过账。
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
           <label class="switch">
@@ -11322,6 +11348,33 @@ async function loadSettings(showToast){
       const dailyWebFallback = data.daily_chat_web_fallback === true;
       const dailyWebFallbackInput = document.getElementById('setDailyChatWebFallback');
       if(dailyWebFallbackInput) dailyWebFallbackInput.checked = dailyWebFallback;
+      // 建会话阶段失败的退避：没配过时后端给的是内置默认（吃 WB_WEB_RETRY_BACKOFF），
+      // 0 表示不退避，所以这里不能用 || 兜底，得认 0。
+      const dailyWebRetryBackoffDefault = Number(
+        data.daily_chat_web_retry_backoff_default != null
+          ? data.daily_chat_web_retry_backoff_default : 5);
+      const dailyWebRetryBackoff = Number(
+        data.daily_chat_web_retry_backoff != null
+          ? data.daily_chat_web_retry_backoff : dailyWebRetryBackoffDefault);
+      const dailyWebRetryBackoffMax = Number(data.daily_chat_web_retry_backoff_max || 60);
+      const dailyWebRetryBackoffInput = document.getElementById('setDailyChatWebRetryBackoff');
+      if(dailyWebRetryBackoffInput){
+        dailyWebRetryBackoffInput.value = String(dailyWebRetryBackoff);
+        dailyWebRetryBackoffInput.max = String(dailyWebRetryBackoffMax);
+      }
+      const dailyWebRetryBackoffState = document.getElementById('setDailyChatWebRetryBackoffState');
+      if(dailyWebRetryBackoffState){
+        const cap = Math.max(30, dailyWebRetryBackoff);
+        const backoffWaits = [];
+        const backoffRounds = dailyWebRetry ? dailyWebAttempts : 1;
+        for(let i = 0; i < backoffRounds; i++){
+          backoffWaits.push(Math.min(dailyWebRetryBackoff * Math.pow(2, i), cap));
+        }
+        dailyWebRetryBackoffState.textContent = dailyWebRetryBackoff > 0
+          ? ('建会话失败后等 ' + backoffWaits.join(' / ') + ' 秒')
+          : '不退避：建会话失败后立即重试';
+        dailyWebRetryBackoffState.style.color = dailyWebRetryBackoff > 0 ? 'var(--accent2)' : 'var(--dim)';
+      }
       const dailyWebFallbackModels = Array.isArray(data.daily_chat_web_fallback_models)
         ? data.daily_chat_web_fallback_models : [];
       renderDailyChatFallbackPicker(dailyWebFallbackModels);
@@ -12327,6 +12380,26 @@ function filterDailyChatFallbackPicker(){
     el.style.display = !q || (el.getAttribute('data-search') || '').indexOf(q) >= 0 ? 'flex' : 'none';
   });
 }
+async function saveDailyChatWebRetryBackoff(btn){
+  const el = document.getElementById('setDailyChatWebRetryBackoff');
+  const value = Math.floor(Number(el && el.value));
+  if(!isFinite(value) || value < 0){
+    toast('请输入不小于 0 的整数秒（0 = 不退避）', 'bad');
+    return;
+  }
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {daily_chat_web_retry_backoff: value});
+    toast(value > 0 ? ('已保存：建会话失败后先等 ' + value + ' 秒再重试')
+                    : '已关闭退避：建会话失败后立即重试', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function saveDailyChatWebFallbackModels(btn){
   const models = DAILY_CHAT_FALLBACK_SELECTED.slice();
   if(btn) btn.disabled = true;

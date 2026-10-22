@@ -2189,6 +2189,49 @@ def set_daily_chat_web_timeout(accounts_dir, seconds):
     return seconds
 
 
+#: 「还没跑到 turn 就失败」（建会话 5xx、取沙箱失败）时的退避基数上限（秒）。
+#: 那一轮只花掉几百毫秒、不消耗任何等待预算，所以退避是唯一的节奏；但它同样
+#: 有上限——一个卡住的上游会让每个候选都睡这么久。
+DAILY_CHAT_WEB_RETRY_BACKOFF_MAX = 60
+#: 没配过时的退避基数（秒）。调用方另有内置默认（wb_accounts.WEB_RETRY_BACKOFF，
+#: 吃 WB_WEB_RETRY_BACKOFF 环境变量）时会把自己的默认传进来。
+DAILY_CHAT_WEB_RETRY_BACKOFF_DEFAULT = 5
+
+
+def daily_chat_web_retry_backoff(accounts_dir, default=None):
+    """Seconds to wait before retrying a round that never reached the turn.
+
+    0 disables the backoff, which is the pre-1.7.x timing (retry immediately).
+    ``default`` is what an unset install gets, so a caller that has its own
+    built-in default (the env-overridable ``WB_WEB_RETRY_BACKOFF``) keeps it.
+    Anything that is not a whole number in range also falls back to it.
+    """
+    if default is None:
+        default = DAILY_CHAT_WEB_RETRY_BACKOFF_DEFAULT
+    value = load(accounts_dir).get("daily_chat_web_retry_backoff")
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or value < 0 or value > DAILY_CHAT_WEB_RETRY_BACKOFF_MAX):
+        return default
+    return value
+
+
+def set_daily_chat_web_retry_backoff(accounts_dir, seconds):
+    """Persist the backoff base. Returns the stored whole number of seconds."""
+    if isinstance(seconds, bool) or not isinstance(seconds, int):
+        raise ValueError(
+            "daily_chat_web_retry_backoff must be a whole number of seconds")
+    if seconds < 0:
+        raise ValueError("daily_chat_web_retry_backoff cannot be negative")
+    if seconds > DAILY_CHAT_WEB_RETRY_BACKOFF_MAX:
+        raise ValueError("daily_chat_web_retry_backoff cannot be more than %d"
+                         % DAILY_CHAT_WEB_RETRY_BACKOFF_MAX)
+    with _lock:
+        data = load(accounts_dir)
+        data["daily_chat_web_retry_backoff"] = seconds
+        save(accounts_dir, data)
+    return seconds
+
+
 #: 回退模型组合的条数上限。网页活跃每次只发一句短提示词，组合过长的收益
 #: 只是把等待时间摊长，20 条已经覆盖目录里的免费与低价模型。
 DAILY_CHAT_WEB_FALLBACK_MAX_MODELS = 20

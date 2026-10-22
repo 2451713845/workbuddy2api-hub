@@ -1572,6 +1572,19 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   var ATTRS = ['title', 'placeholder', 'aria-label', 'data-label', 'alt'];
   var SKIP = {SCRIPT: 1, STYLE: 1, TEXTAREA: 1, NOSCRIPT: 1};
   var DICT = {
+    '添加 API Key 账号': 'Add an API Key account',
+    '粘贴 CodeBuddy API 管理页签发的静态 Key': 'Paste the static key issued by the CodeBuddy API console',
+    '前缀。': 'prefix.',
+    '它会先拿企业额度端点验一次，通过了才落盘——验不过就什么都不写。': 'It is first probed against the enterprise quota endpoint and only saved when that check passes; a failed probe writes nothing.',
+    '备注名（可选）': 'Label (optional)',
+    '例如：企微企业号': 'e.g. the enterprise WeCom account',
+    '验证并添加': 'Verify and add',
+    '验证中…': 'Verifying…',
+    '正在用企业额度端点验一次…': 'Probing the enterprise quota endpoint…',
+    '请先填入 API Key': 'Enter the API key first',
+    '前缀不对：应当以 ck_ 或 pt_ 开头': 'Wrong prefix: it must start with ck_ or pt_',
+    ' · 额度 ': ' · quota ',
+    '，本期已用 ': ', used this cycle ',
     '(不限)': '(unlimited)',
     '(仅桌面端对话)': '(desktop chats only)',
     '(低于': '(below',
@@ -4265,6 +4278,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <div class="collapse-inner">
     <div class="toolbar">
     <button onclick="openLoginModal()">添加</button>
+    <!-- 静态 API Key 是另一条并行入口：CodeBuddy 的登录页不支持企业微信扫码，
+         企业号只能在 API 管理页手工建 Key 再粘进来。 -->
+    <button class="sec" onclick="openApiKeyModal()">+ API Key</button>
     <!-- 打卡按钮与「添加」同排：手机端靠右显示，不再单独占一行。 -->
     <div class="tb-group tb-checkin">
     <button class="sec" id="btnCheckin" onclick="doCheckin(this)" style="display:none">Buddy 加油站签到</button>
@@ -6102,6 +6118,37 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <span style="flex:1"></span>
       <button class="sec" onclick="closeImport()">取消</button>
       <button id="btnImportCommit" class="primary" onclick="commitImport(this)" disabled>确认导入</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="apiKeyModal">
+  <div class="modal" role="dialog" aria-modal="true" style="width:min(560px,100%)">
+    <div class="modal-hd">
+      <h2>添加 API Key 账号</h2>
+      <button class="modal-x" onclick="closeApiKeyModal()" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-bd">
+      <p class="hint" style="margin-top:0">
+        粘贴 CodeBuddy API 管理页签发的静态 Key（<code>ck_</code> / <code>pt_</code> 前缀）。
+        它会先拿企业额度端点验一次，通过了才落盘——验不过就什么都不写。
+      </p>
+      <div class="field" style="margin-top:12px">
+        <label for="apiKeyInput">API Key</label>
+        <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false"
+               placeholder="ck_xxxxxxxx.yyyyyyyy" style="width:100%">
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label for="apiKeyNickname">备注名（可选）</label>
+        <input id="apiKeyNickname" type="text" autocomplete="off" maxlength="64"
+               placeholder="例如：企微企业号" style="width:100%">
+      </div>
+      <p class="hint" id="apiKeyModalMsg" style="margin-bottom:0"></p>
+    </div>
+    <div class="modal-ft">
+      <span style="flex:1"></span>
+      <button class="sec" onclick="closeApiKeyModal()">取消</button>
+      <button class="primary" id="btnApiKeyCommit" onclick="commitApiKey(this)">验证并添加</button>
     </div>
   </div>
 </div>
@@ -8686,10 +8733,20 @@ function accountRow(a){
     // 账号名（大一号）+ 备注 chip 同一行；备注从独立一行收进账号后面。
     +   '<div class="acct-name-row">'
     +     '<span class="acct-name" title="' + esc(a.nickname) + '">' + esc(a.nickname) + '</span>'
+    // 静态 API Key 账号：没有登录身份，也没有签到/成长体系，标出来省得当成
+    // 普通 OAuth 号去点「重新登录」。悬停给出脱敏后的凭证，方便对上是哪一把。
+    +     (a.apiKey
+          ? '<span class="badge mini" style="background:var(--panel2);color:var(--dim)"'
+            + ' title="静态 API Key 账号（' + esc(a.credentialMask || 'ck_***') + '）：不参与刷新 / 签到 / 成长任务，额度走企业口径"'
+            + '>API Key</span>'
+          : '')
     +     (a.note
           ? '<span class="note-chip has" title="点击编辑备注" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">' + esc(a.note) + '</span>'
           : '<span class="note-chip" title="点击添加备注，比如「批量」/「自用」" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">+ 备注</span>')
-    +     '<span class="badge mini ' + (a.tasksEnabled ? 'ok' : 'off') + '" style="cursor:pointer;margin-left:6px" title="参与签到 / 成长任务 / 连登管家 / 猫猫旅行 / 国际版活跃；与 API 取号无关，点一下切换" onclick="toggleAccountTasks(&quot;' + uidAttr + '&quot;,' + (!a.tasksEnabled) + ')">任务' + (a.tasksEnabled ? '开' : '关') + '</span>'
+    // API Key 账号没有个人成长体系，签到/任务开关对它没有意义：上游一律拒绝，
+    // 画出来只会让人以为点了能开。
+    +     (a.apiKey ? ''
+          : '<span class="badge mini ' + (a.tasksEnabled ? 'ok' : 'off') + '" style="cursor:pointer;margin-left:6px" title="参与签到 / 成长任务 / 连登管家 / 猫猫旅行 / 国际版活跃；与 API 取号无关，点一下切换" onclick="toggleAccountTasks(&quot;' + uidAttr + '&quot;,' + (!a.tasksEnabled) + ')">任务' + (a.tasksEnabled ? '开' : '关') + '</span>')
     // 移动端专用：版本 + 状态徽章靠右同行（桌面隐藏，用表格自己的两列）。
     +     '<span class="acct-mobile-badges">' + realmBadgeMobile + state + tierBadge + '</span>'
     +   '</div>'
@@ -9604,6 +9661,64 @@ function openImport(){
     readImportFile(f);
   };
   picker.click();
+}
+
+function openApiKeyModal(){
+  const m = document.getElementById('apiKeyModal');
+  const input = document.getElementById('apiKeyInput');
+  const name = document.getElementById('apiKeyNickname');
+  const msg = document.getElementById('apiKeyModalMsg');
+  const btn = document.getElementById('btnApiKeyCommit');
+  if(input) input.value = '';
+  if(name) name.value = '';
+  if(msg) msg.textContent = '';
+  if(btn){ btn.disabled = false; btn.textContent = '验证并添加'; }
+  if(m) m.classList.add('show');
+  if(input) setTimeout(() => input.focus(), 50);
+}
+
+function closeApiKeyModal(){
+  const m = document.getElementById('apiKeyModal');
+  if(m) m.classList.remove('show');
+  const input = document.getElementById('apiKeyInput');
+  // 关掉就抹掉：这串东西等同于账号本身，留在 DOM 里没有任何好处。
+  if(input) input.value = '';
+}
+
+async function commitApiKey(btn){
+  const input = document.getElementById('apiKeyInput');
+  const name = document.getElementById('apiKeyNickname');
+  const msg = document.getElementById('apiKeyModalMsg');
+  const key = (input && input.value || '').trim();
+  if(!key){
+    if(msg){ msg.style.color = 'var(--warn)'; msg.textContent = '请先填入 API Key'; }
+    return;
+  }
+  if(!/^(ck_|pt_)/.test(key)){
+    if(msg){ msg.style.color = 'var(--warn)'; msg.textContent = '前缀不对：应当以 ck_ 或 pt_ 开头'; }
+    return;
+  }
+  if(btn){ btn.disabled = true; btn.textContent = '验证中…'; }
+  if(msg){ msg.style.color = 'var(--dim)'; msg.textContent = '正在用企业额度端点验一次…'; }
+  try{
+    const r = await postJSON('/accounts/add-api-key', {
+      key: key,
+      nickname: (name && name.value || '').trim(),
+    });
+    const probe = r.probe || {};
+    let msg = (r.updated ? '已更新 ' : '已添加 ') + (r.nickname || r.uid || 'API Key 账号');
+    if(probe.limit !== undefined && probe.limit !== null){
+      msg += ' · 额度 ' + probe.limit
+           + (probe.used !== undefined && probe.used !== null ? '，本期已用 ' + probe.used : '');
+    }
+    toast(msg);
+    closeApiKeyModal();
+    // 与导入一致：只重拉账号列表，不整页刷新（会打断正在看的其他面板）。
+    await loadAccounts();
+  }catch(e){
+    if(msg){ msg.style.color = 'var(--warn)'; msg.textContent = '添加失败: ' + e.message; }
+    if(btn){ btn.disabled = false; btn.textContent = '验证并添加'; }
+  }
 }
 
 function closeImport(){

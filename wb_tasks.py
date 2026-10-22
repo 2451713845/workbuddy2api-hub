@@ -539,9 +539,7 @@ def _progress_one(account, t, logs, gap, claim=True):
     """
     code = t["task_code"]
     spec = TASK_SPECS.get(code)
-    if not spec or spec.get("unforgeable"):
-        if spec and spec.get("reason"):
-            logs.append(f"⏭ 任务 [{spec.get('name') or code}] 需真实操作完成: {spec['reason']}, 跳过")
+    if not spec:
         return 0
 
     status = t["status"]
@@ -566,6 +564,13 @@ def _progress_one(account, t, logs, gap, claim=True):
             return cr
         logs.append(f"! 任务 [{spec['name']}] 领奖失败: {res.get('msg') or '未知原因'}")
         time.sleep(gap)
+        return 0
+
+    # 外部条件任务也会被自动接取，但不伪造进度。每天复查时一旦上游把它
+    # 标记为 completed，上面的统一领奖分支会立即结算。
+    if spec.get("unforgeable"):
+        logs.append(f"⏭ 任务 [{spec.get('name') or code}] 已接取，等待真实条件达成: "
+                    f"{spec.get('reason') or '等待上游确认'}")
         return 0
 
     # 只认桌面端真实行为的任务: 伪造事件不会推进进度, 诚实跳过并给出深链。
@@ -674,10 +679,10 @@ def run_growth_tasks(account, gap=1.0, claim=True):
         if t.get("task_type") == "auto":
             total_earned += _progress_one(account, t, logs, gap, claim=claim)
 
-    # 1. 批量接取未接任务（auto 类不接受接取，unforgeable 无法自动化）
+    # 1. 批量接取所有未接的 single 任务。外部条件任务也先接取，后续每日
+    #    复查其真实状态；一旦上游标记 completed，就由统一领奖分支自动结算。
     def _needs_accept(x):
-        return (x["status"] == "not_accepted" and not x.get("unforgeable")
-                and x.get("task_type") != "auto")
+        return x["status"] == "not_accepted" and x.get("task_type") != "auto"
 
     unaccepted = [t["task_code"] for t in tasks if _needs_accept(t)]
     if unaccepted:
@@ -897,3 +902,89 @@ def run_streak_bonus(account):
 
     msg = "; ".join(logs) if logs else "连登状态正常（无需兑换/无抽奖次数）"
     return {"ok": True, "logs": logs, "msg": msg}
+
+
+def run_all_rewards(account, trigger="scheduler", gap=1.0):
+    """Run every idempotent CN reward workflow and refresh the final balance."""
+    if account.realm != "cn":
+        return {
+            "ok": False,
+            "msg": "国际版不适用国内任务福利流水",
+            "earned_credit": 0,
+            "steps": {},
+            "logs": [],
+        }
+    if getattr(account, "is_enterprise", lambda: False)():
+        return {
+            "ok": True,
+            "msg": "企业版账号无成长体系，跳过",
+            "earned_credit": 0,
+            "steps": {},
+            "logs": [],
+        }
+
+    steps = {}
+    logs = []
+    failures = []
+    earned = 0
+
+    def record(name, label, fn):
+        try:
+            value = fn()
+            if not isinstance(value, dict):
+                value = {"ok": False, "error": "invalid task result"}
+        except Exception as exc:
+            value = {"ok": False, "error": str(exc)}
+        steps[name] = value
+        ok = value.get("ok") is not False
+        detail = value.get("msg") or value.get("error") or "完成"
+        logs.append(("✓ " if ok else "! ") + label + ": " + str(detail))
+        if not ok:
+            failures.append(label + ": " + str(detail))
+        return value
+
+    if account.can_checkin():
+        record("checkin", "Buddy 加油站签到",
+               lambda: account.checkin(trigger=trigger))
+    else:
+        steps["checkin"] = {"ok": True, "skipped": True, "msg": "今日已签到"}
+        logs.append("✓ Buddy 加油站签到: 今日已签到")
+
+    if account.can_report_activity():
+        record("activity", "每日活跃上报", account.report_activity)
+    else:
+        steps["activity"] = {"ok": True, "skipped": True, "msg": "今日已上报"}
+        logs.append("✓ 每日活跃上报: 今日已上报")
+
+    growth = record(
+        "growth", "成长任务自动接取、点亮与领奖",
+        lambda: run_growth_tasks(account, gap=gap, claim=True),
+    )
+    earned += growth.get("earned_credit") or 0
+    logs.extend(growth.get("logs") or [])
+
+    streak = record("streak", "连登礼包、兑换与抽奖",
+                    lambda: run_streak_bonus(account))
+    logs.extend(streak.get("logs") or [])
+
+    night = record("night", "夜猫子成长任务",
+                   lambda: run_night_growth(account))
+    earned += night.get("earned_credit") or 0
+    logs.extend(night.get("logs") or [])
+
+    credits = record("credits", "刷新积分余额", account.fetch_credits)
+    remain = (getattr(account, "credits", None) or {}).get("remain", 0)
+    msg = "全部任务流水完成，本次新增积分 +%s，当前剩余 %s" % (
+        earned, remain)
+    if failures:
+        msg += "；%d 项待下次重试" % len(failures)
+    return {
+        "ok": not failures,
+        "msg": msg,
+        "earned_credit": earned,
+        "remain": remain,
+        "failures": failures,
+        "steps": steps,
+        "logs": logs,
+        "credits": credits,
+    }

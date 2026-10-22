@@ -2860,6 +2860,11 @@ def set_proxy_slots(accounts_dir, slots):
         data = load(accounts_dir)
         stored = data.get("proxy_slots")
         stored = stored if isinstance(stored, list) else []
+        previous_by_url = {}
+        for raw in stored:
+            entry = _clean_slot_entry(raw) if isinstance(raw, dict) else None
+            if entry and entry.get("id"):
+                previous_by_url.setdefault(entry["url"], entry["id"])
 
         seq = _slot_seq(data)
         # Seed from both the incoming and the outgoing list, so an id that is
@@ -2880,6 +2885,12 @@ def set_proxy_slots(accounts_dir, slots):
             if not entry or entry["url"] in seen:
                 continue
             seen.add(entry["url"])
+            # The registration proxy pool is edited as one URL per line, so
+            # those submissions intentionally carry no slot id. Preserve the
+            # existing id by URL; otherwise every Save renumbers the entire
+            # pool and drop_missing_bindings() disconnects every account.
+            if not entry["id"]:
+                entry["id"] = previous_by_url.get(entry["url"], "")
             if not entry["id"] or any(e["id"] == entry["id"] for e in cleaned):
                 seq += 1
                 entry["id"] = "slot-%d" % seq

@@ -723,6 +723,11 @@ class Account(object):
         self.source = str(data.get("source") or "oauth")
         self.proxy_slot = str(data.get("proxySlot") or "").strip()
         self.proxy_legacy = str(data.get("proxy") or "").strip()
+        self.device_token = str(data.get("deviceToken") or "").strip()
+        self.device_id = str(data.get("deviceId") or "").strip()
+        self.device_name = str(data.get("deviceName") or "").strip()
+        self.device_model = str(data.get("deviceModel") or "").strip()
+        self.device_os = str(data.get("deviceOs") or "").strip()
         # Runtime-resolved value; recomputed by AccountPool.apply_proxy_slots().
         self.proxy = self.proxy_legacy
         self.enabled = data.get("enabled", True)
@@ -940,6 +945,11 @@ class Account(object):
             "source": self.source,
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy_legacy,
+            "deviceToken": self.device_token,
+            "deviceId": self.device_id,
+            "deviceName": self.device_name,
+            "deviceModel": self.device_model,
+            "deviceOs": self.device_os,
             "enabled": self.enabled,
             "tasksEnabled": bool(self.tasks_enabled),
             "weight": self.weight,
@@ -1632,6 +1642,8 @@ class Account(object):
 
     def _device_token(self):
         """Optional X-Device-Token from the configured literal or file."""
+        if self.device_token:
+            return self.device_token
         directory = getattr(self, "accounts_dir", "")
         if not directory:
             return ""
@@ -3372,15 +3384,10 @@ class CreditsRefresher(threading.Thread):
 
 # 和账号凭证放在同一个目录、但本身不是账号的文件。跳过它们，免得每次启动
 # 都被当成「损坏的账号」解析并打一条 error 日志（settings.json 是面板设置，
-# active_realm.json 是区域开关）。
-NON_ACCOUNT_FILES = ("settings.json", "active_realm.json")
-
-
-# 和账号凭证放在同一个目录、但本身不是账号的文件。跳过它们，免得每次启动
-# 都被当成「损坏的账号」解析并打一条 error 日志（settings.json 是面板设置，
 # active_realm.json 是区域开关，model_windows.json 是额度窗口记录，
-# quota_scan.json 是主动额度查询记录）。
-NON_ACCOUNT_FILES = ("settings.json", "active_realm.json", "model_windows.json", "quota_scan.json")
+# quota_scan.json 是主动额度查询记录，registration-devices.json 是手机号管理记录）。
+NON_ACCOUNT_FILES = ("settings.json", "active_realm.json", "model_windows.json",
+                     "quota_scan.json", "registration-devices.json")
 
 
 class AccountPool(object):
@@ -3417,7 +3424,9 @@ class AccountPool(object):
             self.accounts = []
             if not os.path.isdir(self.dir): return self.accounts
             for name in sorted(os.listdir(self.dir)):
-                if not name.endswith(".json") or name in NON_ACCOUNT_FILES: continue
+                if (not name.endswith(".json") or name in NON_ACCOUNT_FILES
+                        or name.startswith("captcha-debug-")):
+                    continue
                 path = os.path.join(self.dir, name)
                 try:
                     with open(path, encoding="utf-8") as fh:

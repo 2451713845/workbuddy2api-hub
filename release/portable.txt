@@ -53,6 +53,8 @@ wb_accounts.py
 wb_activity.py
 wb_agents.py
 wb_atrest.py
+wb_captcha.py
+wb_devices.py
 wb_catalog.py
 wb_egress.py
 wb_fingerprint.py
@@ -64,6 +66,7 @@ wb_pricing.py
 wb_probes.py
 wb_prompt.py
 wb_proxy.py
+wb_registration.py
 wb_quota_scan.py
 wb_scheduler.py
 wb_settings.py
@@ -79,3 +82,12 @@ wb_webagent.py
 wb_webprompts.py
 wb_webtools.py
 wb_window_probe.py
+workbuddy_protocol/__init__.py
+workbuddy_protocol/__main__.py
+workbuddy_protocol/cli.py
+workbuddy_protocol/client.py
+workbuddy_protocol/config.py
+workbuddy_protocol/fingerprint.py
+workbuddy_protocol/html.py
+workbuddy_protocol/trace.py
+workbuddy_protocol/transport.py

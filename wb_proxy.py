@@ -22,6 +22,7 @@ import errno
 import hashlib
 import heapq
 import http.client
+import importlib
 import io
 import ipaddress
 from collections import deque
@@ -83,6 +84,8 @@ import wb_modelsdev
 import wb_probes
 import wb_updates
 import wb_update_request
+import wb_registration
+import wb_devices
 IS_WINDOWS = os.name == "nt"
 
 # ---- 一键配置客户端（wb_agents）的可用性判定（issue #246）----
@@ -5866,6 +5869,8 @@ def recent_usage(limit=100, realm=None, page=1):
         "rows": page_rows
     }
 POOL = None
+REGISTRATIONS = None
+DEVICES = None
 
 # Pinned-account routes (/u/<ref>/v1/...): the handler strips the prefix and
 # resolves the ref before dispatching. One thread serves one connection at a
@@ -6297,12 +6302,18 @@ def _proxy_port_range():
 def probe_proxy_exit(proxy_url, timeout=12):
     """Return (exit_ip, error) for one proxy URL."""
     try:
-        opener = wb_accounts.opener_for_proxy(proxy_url)
-        if opener is None:
+        if not str(proxy_url or "").strip():
             return "", "empty proxy url"
-        req = urllib.request.Request("https://api.ipify.org", method="GET")
-        with opener.open(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", "replace").strip(), ""
+        curl_requests = importlib.import_module("curl_cffi.requests")
+        response = curl_requests.get(
+            "https://api.ipify.org",
+            proxies={"http": proxy_url, "https": proxy_url},
+            impersonate="chrome150",
+            timeout=timeout,
+        )
+        if not 200 <= int(response.status_code) < 300:
+            return "", "proxy probe returned HTTP %s" % response.status_code
+        return str(response.text or "").strip(), ""
     except Exception as exc:
         return "", str(exc)[:160]
 
@@ -18469,6 +18480,8 @@ class Handler(BaseHTTPRequestHandler):
         """
         if path.startswith("/accounts"):
             return True
+        if path.startswith("/registration"):
+            return True
         if path.startswith("/usage") or path.startswith("/v1/usage"):
             return True
         if path.startswith("/activity"):
@@ -18587,6 +18600,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_accounts_export(query)
         if path == "/accounts/login/poll":
             return self._get_accounts_login_poll(query)
+        if path == "/registration/status":
+            return self._get_registration_status(query)
+        if path == "/registration/recent":
+            return self._get_registration_recent()
+        if path == "/registration/devices":
+            return self._get_registration_devices()
+        if path == "/registration/batch/status":
+            return self._get_registration_devices()
         if path == "/usage/analytics":
             return self._get_usage_analytics(query)
         if path == "/usage/by-account":
@@ -20503,6 +20524,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_accounts_login_start(payload)
         if path == "/accounts/login/cancel":
             return self._route_accounts_login_cancel(payload)
+        if path == "/registration/start":
+            return self._route_registration_start(payload)
+        if path == "/registration/otp":
+            return self._route_registration_otp(payload)
+        if path == "/registration/captcha":
+            return self._route_registration_captcha(payload)
+        if path == "/registration/cancel":
+            return self._route_registration_cancel(payload)
+        if path == "/registration/devices/save":
+            return self._route_registration_devices_save(payload)
+        if path == "/registration/devices/generate":
+            return self._route_registration_devices_generate(payload)
+        if path == "/registration/batch/start":
+            return self._route_registration_batch_start(payload)
+        if path == "/registration/batch/cancel":
+            return self._route_registration_batch_cancel()
         if path == "/accounts/import/desktop":
             return self._route_accounts_import_desktop(payload)
         if path == "/accounts/refresh":
@@ -21010,6 +21047,107 @@ class Handler(BaseHTTPRequestHandler):
     def _route_accounts_login_cancel(self, payload):
         state = payload.get("state") or ""
         return self._json(200, {"cancelled": POOL.cancel_login(state)})
+
+    def _get_registration_status(self, query):
+        if REGISTRATIONS is None:
+            return self._error(503, "registration service unavailable")
+        job_id = (query.get("id") or [""])[0]
+        try:
+            after = int((query.get("after") or [0])[0] or 0)
+            return self._json(200, REGISTRATIONS.snapshot(job_id, after=after))
+        except KeyError as exc:
+            return self._error(404, str(exc), "invalid_request_error")
+        except (TypeError, ValueError) as exc:
+            return self._error(400, str(exc), "invalid_request_error")
+
+    def _get_registration_recent(self):
+        if REGISTRATIONS is None:
+            return self._error(503, "registration service unavailable")
+        return self._json(200, {"jobs": REGISTRATIONS.recent()})
+
+    def _get_registration_devices(self):
+        if DEVICES is None:
+            return self._error(503, "device management service unavailable")
+        return self._json(200, DEVICES.snapshot())
+
+    def _route_registration_start(self, payload):
+        if REGISTRATIONS is None:
+            return self._error(503, "registration service unavailable")
+        try:
+            job = REGISTRATIONS.start(payload)
+        except ValueError as exc:
+            return self._error(400, str(exc), "invalid_request_error")
+        except RuntimeError as exc:
+            return self._error(409, str(exc), "invalid_request_error")
+        log("protocol registration started (job=%s, phone=%s)" %
+            (job["id"][:8], job["phone"]), tag="accounts")
+        return self._json(202, job)
+
+    def _route_registration_otp(self, payload):
+        if REGISTRATIONS is None:
+            return self._error(503, "registration service unavailable")
+        try:
+            return self._json(200, REGISTRATIONS.submit_otp(
+                payload.get("id"), payload.get("otp")))
+        except KeyError as exc:
+            return self._error(404, str(exc), "invalid_request_error")
+        except ValueError as exc:
+            return self._error(400, str(exc), "invalid_request_error")
+
+    def _route_registration_captcha(self, payload):
+        if REGISTRATIONS is None:
+            return self._error(503, "registration service unavailable")
+        try:
+            return self._json(200, REGISTRATIONS.submit_captcha(
+                payload.get("id"), payload))
+        except KeyError as exc:
+            return self._error(404, str(exc), "invalid_request_error")
+        except ValueError as exc:
+            return self._error(400, str(exc), "invalid_request_error")
+
+    def _route_registration_cancel(self, payload):
+        if REGISTRATIONS is None:
+            return self._error(503, "registration service unavailable")
+        try:
+            return self._json(200, REGISTRATIONS.cancel(payload.get("id")))
+        except KeyError as exc:
+            return self._error(404, str(exc), "invalid_request_error")
+
+    def _route_registration_devices_save(self, payload):
+        if DEVICES is None:
+            return self._error(503, "device management service unavailable")
+        try:
+            return self._json(200, DEVICES.save(payload))
+        except ValueError as exc:
+            return self._error(400, str(exc), "invalid_request_error")
+        except RuntimeError as exc:
+            return self._error(409, str(exc), "invalid_request_error")
+
+    def _route_registration_devices_generate(self, payload):
+        if DEVICES is None:
+            return self._error(503, "device management service unavailable")
+        try:
+            return self._json(201, DEVICES.generate(payload))
+        except ValueError as exc:
+            return self._error(400, str(exc), "invalid_request_error")
+
+    def _route_registration_batch_start(self, payload):
+        if DEVICES is None:
+            return self._error(503, "device management service unavailable")
+        try:
+            result = DEVICES.start_batch(payload)
+        except ValueError as exc:
+            return self._error(400, str(exc), "invalid_request_error")
+        except RuntimeError as exc:
+            return self._error(409, str(exc), "invalid_request_error")
+        log("device registration batch started (batch=%s, total=%s)" %
+            (result["batch"]["id"][:8], result["batch"]["total"]), tag="accounts")
+        return self._json(202, result)
+
+    def _route_registration_batch_cancel(self):
+        if DEVICES is None:
+            return self._error(503, "device management service unavailable")
+        return self._json(200, DEVICES.cancel_batch())
 
     def _route_accounts_import_desktop(self, payload):
         # Two ways to call this:
@@ -21975,6 +22113,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         is_account_route = (
             path.startswith("/accounts/")
+            or path.startswith("/registration/")
             or path == "/realm"
             or path.startswith("/tasks")
             or path.startswith("/scheduler")
@@ -22579,7 +22718,7 @@ def _probe_running_instance(args):
     return False
 
 def _bootstrap_runtime(args):
-    global POOL, ACCOUNTS_DIR, API_KEY, SYSTEM_PROMPT
+    global POOL, REGISTRATIONS, DEVICES, ACCOUNTS_DIR, API_KEY, SYSTEM_PROMPT
     global API_KEY_FILE_SET, SCHEDULER, LOG_STORE
     api_key_generated = False
     API_KEY = args.api_key
@@ -22611,6 +22750,10 @@ def _bootstrap_runtime(args):
         log("panel      : password is still the default 'admin' - change it in the panel")
     POOL = wb_accounts.AccountPool(ACCOUNTS_DIR, log=log)
     POOL.load()
+    REGISTRATIONS = wb_registration.RegistrationManager(
+        ACCOUNTS_DIR, POOL, log=log, validate_account=probe_account)
+    DEVICES = wb_devices.DeviceManager(
+        ACCOUNTS_DIR, REGISTRATIONS, log=log)
     POOL.apply_proxy_slots()
     POOL.apply_reserve_credits()
     # WB_MAX_CONCURRENT_CHAT=auto: size the chat ceiling from the pool that was

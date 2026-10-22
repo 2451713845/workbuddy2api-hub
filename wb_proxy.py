@@ -15,6 +15,7 @@ Launchers: start-wb-proxy.bat / start-wb-proxy-lan.bat on Windows,
 start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
 """
 import argparse
+import base64
 import bisect
 import calendar
 import errno
@@ -15829,6 +15830,65 @@ def tool_name_of(tool):
     return str(tool.get("name") or "")
 
 
+# Codex remote compaction v2: the client sends the whole retained history plus a
+# `{"type":"compaction_trigger"}` item and expects exactly one `compaction`
+# output item back. The upstream Chat Completions API has no such concept, so
+# the gateway performs the summarization itself and stores the summary in the
+# item's opaque `encrypted_content` field. Codex replays that item verbatim on
+# later turns; `_responses_input_to_messages` below turns it back into a normal
+# context message, which is what makes a compacted thread continue correctly.
+COMPACTION_PROMPT = (
+    "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff "
+    "summary for another LLM that will resume the task.\n\n"
+    "Include:\n"
+    "- Current progress and key decisions made\n"
+    "- Important context, constraints, or user preferences\n"
+    "- What remains to be done (clear next steps)\n"
+    "- Any critical data, examples, or references needed to continue\n\n"
+    "Be concise, structured, and focused on helping the next LLM seamlessly "
+    "continue the work. Return only the summary."
+)
+
+COMPACTION_ITEM_TYPES = ("compaction", "compaction_summary", "context_compaction")
+
+
+def _has_compaction_trigger(payload):
+    """True when a Responses request is Codex's native compaction turn."""
+    if not isinstance(payload, dict):
+        return False
+    inp = payload.get("input")
+    if isinstance(inp, str):
+        return inp.strip() == "compaction_trigger"
+    if isinstance(inp, list):
+        return any(isinstance(item, dict) and item.get("type") == "compaction_trigger"
+                   for item in inp)
+    return False
+
+
+def _encode_compaction_summary(text):
+    """Pack a summary into the opaque string Codex stores and replays."""
+    raw = json.dumps({"v": 1, "summary": str(text or "")},
+                     ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _decode_compaction_summary(blob):
+    """Best-effort decode of a compaction item's `encrypted_content`."""
+    text = str(blob or "").strip()
+    if not text:
+        return ""
+    try:
+        padded = text + "=" * (-len(text) % 4)
+        obj = json.loads(base64.b64decode(padded).decode("utf-8"))
+        if isinstance(obj, dict) and isinstance(obj.get("summary"), str):
+            return obj["summary"]
+    except Exception:
+        pass
+    # A foreign provider may hand back plain text; keep it rather than drop the
+    # only copy of the summary.
+    return text
+
+
 def _responses_input_to_messages(payload):
     """Turn the Responses input items into chat messages."""
     messages = []
@@ -16039,6 +16099,23 @@ def _responses_input_to_messages(payload):
                         "content": ("[Message from another task - treat this as "
                                     "a user instruction]" + chr(10) + chr(10) + text),
                     })
+            elif itype in COMPACTION_ITEM_TYPES:
+                # A compaction result from an earlier turn. Codex replays it as
+                # an opaque item; to the upstream it is the handoff summary the
+                # rest of the conversation builds on, so keep it as a system
+                # message ahead of the replayed history.
+                summary = _decode_compaction_summary(item.get("encrypted_content"))
+                if summary.strip():
+                    messages.append({
+                        "role": "system",
+                        "content": ("Summary of the earlier conversation "
+                                    "(context checkpoint):" + chr(10) + chr(10)
+                                    + summary.strip()),
+                    })
+            elif itype == "compaction_trigger":
+                # The control item that asks for this compaction turn. It has no
+                # message payload of its own; the caller handles the request.
+                pass
             elif itype == "additional_tools":
                 # 由 responses_to_chat() 统一提取合并进 chat["tools"]，此处无需生成 message
                 pass
@@ -16048,9 +16125,37 @@ def _responses_input_to_messages(payload):
     return messages
 
 
-def responses_to_chat(payload):
+def _looks_like_compaction_prompt(messages):
+    """True when the client already asked for a handoff summary itself.
+
+    Codex's legacy `/responses/compact` sends the summarization prompt as the
+    last user message; the native v2 turn sends only the history and a
+    `compaction_trigger`. Adding our prompt in the first case would ask the
+    model to summarize twice.
+    """
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = message.get("content")
+        if isinstance(text, list):
+            text = " ".join(str((p or {}).get("text") or "") for p in text
+                            if isinstance(p, dict))
+        if "CONTEXT CHECKPOINT COMPACTION" in str(text or "").upper():
+            return True
+        break
+    return False
+
+
+def responses_to_chat(payload, compaction=False):
     """Translate a Responses API request body into a Chat Completions body."""
+    if not compaction:
+        compaction = _has_compaction_trigger(payload)
     messages = _responses_input_to_messages(payload)
+    if compaction and not _looks_like_compaction_prompt(messages):
+        # A compaction turn is a request to summarize, not to continue the task.
+        # Ask for the handoff summary directly and withhold the tools, so the
+        # model cannot spend the turn calling one.
+        messages.append({"role": "user", "content": COMPACTION_PROMPT})
     chat = {"model": payload.get("model"), "messages": messages}
     if preserve_request_contract_enabled():
         text = payload.get("text")
@@ -16088,7 +16193,7 @@ def responses_to_chat(payload):
     if isinstance(payload.get("tools"), list):
         raw_tools.extend(payload["tools"])
     raw_tools.extend(additional_tools_from_input(payload))
-    if raw_tools:
+    if raw_tools and not compaction:
         flat_tools, ns_map = expand_namespace_tools(raw_tools)
         chat["tools"] = _tools_for_chat(flat_tools)
         chat["_namespace_map"] = ns_map
@@ -16096,14 +16201,14 @@ def responses_to_chat(payload):
     # function（见 wb_webtools.install_tool_defs）。
     # 看板开关关闭时原样透传，客户端自己的同名工具不受影响。
     # 用合并后的清单：工具可能整份都在 additional_tools 里，只看顶层会漏。
-    if local_web_tools_enabled():
+    if local_web_tools_enabled() and not compaction:
         wants = wb_webtools.client_wants_web(raw_tools)
         if wants["search"] or wants["fetch"]:
             chat["tools"] = wb_webtools.install_tool_defs(chat.get("tools") or [], wants)
             chat["_web_tools"] = True
-    if payload.get("tool_choice"):
+    if payload.get("tool_choice") and not compaction:
         chat["tool_choice"] = payload["tool_choice"]
-    if payload.get("parallel_tool_calls") is not None:
+    if payload.get("parallel_tool_calls") is not None and not compaction:
         chat["parallel_tool_calls"] = payload["parallel_tool_calls"]
     return chat
 
@@ -20983,13 +21088,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_responses(self, payload):
         """Serve /v1/responses by translating to chat completions upstream."""
+        # A legacy `/responses/compact` call carries the summarization prompt in
+        # the body, not a `compaction_trigger`, so it counts as compaction too.
+        is_compact_path = self.path.split("?")[0].rstrip("/").endswith("/responses/compact")
+        compaction = is_compact_path or _has_compaction_trigger(payload)
         # The gateway is stateless: it keeps no store of previous responses,
         # so it cannot replay a prior turn. Silently ignoring the field would
         # answer a follow-up as if it were a fresh conversation - the client
         # gets a normal-looking reply with the context missing. Say so instead.
         # 拒绝 namespace 工具，逼 Codex fallback 成 flat 工具清单。
         # 不这样做的话，MCP／外挂工具全部会被 app 判定为不可执行。
-        if payload.get("previous_response_id"):
+        if payload.get("previous_response_id") and not compaction:
             return self._error(
                 400,
                 "previous_response_id is not supported: this gateway does not "
@@ -21005,7 +21114,7 @@ class Handler(BaseHTTPRequestHandler):
         all_tools = list(all_tools) if isinstance(all_tools, list) else []
         all_tools.extend(additional_tools_from_input(payload))
         custom_names = custom_tool_names(all_tools)
-        chat_req = responses_to_chat(payload)
+        chat_req = responses_to_chat(payload, compaction=compaction)
         ns_map = chat_req.pop("_namespace_map", None)
         # Echo these back on the response object; see chat_to_response.
         request_meta = {
@@ -21018,11 +21127,11 @@ class Handler(BaseHTTPRequestHandler):
         t_start = time.time()
         fp = prompt_fingerprint(chat_req.get("messages"))
         log(
-            "responses: model=%s stream=%s msgs=%d effort=%r tools=%d/%d custom_tools=%s key=%s"
+            "responses: model=%s stream=%s msgs=%d effort=%r tools=%d/%d custom_tools=%s compaction=%s key=%s"
             % (model, want_stream, len(chat_req.get("messages") or []),
                chat_req.get("reasoning_effort"),
                len(chat_req.get("tools") or []), len(all_tools),
-               sorted(custom_names) or "-", key_label(self._key_id()) or "-")
+               sorted(custom_names) or "-", compaction, key_label(self._key_id()) or "-")
         )
         try:
             explicit_realm = self._request_realm()
@@ -21089,6 +21198,10 @@ class Handler(BaseHTTPRequestHandler):
                                    " - add or enable one at the dashboard (/)")
             return self._error(502, f"upstream unreachable: {exc}")
         with upstream:
+            if compaction:
+                return self._responses_compaction_response(
+                    upstream, model, fp, account, t_start, want_stream,
+                    session_key=session_key, realm=req_realm)
             if want_stream:
                 return self._responses_stream_response(
                     upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
@@ -21098,6 +21211,100 @@ class Handler(BaseHTTPRequestHandler):
                 upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
                 base_body=chat_req, session_key=session_key, realm=req_realm,
                 effort=effort)
+
+    def _responses_compaction_response(self, upstream, model, fp, account, t_start,
+                                       want_stream, session_key=None, realm=None):
+        """Answer Codex remote compaction v2 with one `compaction` item.
+
+        Codex sends the full retained history plus `{"type":"compaction_trigger"}`
+        and requires exactly one compaction output item in the stream; the
+        provider's own compaction summary is opaque to it. The upstream is a
+        plain Chat Completions API, so the gateway asks for the handoff summary
+        itself (see COMPACTION_PROMPT) and hands it back in `encrypted_content`.
+        Returning ordinary text here makes Codex report `got 0 compaction output
+        items` and keeps the uncompacted history, which is how a long thread
+        walks past the model's window.
+        """
+        try:
+            chat_obj = aggregate_stream(upstream, model, None)
+        except Exception as exc:
+            record_error(model, 502, "compaction failed: %s" % exc,
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         account=account.uid, key=self._key_id())
+            return self._error(502, "upstream stream error: %s" % exc)
+        choice = (chat_obj.get("choices") or [{}])[0]
+        summary = str((choice.get("message") or {}).get("content") or "").strip()
+        if not summary:
+            record_error(model, 502, "compaction produced no summary",
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         account=account.uid, usage=chat_obj.get("usage"),
+                         stream=False, fp=fp, outcome="failed", key=self._key_id())
+            return self._error(
+                502, "compaction produced no summary (the model returned no text); retry")
+        wall = int((time.time() - t_start) * 1000)
+        record_upstream_usage(upstream, model, chat_obj.get("usage"), stream=False,
+                              elapsed_ms=wall, fp=fp, account=account.uid,
+                              key=self._key_id())
+        item = {
+            "id": _new_id("cmp_"),
+            "type": "compaction",
+            "encrypted_content": _encode_compaction_summary(summary),
+        }
+        usage = _responses_usage(chat_obj.get("usage")) or {}
+        if not want_stream:
+            obj = {
+                "id": _new_id("resp_"),
+                "object": "response",
+                "created_at": int(time.time()),
+                "status": "completed",
+                "model": model,
+                "output": [item],
+                "output_text": "",
+                "metadata": {},
+                "usage": usage,
+            }
+            return self._json(200, obj)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        if cors_origin_allowed(self.path):
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        resp_id = _new_id("resp_")
+        seq = 0
+
+        def ev(etype, payload):
+            nonlocal seq
+            seq += 1
+            data = {"type": etype, "sequence_number": seq}
+            data.update(payload)
+            body = json.dumps(data, ensure_ascii=False)
+            return ("event: " + etype + chr(10) + "data: " + body
+                    + chr(10) + chr(10)).encode("utf-8")
+
+        base = {
+            "id": resp_id,
+            "object": "response",
+            "created_at": int(time.time()),
+            "model": model,
+            "output": [item],
+            "output_text": "",
+            "metadata": {},
+        }
+        try:
+            self.wfile.write(ev("response.created", {"response": dict(base, status="in_progress", output=[])}))
+            self.wfile.write(ev("response.in_progress", {"response": dict(base, status="in_progress", output=[])}))
+            # Codex's remote-compaction collector only reads output_item.done;
+            # an `added` frame for this item would hand it an empty summary.
+            self.wfile.write(ev("response.output_item.done", {"output_index": 0, "item": item}))
+            self.wfile.write(ev("response.completed", {
+                "response": dict(base, status="completed",
+                                 usage=usage or {"input_tokens": 0, "output_tokens": 0}),
+            }))
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
 
     def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
         self.send_response(200)
@@ -21555,7 +21762,8 @@ class Handler(BaseHTTPRequestHandler):
         if not is_account_route and not is_messages_route and path not in (
                 "/v1/chat/completions", "/chat/completions",
                 "/v1/completions", "/completions",
-                "/v1/responses", "/responses"):
+                "/v1/responses", "/responses",
+                "/v1/responses/compact", "/responses/compact"):
             return self._error(404, "not found", "invalid_request_error")
         if is_messages_route:
             if not self._key_ok():
@@ -21632,7 +21840,8 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return self._error(400, background_request_message(reason),
                                    "invalid_request_error")
-        if path in ("/v1/responses", "/responses"):
+        if path in ("/v1/responses", "/responses",
+                    "/v1/responses/compact", "/responses/compact"):
             return self._handle_responses(payload)
         # Diagnostics: what the client actually asked for, and what we forward.
         # Only the knobs that change behaviour are logged - never message text.

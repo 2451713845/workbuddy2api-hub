@@ -68,7 +68,6 @@ import wb_activity
 import wb_atrest
 import wb_catalog
 import wb_egress
-import wb_entitlements
 import wb_ipintel
 import wb_logstore
 import wb_pricing
@@ -14398,7 +14397,6 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                                        proxy=account.proxy)
             _apply_stream_idle_timeout(resp, idle_timeout)
             account.note_success(model=model)
-            wb_entitlements.clear(ACCOUNTS_DIR, account.realm, model)
             if egress_backoff and not defer_egress_success:
                 # This outbound path just served a request, so its transient
                 # streak is over (same rule as the account's note_success).
@@ -14572,22 +14570,15 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 last_error = exc
                 continue
             if exc.code == 400:
-                detail = http_error_detail(exc)
-                code = upstream_error_code(detail)
-                if code == 11158:
-                    wb_entitlements.mark(
-                        ACCOUNTS_DIR, account.realm, model, code,
-                        user_type=wb_entitlements.user_type_from_detail(detail))
-                    log("model '%s' is not allowed for %s free tier (11158); marked"
-                        % (model, account.realm))
+                # A 400 is passed through unchanged. `11158` (model not allowed
+                # for this user type) used to be recorded here for the model
+                # catalogue label; the tier map from `/v3/config` now drives
+                # both the scheduler and that label, so the request never gets
+                # this far for a gated model.
                 raise
             if exc.code >= 500:
                 detail = http_error_detail(exc)
                 code = upstream_error_code(detail)
-                if code == 11158:
-                    wb_entitlements.mark(
-                        ACCOUNTS_DIR, account.realm, model, code,
-                        user_type=wb_entitlements.user_type_from_detail(detail))
                 if (code in MODEL_SCOPED_ERROR_CODES
                         and not model_scoped_errors_penalize_account()):
                     # A bad model name must not take the whole pool down. The
@@ -18428,11 +18419,20 @@ class Handler(BaseHTTPRequestHandler):
             data = [m for m in data
                     if models_available_for(m.get("id"),
                                             req_realm or CURRENT_REALM)]
-        marks = wb_entitlements.snapshot(ACCOUNTS_DIR, req_realm or CURRENT_REALM)
+        # #505: 单向标注——只说「免费账号不可用」，从不宣称可用。数据源就是
+        # 调度器拦人用的那份 tier map（上游目录的 `modelTiers`），所以标注与
+        # 实际拦截不可能互相矛盾：被门控的模型在本地就被拒，请求根本发不到
+        # 上游——这也是「撞到 11158 才写标」那条旧通道后来一直空着的原因。
+        # 没有标注 = 未知，不等于可用。
+        label_realm = req_realm or CURRENT_REALM
+        gate_at = wb_tiers.ingested_at(label_realm)
         for m in data:
-            ent = (marks.get(req_realm or CURRENT_REALM) or {}).get(m.get("id"))
-            if ent:
-                m["entitlement"] = ent
+            if wb_tiers.requires_pro(m.get("id"), label_realm):
+                m["entitlement"] = {
+                    "source": "catalog",
+                    "required": "standard",
+                    "at": gate_at,
+                }
         payload = {"object": "list", "data": data,
                    "realm": req_realm or CURRENT_REALM}
         # 来源说明（面板展示用）：这批清单是上游 API 实时取的，还是读的

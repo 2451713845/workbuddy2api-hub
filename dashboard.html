@@ -138,7 +138,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}
    单元格 nowrap 防止长模型 ID / 思考档位换行，超长用省略号兜底。 */
 #modelsTable{table-layout:fixed}
 #modelsTable th,#modelsTable td{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* 消费倍率列可能同时放「倍率」和「免费账号不可用」两枚胶囊；固定列宽下
+/* 消费倍率列可能同时放「倍率」和「Pro Only」两枚胶囊；固定列宽下
    nowrap 会把第二枚裁掉，允许换行只让这一类行变高（#527）。 */
 #modelsTable td.rate-cell{white-space:normal;line-height:1.8}
 #modelsTable td[data-label="思考档位"]{white-space:nowrap}
@@ -1523,6 +1523,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '任务福利': 'Task rewards',
     '任务说明': 'Task description',
     '会员类型:': 'Membership:',
+    '仅标记不可用，未标记不代表可用': 'only blocked models are labelled; an unlabelled model is not a promise',
+    '上游目录声明：该模型仅限 PRO 账号': 'Upstream catalogue: this model is PRO accounts only',
+    '目录刷新于': 'catalogue refreshed at',
+    '免费账号的请求会被本地拦下，不发往上游': 'free-account requests are refused locally and never sent upstream',
     '会话已失效，请重新输入密码': 'Session expired, please enter the password again',
     '住宅': 'Residential',
     '保存': 'Save',
@@ -6399,15 +6403,21 @@ function renderAvailableModels(){
         ? ' <span style="font-size:10px;color:var(--accent)">(夜间0.5x)</span>' : '';
       credBadge = '<span class="badge s">' + esc(raw) + night + '</span>';
     }
-    // #505: 只标「免费账号不可用」，不标「可用」。没有 entitlement 就什么都不显示。
+    // #505: 只标「Pro Only」（与上游徽章同名），不标「可用」。没有 entitlement 就什么都不显示。
+    // 标注由 /v1/models 给出：source=catalog 是上游目录 modelTiers 的声明（与
+    // 调度器拦人用的是同一份数据），source=runtime 是历史上真撞到过 11158。
     const ent = m.entitlement;
-    if(ent && Number(ent.code) === 11158){
-      const who = ent.userType ? ('user type ' + ent.userType) : '免费账号';
-      const when = ent.checked_at ? new Date(Number(ent.checked_at) * 1000).toLocaleString() : '';
-      const tip = '上游 ' + ent.code + ' · ' + who + (when ? (' · ' + when) : '')
-        + ' · 仅标记不可用，未标记不代表可用';
+    if(ent){
+      const stamp = ent.checked_at || ent.at;
+      const when = stamp ? new Date(Number(stamp) * 1000).toLocaleString() : '';
+      const tip = (ent.source === 'catalog')
+        ? ('上游目录声明：该模型仅限 PRO 账号（requiredUserType=standard）'
+           + (when ? (' · 目录刷新于 ' + when) : '')
+           + ' · 免费账号的请求会被本地拦下，不发往上游 · 仅标记不可用，未标记不代表可用')
+        : ('上游 ' + ent.code + ' · ' + (ent.userType ? ('user type ' + ent.userType) : '免费账号')
+           + (when ? (' · ' + when) : '') + ' · 仅标记不可用，未标记不代表可用');
       credBadge += ' <span class="badge warn" style="font-size:11px;background:var(--warn-soft);color:var(--warn);border-color:rgba(183,121,31,.35)" title="'
-        + esc(tip) + '">免费账号不可用</span>';
+        + esc(tip) + '">Pro Only</span>';
     }
 
     // 2. 模型能力 (Vision, Tool calls)

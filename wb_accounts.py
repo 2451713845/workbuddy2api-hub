@@ -79,6 +79,16 @@ def web_retry_backoff(round_index, base=None, cap=None):
     if base <= 0:
         return 0.0
     return min(base * (2 ** round_index), max(cap, base))
+#: 上游对单个账号同时存在的「活跃会话」（status=working）有硬上限，超过就拒绝
+#: 建会话：HTTP 429 / code 10105 "you have reached the maximum number of active
+#: conversations(10)"。每条会话跑完必须收尾，否则每天漏一条，十天后这个账号
+#: 就再也建不出会话（面板上表现为「每日活跃打卡」全部失败）。
+WEB_CONVERSATION_ACTIVE_LIMIT = 10
+#: 撞到上限时自动停掉的旧会话条数上限之外保留的活跃条数。留一点余量，别把用户
+#: 正在网页端使用的会话也停掉。
+WEB_CONVERSATION_PRUNE_KEEP = 8
+#: 上游把「还在跑」的会话记成这些状态；只有它们占活跃名额。
+WEB_CONVERSATION_ACTIVE_STATUSES = ("working", "creating", "pending")
 
 
 class TLSVerifyError(RuntimeError):
@@ -716,6 +726,22 @@ def _model_credit_rank(model, realm):
                 pass
         break
     return float("inf")
+
+
+def _active_conversation_limit(status, detail):
+    """Whether an upstream rejection means "no free active-conversation slot".
+
+    The console API answers HTTP 429 with code 10105 and a message like
+    "CreateConversation: 10105:you have reached the maximum number of active
+    conversations(10), please c...". Matching the code alone is enough, but the
+    message is checked too so a proxy that rewrites the body still gets the
+    recovery path instead of a bare 429.
+    """
+    if status != 429:
+        return False
+    text = str(detail or "")
+    return ("10105" in text
+            or "maximum number of active conversations" in text.lower())
 
 
 class Account(object):
@@ -2134,64 +2160,67 @@ class Account(object):
             "conversationOrigin": "workbuddy-app",
             "plugins": [{"name": "weixinpay", "marketplace": "codebuddy-builtin"}],
         }
-        req = urllib.request.Request(
-            WEB_CONVERSATIONS_URL,
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers=self.web_headers(), method="POST")
+        conversation, failure = self._web_conversation_create(body)
+        if failure and failure.get("limit"):
+            # 账号攒满了活跃会话：老版本每跑一次就漏一条、从不清尾，十天后连建都
+            # 建不出来。先停掉最旧的本网关会话把名额腾出来，再建一次；腾不出来就
+            # 直接告诉用户去网页端收尾，不再拿重试次数去撞同一堵墙。
+            freed = self.web_conversation_prune()
+            if freed:
+                conversation, failure = self._web_conversation_create(body)
+            if failure:
+                hint = ("已自动结束 %d 条旧会话" % freed) if freed \
+                    else "没有可自动结束的旧会话"
+                return {"ok": False,
+                        "error": "活跃会话已达上限（%d）：%s；请到 %s 网页端结束或删除"
+                                 "旧对话后重试"
+                                 % (WEB_CONVERSATION_ACTIVE_LIMIT, hint,
+                                    WEB_ORIGIN.replace("https://", "")),
+                        "retryable": False}
+        if failure:
+            return {"ok": False, "error": failure.get("message") or "建会话失败",
+                    "retryable": bool(failure.get("retryable"))}
+
+        keep = False
         try:
-            with urlopen(req, timeout=30, proxy=self.proxy) as resp:
-                payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
-        except urllib.error.HTTPError as exc:
+            # 建完只是排队：接上沙箱、请求这一轮，它才会真的跑起来（issue #90）。
             try:
-                detail = exc.read().decode("utf-8", "replace")
-            except Exception:
-                detail = str(exc)
-            return {"ok": False, "error": "HTTP %d: %s" % (exc.code, detail[:120]),
-                    "retryable": exc.code >= 500 or exc.code in (408, 429),
-                    "phase": "create"}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc), "retryable": True,
-                    "phase": "create"}
-        if not isinstance(payload, dict):
-            return {"ok": False, "error": "unexpected response", "retryable": True,
-                    "phase": "create"}
-        conversation = (payload.get("data") or {}).get("id")
-        if payload.get("code") not in (0, None) or not conversation:
-            return {"ok": False, "error": "code=%s msg=%s"
-                    % (payload.get("code"), payload.get("msg")),
-                    "retryable": False, "phase": "create"}
+                session = (self._web_conversation_get(conversation, "/session") or {}).get("data") or {}
+            except Exception as exc:
+                return {"ok": False, "conversation": conversation,
+                        "error": "session 查询失败: %s" % exc, "retryable": True,
+                        "phase": "session"}
+            link = session.get("link") or session.get("endpoint") or ""
+            token = session.get("token") or ""
+            session_id = session.get("sessionId") or session.get("session_id") or conversation
+            cwd = session.get("cwd") or "/workspace"
+            if not link or not token:
+                return {"ok": False, "conversation": conversation,
+                        "error": "沙箱未就绪（没有 link/token）", "retryable": True,
+                        "phase": "session"}
 
-        # 建完只是排队：接上沙箱、请求这一轮，它才会真的跑起来（issue #90）。
-        try:
-            session = (self._web_conversation_get(conversation, "/session") or {}).get("data") or {}
-        except Exception as exc:
-            return {"ok": False, "conversation": conversation,
-                    "error": "session 查询失败: %s" % exc, "retryable": True,
-                    "phase": "session"}
-        link = session.get("link") or session.get("endpoint") or ""
-        token = session.get("token") or ""
-        session_id = session.get("sessionId") or session.get("session_id") or conversation
-        cwd = session.get("cwd") or "/workspace"
-        if not link or not token:
-            return {"ok": False, "conversation": conversation,
-                    "error": "沙箱未就绪（没有 link/token）", "retryable": True,
-                    "phase": "session"}
-
-        result = wb_webagent.run_turn(
-            link, token, session_id, cwd, chosen_prompt,
-            WEB_USER_AGENT,
-            poll_status=lambda: self._web_conversation_status(conversation),
-            wait_seconds=wait_seconds, proxy=self.proxy,
-            model=model)
-        result["conversation"] = conversation
-        result["model"] = model
-        result["phase"] = "turn"
-        if result.get("ok"):
-            result["msg"] = "网页通道会话跑完（%s）：%d 段输出，%d ms" % (
-                model, result.get("chunks") or 0, result.get("elapsed_ms") or 0)
-        else:
-            result["retryable"] = True
-        return result
+            result = wb_webagent.run_turn(
+                link, token, session_id, cwd, chosen_prompt,
+                WEB_USER_AGENT,
+                poll_status=lambda: self._web_conversation_status(conversation),
+                wait_seconds=wait_seconds, proxy=self.proxy,
+                model=model)
+            result["conversation"] = conversation
+            result["model"] = model
+            result["phase"] = "turn"
+            if result.get("ok"):
+                keep = True
+                result["msg"] = "网页通道会话跑完（%s）：%d 段输出，%d ms" % (
+                    model, result.get("chunks") or 0, result.get("elapsed_ms") or 0)
+            else:
+                result["retryable"] = True
+            return result
+        finally:
+            # 收尾必须发生：不 stop 的话这条会话会一直占着上游的活跃名额，跑够十次
+            # 这个账号就再也建不出会话（HTTP 429 / 10105）。成功的一轮保留记录
+            # （stop 只把状态改成 completed），失败的一轮直接删掉，免得网页端历史
+            # 里堆满「Hi」。
+            self.web_conversation_release(conversation, delete=not keep)
 
     def _web_conversation_get(self, conversation, suffix=""):
         """读一条网页端会话（suffix 为空拿会话本身，"/session" 拿沙箱信息）。"""
@@ -2208,6 +2237,127 @@ class Account(object):
             return ""
         data = payload.get("data") if isinstance(payload, dict) else None
         return str((data or {}).get("status") or "")
+
+    # ---- 网页会话的收尾与名额回收 -----------------------------------------
+    # 上游对每个账号同时存在的活跃会话（status=working）有硬上限 10 条，而每条
+    # 每日活跃都会新建一条。只建不收尾的话，每天漏一条、每次重试再漏一条，攒满
+    # 十条之后 CreateConversation 直接 429 / 10105，打卡就再也做不成了。
+
+    def _web_conversation_call(self, conversation, action):
+        """对一条网页会话执行动作（stop / delete），返回上游是否接受。
+
+        清理是收尾动作，任何异常都不能冒泡：一轮已经跑完的活跃不能因为收尾失败
+        被改判成失败。
+        """
+        if not conversation:
+            return False
+        url = (WEB_CONVERSATIONS_URL + urllib.parse.quote(str(conversation))
+               + "/" + action)
+        req = urllib.request.Request(url, data=b"{}",
+                                     headers=self.web_headers(), method="POST")
+        try:
+            with urlopen(req, timeout=20, proxy=self.proxy) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        except Exception:
+            return False
+        return isinstance(payload, dict) and payload.get("code") in (0, None)
+
+    def web_conversation_release(self, conversation, delete=False):
+        """结束一条网页会话，释放它占的活跃名额。
+
+        默认只 stop：会话留在网页端历史里，状态从 working 变成 completed，名额
+        随即释放。delete=True 时再删掉它——失败轮次没有保留价值，删掉免得网页端
+        塞满「Hi」。
+        """
+        if not conversation:
+            return False
+        stopped = self._web_conversation_call(conversation, "stop")
+        if delete:
+            return self._web_conversation_call(conversation, "delete") or stopped
+        return stopped
+
+    def web_conversation_list(self, page_size=50):
+        """读账号的网页会话列表（上游按创建时间倒序返回）。"""
+        url = WEB_CONVERSATIONS_URL + "?page=1&pageSize=%d" % max(1, int(page_size))
+        req = urllib.request.Request(url, headers=self.web_headers(), method="GET")
+        with urlopen(req, timeout=20, proxy=self.proxy) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        data = (payload if isinstance(payload, dict) else {}).get("data") or {}
+        conversations = data.get("conversations")
+        return conversations if isinstance(conversations, list) else []
+
+    def _daily_activity_prompt_pool(self):
+        """本网关可能用作会话名的提示词（内置池 + 操作者自定义）。"""
+        pool = set(wb_webprompts.builtin_prompts())
+        try:
+            if self.path:
+                pool.update(wb_settings.daily_chat_web_prompts(
+                    os.path.dirname(self.path)))
+        except Exception:
+            pass
+        pool.add(DAILY_CHAT_WEB_PROMPT)
+        return pool
+
+    def web_conversation_prune(self, keep=WEB_CONVERSATION_PRUNE_KEEP):
+        """停掉最旧的活跃会话，把账号拉回上限以下；返回停掉的条数。
+
+        只在撞到 10105 时调用，用来收拾老版本漏下的会话。按创建时间从旧到新停，
+        且只动名字属于每日活跃提示词池的会话——用户自己在网页端的真实对话不碰。
+        stop 不是删除：会话仍在网页端历史里，只是不再占活跃名额。
+        """
+        try:
+            conversations = self.web_conversation_list()
+        except Exception:
+            return 0
+        active = [c for c in conversations
+                  if str((c or {}).get("status") or "").lower()
+                  in WEB_CONVERSATION_ACTIVE_STATUSES]
+        if len(active) < WEB_CONVERSATION_ACTIVE_LIMIT:
+            return 0
+        active.sort(key=lambda c: str((c or {}).get("createdAt") or ""))
+        pool = self._daily_activity_prompt_pool()
+        stopped = 0
+        for conversation in active:
+            if len(active) - stopped <= keep:
+                break
+            if str((conversation or {}).get("name") or "").strip() not in pool:
+                continue
+            if self._web_conversation_call(conversation.get("id"), "stop"):
+                stopped += 1
+        return stopped
+
+    def _web_conversation_create(self, body):
+        """建一条网页会话；返回 (会话 id, 失败信息)。
+
+        失败信息是 {"message": ..., "retryable": bool, "limit": bool}，limit 表示
+        「活跃会话已满」——调用方会先清理再重试一次。
+        """
+        req = urllib.request.Request(
+            WEB_CONVERSATIONS_URL,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers=self.web_headers(), method="POST")
+        try:
+            with urlopen(req, timeout=30, proxy=self.proxy) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", "replace")
+            except Exception:
+                detail = str(exc)
+            return None, {"message": "HTTP %d: %s" % (exc.code, detail[:120]),
+                          "retryable": exc.code >= 500 or exc.code in (408, 429),
+                          "limit": _active_conversation_limit(exc.code, detail)}
+        except Exception as exc:
+            return None, {"message": str(exc), "retryable": True, "limit": False}
+        if not isinstance(payload, dict):
+            return None, {"message": "unexpected response", "retryable": True,
+                          "limit": False}
+        conversation = (payload.get("data") or {}).get("id")
+        if payload.get("code") not in (0, None) or not conversation:
+            return None, {"message": "code=%s msg=%s" % (payload.get("code"),
+                                                         payload.get("msg")),
+                          "retryable": False, "limit": False}
+        return conversation, None
 
     def daily_chat(self, web=None, trigger="unknown"):
         """国际版每日活跃对话（官方每日活跃 30/50 积分）。

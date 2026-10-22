@@ -3169,6 +3169,11 @@ def remaining_priority_enabled():
     return wb_settings.remaining_priority_enabled(ACCOUNTS_DIR) is True
 
 
+def affinity_stable_key_enabled():
+    """更稳的会话粘滞键开关（默认关，关着时与上游逻辑一字不差）。"""
+    return wb_settings.affinity_stable_key_enabled(ACCOUNTS_DIR) is True
+
+
 def remaining_schedule_weights():
     """{(uid, model): 权重}：估计剩余接近耗尽的组合，权重 > 1。
 
@@ -10163,6 +10168,13 @@ def runtime_settings_view():
             wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
         "realm_fallback_enabled":
             wb_settings.realm_fallback_enabled(ACCOUNTS_DIR),
+        "account_max_concurrent":
+            wb_settings.account_max_concurrent(ACCOUNTS_DIR),
+        "account_max_concurrent_max":
+            wb_settings.ACCOUNT_MAX_CONCURRENT_MAX,
+        "account_inflight": account_inflight_snapshot(),
+        "affinity_stable_key_enabled":
+            wb_settings.affinity_stable_key_enabled(ACCOUNTS_DIR),
         "log_db_enabled": wb_settings.log_db_enabled(ACCOUNTS_DIR),
         "log_db_max_rows": wb_settings.log_db_max_rows(ACCOUNTS_DIR),
         "log_db_max_days": wb_settings.log_db_max_days(ACCOUNTS_DIR),
@@ -10266,6 +10278,14 @@ def affinity_route(messages):
     conversations whose client supplied its own session key). Both come from
     the same head hash, so every turn of a conversation agrees on its key and
     its page without any server-side state.
+
+    With ``affinity_stable_key_enabled`` the hashed head is longer: the default
+    head is [system, first user], which two conversations with the same opening
+    line share - they then overwrite each other's binding every turn and each
+    turn lands on the other one's account, dropping the prefix cache each time.
+    Adding the first assistant reply (and the user turn after it) makes the two
+    keys diverge from the second turn on. The switch is off by default so an
+    existing install keeps exactly the upstream behaviour and can roll back.
     """
     if not AFFINITY_BY_PREFIX:
         return None, None
@@ -10274,6 +10294,11 @@ def affinity_route(messages):
         if not msgs:
             return None, None
         head = msgs[:2]
+        if affinity_stable_key_enabled() and len(msgs) > 2:
+            # 只加「首条 assistant 回复」这一条：它是两个同开场白会话第一个必然
+            # 不同的地方，又只占一轮的 token，哈希开销可忽略。system 提示相同
+            # 时它同样稳定（同一会话每轮都能算出同一个键）。
+            head = msgs[:3]
         blob = json.dumps(head, ensure_ascii=False, sort_keys=True).encode("utf-8")
         digest = hashlib.sha256(blob).hexdigest()[:16]
         key = "pfx-" + digest
@@ -13535,10 +13560,108 @@ def gateway_hint(status, message):
 MAX_PRODUCT_SWITCHES = 4
 _SWITCH_LOG = {}
 
+# --------------------------------------------------- 账号级并发上限（可选）
+#
+# 上游按「账号 + 分钟」计 token，而一个大上下文会话单请求就带十几万 token。
+# 两个会话同时落在同一个账号上，一分钟内很容易过百万 token，上游回 429；网关
+# 随即把该账号停放 60 秒并换号，新账号没有这段对话的前缀缓存，缓存命中率从
+# 99% 掉到 0、TTFT 从 1.5s 涨到 5-6s —— 并发越高，每个请求反而越慢。
+#
+# 这里给每个账号一个「在飞名额」：名额满了就换下一个账号（不是排队等），
+# 这样两个会话会自然落到两个账号上，各自保留自己的前缀缓存。
+#
+# 默认 0 = 不限，派发行为与上游一字不差（见 wb_settings.account_max_concurrent）。
+_ACCOUNT_INFLIGHT = {}
+_ACCOUNT_INFLIGHT_LOCK = threading.Lock()
+
+
+def account_slot_acquire(account, limit=None):
+    """给这个账号占一个在飞名额。回传 True 表示占到了。
+
+    上限 <= 0（默认）时永远回传 True 且不记账：关闭状态下这条路径不产生任何
+    状态，也就不可能有泄漏。`limit` 由调用方在读设置时算好传进来，避免同一次
+    请求里「占名额时开关是开的、还名额时已经关了」这种不一致。
+    """
+    if limit is None:
+        limit = wb_settings.account_max_concurrent(ACCOUNTS_DIR)
+    if limit <= 0:
+        return True
+    with _ACCOUNT_INFLIGHT_LOCK:
+        current = _ACCOUNT_INFLIGHT.get(account.uid, 0)
+        if current >= limit:
+            return False
+        _ACCOUNT_INFLIGHT[account.uid] = current + 1
+        return True
+
+
+def account_slot_release(account):
+    """归还名额。必须与成功的 acquire 配对；关闭时是空操作。"""
+    if account is None:
+        return
+    with _ACCOUNT_INFLIGHT_LOCK:
+        current = _ACCOUNT_INFLIGHT.get(account.uid, 0)
+        if current <= 1:
+            _ACCOUNT_INFLIGHT.pop(account.uid, None)
+        else:
+            _ACCOUNT_INFLIGHT[account.uid] = current - 1
+
+
+def bind_account_slot_to_response(response, account):
+    """把在飞名额绑到响应对象的生命周期上。
+
+    名额必须一直占到「上游 body 读完/关掉」为止，而不是占到「拿到响应头」——
+    流式回复拿到头之后还要读几十秒，那段时间上游仍算这个账号在跑。响应对象的
+    close() 是唯一必然发生的终点（`with upstream:`、显式 close、客户端中断都走
+    它），所以把归还挂在 close 上，并加一次性保护防重复扣减。
+    """
+    if account is None:
+        return
+    if response is None:
+        # 没有响应对象可挂：没有终点可等，立刻归还，否则这个名额会永久泄漏。
+        account_slot_release(account)
+        return
+    released = [False]
+
+    def release_once():
+        if released[0]:
+            return
+        released[0] = True
+        account_slot_release(account)
+
+    try:
+        original_close = response.close
+    except Exception:
+        release_once()
+        return
+
+    def close_and_release(*args, **kwargs):
+        try:
+            return original_close(*args, **kwargs)
+        finally:
+            release_once()
+
+    try:
+        response.close = close_and_release
+    except Exception:
+        # 内置类型不接受实例属性赋值：退回「读完即还」，宁可早还也不能漏还。
+        release_once()
+
+
+def account_inflight_snapshot():
+    """{uid: 在飞数}，面板与测试用。"""
+    with _ACCOUNT_INFLIGHT_LOCK:
+        return dict(_ACCOUNT_INFLIGHT)
+
+
 #: 出口级退避在单次请求里最多睡这么久（见 wb_egress）：退避阶梯可以到十几秒，
 #: 但把一个客户端请求按住十几秒是不可接受的，所以只睡这个上限；共享计数器仍然
 #: 让并发请求一起变慢（这才是「一次短暂的全局退避」）。
 EGRESS_SLEEP_MAX = 5.0
+
+#: 固定账号（/u/<ref>/ 路由、流式中断原地重连）在名额占满时最多等这么久。
+#: 固定账号没法「换一个」，所以只能等；但这个等待必须有界，否则一个卡住的
+#: 流会把同账号的后续请求全部拖死。
+ACCOUNT_SLOT_WAIT_MAX = 2.0
 
 
 def auto_switch_product_enabled():
@@ -14315,18 +14438,76 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # 每次失败都把【出错的那个账号】从这段对话的历史里降级（demote），而不是
     # 忘掉整段对话：重选时优先回到还留着这段前缀的暖号（见 SessionAffinity），
     # 一次大 prompt 的冷启动比重选一次账号贵得多。
-    for _attempt in range(max_attempts):
+    # 账号级并发上限（可选，默认关）用到的「名额已满」账号。它与 tried 分开：
+    # tried 记的是「这一轮试过且失败」的账号，busy 只是「此刻没空」，等它的请求
+    # 结束后这个账号完全可用，不该被当成失败账号影响熔断或亲和。
+    busy = set()
+    # 当前这一轮已经占住、但还没交给调用方的账号名额。任何失败路径都要归还
+    # （循环开头统一处理），成功路径把它绑到响应对象上后置空。
+    slot_held = None
+    def pick_account():
+        """按当前 exclude/busy 选一个账号，并占住它的在飞名额。
+
+        名额上限关闭时 account_slot_acquire 恒真且不记账，这里与改动前完全等价。
+        """
+        nonlocal busy
+        while True:
+            exclude = tried | busy
+            kwargs = dict(realm=realm, session_key=session_key,
+                          exclude=exclude, model=model, page=affinity_page)
+            if allowed_accounts is not None:
+                kwargs["allowed"] = allowed_accounts
+            candidate = POOL.pick_for_session(**kwargs) if POOL else None
+            if candidate is None:
+                return None
+            if account_slot_acquire(candidate):
+                return candidate
+            busy.add(candidate.uid)
+            if len(busy) >= max(1, total):
+                # 池子里每个可用账号都满了：不再空转，交给上层排队/报错。
+                return None
+
+    attempt = 0
+    while True:
+        attempt += 1
+        if attempt > max_attempts:
+            break
+        # 上一轮拿到的名额如果没被交出去（任何 continue/break 都意味着这次尝试
+        # 没把响应交给调用方），在这里统一归还。成功路径会在 return 前把它绑到
+        # 响应对象上并清空这个标记，所以只有失败路径会走到这里。
+        if slot_held is not None:
+            account_slot_release(slot_held)
+            slot_held = None
         if pinned is not None:
             account = pinned if pinned.uid not in tried else None
+            # 固定账号（/u/<ref>/ 路由、流式中断后的原地重连）也要占名额，
+            # 否则下一轮开头的统一归还就会释放一个从未占过的名额。固定账号没有
+            # 「换一个」的余地，所以名额被占满时短暂等待，等不到就报池子忙。
+            if account is not None:
+                got = account_slot_acquire(account)
+                waited = 0.0
+                while not got and waited < ACCOUNT_SLOT_WAIT_MAX:
+                    time.sleep(0.05)
+                    waited += 0.05
+                    got = account_slot_acquire(account)
+                if not got:
+                    account = None
         elif refresh_uid is not None:
             account = pool_account(refresh_uid)
             refresh_uid = None
+            # 令牌刷新后的原地重试同样是「固定账号」：占不到名额就等，等不到
+            # 就放弃这一次尝试，不能凭空释放一个没占过的名额。
+            if account is not None:
+                got = account_slot_acquire(account)
+                waited = 0.0
+                while not got and waited < ACCOUNT_SLOT_WAIT_MAX:
+                    time.sleep(0.05)
+                    waited += 0.05
+                    got = account_slot_acquire(account)
+                if not got:
+                    account = None
         else:
-            pick_kwargs = dict(realm=realm, session_key=session_key,
-                               exclude=tried, model=model, page=affinity_page)
-            if allowed_accounts is not None:
-                pick_kwargs["allowed"] = allowed_accounts
-            account = POOL.pick_for_session(**pick_kwargs) if POOL else None
+            account = pick_account()
         if (account is None and pinned is None
                 and (transient_hits or local_net_hits)):
             # Pool rotation is bookkeeping, not an upstream attempt. Re-pick
@@ -14334,18 +14515,16 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             # Local DNS/route failures need the same bounded retry path.
             tried.clear()
             time.sleep(min(1.5 * (transient_hits or local_net_hits), 3.0))
-            pick_kwargs = dict(realm=realm, session_key=session_key,
-                               exclude=tried, model=model, page=affinity_page)
-            if allowed_accounts is not None:
-                pick_kwargs["allowed"] = allowed_accounts
-            account = POOL.pick_for_session(**pick_kwargs) if POOL else None
+            account = pick_account()
         if account is None:
             break
         if account.realm != realm:
             if session_key and POOL: POOL.affinity.demote(session_key, account.uid)
+            account_slot_release(account)
             continue
         tried.add(account.uid)
         last_uid = account.uid
+        slot_held = account
         cfg = wb_accounts.get_realm_config(account.realm)
         chat_url = account.chat_base_url() + CHAT_PATH
         # The cache key is account scoped, so it is rebuilt per candidate rather
@@ -14407,6 +14586,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 wb_egress.note_success(
                     wb_upstream_pool.egress_key(chat_url, account.proxy))
             reset_switch_counter(account, model)
+            # 名额交给响应对象：它一直占到上游 body 读完/关掉为止（流式回复拿到
+            # 头之后还要读几十秒，那段时间上游仍算这个账号在跑）。绑定后本地
+            # 标记置空，循环开头就不会再重复归还。
+            bind_account_slot_to_response(resp, account)
+            slot_held = None
             # The third element is the reasoning effort this request ran at: the
             # body is rebuilt per attempt, but the effort is a property of the
             # model and the request, and the callers record it on the usage row.
@@ -14680,6 +14864,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                    3.0 if total <= 1 else 60.0, account.fails, total))
             last_error = exc
             continue
+    # 循环可能从 break 退出（TLS 校验失败、已知硬错误），这时本轮占的名额还在
+    # 手上；成功路径已经在 return 前把它交给响应对象并置空，所以这里释放是安全的。
+    if slot_held is not None:
+        account_slot_release(slot_held)
+        slot_held = None
     # Only spend credits after every enabled, credential-bearing account in
     # this realm has a persisted upstream 6004 cap for this free model. The
     # switch is opt-in because the retry can incur real charges.
@@ -14757,6 +14946,15 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                   % (model, wb_settings.model_daily_token_limit(ACCOUNTS_DIR, realm)))
         raise RateLimited(None, reason,
                           wait=seconds_until_local_midnight(), message=reason)
+    if busy and last_error is None:
+        # 名额全满：账号本身完全健康，只是每个都在跑别的请求。必须报得比
+        # 「全部停用/冷却/过期」清楚——否则排查的人会去看账号状态，而真正
+        # 要做的只是等一两秒重发（或把上限调大）。
+        limit = wb_settings.account_max_concurrent(ACCOUNTS_DIR)
+        reason = ("every usable account is already serving %d concurrent "
+                  "request(s) (account_max_concurrent=%d); retry shortly or "
+                  "raise the cap" % (limit, limit))
+        raise RateLimited(None, reason, wait=1, message=reason)
     raise RuntimeError("no usable account for realm '%s': all are disabled, cooling down, "
                        "expired or parked by the daily token limit%s"
                        % (realm, pool_unavailable_detail(realm, model)))
@@ -19489,6 +19687,29 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_realm_fallback_enabled(ACCOUNTS_DIR, raw)
             reply["realm_fallback_enabled"] = raw
+        if "account_max_concurrent" in payload:
+            # 账号级并发上限：0 = 不限（默认，与上游一字不差）；1..10 = 每账号
+            # 同时最多几个 chat 请求。严格整数，字符串 "1" 不算数（它会被当成
+            # 布尔/字符串混进 settings.json，下次读出来就不是上限了）。
+            raw = payload.get("account_max_concurrent")
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return self._error(
+                    400, "account_max_concurrent must be a whole number",
+                    "invalid_request_error")
+            try:
+                value = wb_settings.set_account_max_concurrent(ACCOUNTS_DIR, raw)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            reply["account_max_concurrent"] = value
+        if "affinity_stable_key_enabled" in payload:
+            # 更稳的会话粘滞键：严格 JSON 布尔（字符串 "false" 会是真值）。
+            raw = payload.get("affinity_stable_key_enabled")
+            if not isinstance(raw, bool):
+                return self._error(
+                    400, "affinity_stable_key_enabled must be true or false",
+                    "invalid_request_error")
+            wb_settings.set_affinity_stable_key_enabled(ACCOUNTS_DIR, raw)
+            reply["affinity_stable_key_enabled"] = raw
         if "log_db_enabled" in payload or "log_db_max_rows" in payload \
                 or "log_db_max_days" in payload or "log_db_max_bytes" in payload:
             # 日志落库（默认关闭）：开关与三条保留上限一次提交里可以任选子集，

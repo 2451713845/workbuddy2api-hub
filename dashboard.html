@@ -398,6 +398,21 @@ table.account-cards tr.cool-row .cool-pill{display:inline-block;width:auto;max-w
   color:var(--accent);text-decoration:none;font-size:12px}
 .login-link:hover{border-color:var(--accent);background:var(--panel)}
 .hint{color:var(--dim);font-size:12px;margin:8px 0}
+/* 标题旁的「!」帮助标记：默认只是一个低调的圆圈，悬停/聚焦/展开时变亮。
+   说明文本放在旁边的 .help-detail 里，点它才展开（默认 hidden），所以不占
+   版面高度。只做点击展开，不再挂悬停气泡——点了就能看到说明，两个入口
+   同时出现反而挡视线。 */
+.help-mark{display:inline-flex;align-items:center;justify-content:center;
+  width:15px;height:15px;border-radius:50%;border:1px solid var(--line2);
+  color:var(--dim);font-size:10px;font-weight:700;line-height:1;cursor:pointer;
+  vertical-align:1px;margin-left:4px;user-select:none;transition:all .15s ease}
+.help-mark:hover,.help-mark:focus-visible{color:var(--accent);border-color:var(--accent);
+  background:var(--accent-soft);outline:none}
+.help-mark.open{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.help-detail{font-size:12px;line-height:1.6;color:var(--dim);margin-top:6px;
+  padding:8px 10px;border-left:2px solid var(--accent);background:var(--panel2);
+  border-radius:0 8px 8px 0;max-width:760px}
+.help-detail[hidden]{display:none}
 .step{display:flex;gap:10px;align-items:flex-start;margin:10px 0}
 .step .n{flex:0 0 20px;height:20px;border-radius:50%;background:var(--panel2);
   border:1px solid var(--line);color:var(--dim);font-size:11px;display:flex;
@@ -1924,6 +1939,21 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '传输类失败与 502/503/504 改记在「出口」而不是账号上：同一个出口的账号共用一个计数器，退避是秒级（1 秒起、翻倍、封顶 15 秒、带抖动），任一次成功即清零；账号级熔断（30 分钟起、翻倍到 6 小时）不再被一次链路抖动触发。500 与 401/403/429 仍走原路径。默认关闭。': 'Transport failures and 502/503/504 are charged to the egress instead of the account: accounts sharing one egress share one counter, the backoff is seconds-scale (1s, doubling, capped at 15s, jittered) and any success clears it; the account breaker (30 minutes, doubling to 6h) is no longer tripped by a link hiccup. 500 and 401/403/429 keep their old paths. Off by default.',
     '已启用：出口级瞬时失败退避': 'On: egress-level transient backoff',
     '已关闭出口级瞬时失败退避': 'Egress-level transient backoff off',
+'账号级并发上限': 'Per-account concurrency cap',
+'一个上游账号同时最多接几个请求。0 = 不限（默认，跟没这个功能一样）；1 = 一个账号同时只接一个；N = 一个账号最多同时接 N 个。': 'How many requests one upstream account may serve at once. 0 = unlimited (the default, same as having no such feature); 1 = one request per account at a time; N = up to N at once per account.',
+'整个池子能同时接多少 = 账号数 × N（本机 24 个账号：1 → 24 个，3 → 72 个，10 → 240 个）。超出这个数的请求不排队，直接回「每个账号都在忙」，客户端自己重试。': 'Total capacity = accounts x N (24 accounts here: 1 -> 24, 3 -> 72, 10 -> 240 simultaneous requests). Requests beyond that are not queued: they are answered straight away with "every account is busy" and the client retries.',
+'它只防「同一瞬间两个请求压到同一个账号上」（上游按账号+分钟计 token，压一起会回 429、账号被停放）。它治不了「两个开场白相同的会话每轮互换账号」——那种情况每轮都丢缓存，要靠下面的「更稳的会话粘滞键」。': 'It only prevents two requests landing on the same account at the same instant (the upstream meters tokens per account per minute, and piling up there earns a 429 plus a parked account). It does not fix two conversations with the same opening line swapping accounts every turn - those lose their cache each turn and need the stable conversation key below.',
+'1 和 2–10 的实际区别：只有 1 能保证两个同开场白的会话不会同时撞进同一个号；2 以上只是把总容量放大，两个会话又能同时进同一个号（该撞还是撞）；10 在 24 个账号下基本等于「不限」，除非真的同时有 240 个以上请求。日常两三个会话用不到它，保持 0 即可。': 'What 1 versus 2-10 actually changes: only 1 guarantees two conversations with the same opening never share an account at the same time; 2 and above merely raise the total capacity and let those two conversations land on one account again (they still collide); 10 is effectively "unlimited" with 24 accounts unless you really have 240+ simultaneous requests. For two or three everyday conversations you do not need it - leave it at 0.',
+'为什么需要：上游按「账号 + 分钟」计 token，而一个大上下文会话单请求就带十几万 token。两个会话同时压在一个账号上，一分钟内很容易过百万 token，上游回 429；网关随即停放该账号并换号，新账号没有这段对话的前缀缓存，缓存命中率从 99% 掉到 0、首字从 1.5 秒涨到 5-6 秒。设成 1 时两个会话各走各的账号，各自保留缓存。': 'Why this exists: the upstream meters tokens per account per minute, and one large-context turn already carries over a hundred thousand tokens. Two conversations on one account easily pass a million tokens a minute, so the upstream answers 429; the gateway then parks that account and switches, and the new account holds none of the conversation prefix, so the cache hit rate drops from 99% to 0 and time-to-first-byte goes from 1.5s to 5-6s. At 1 each conversation keeps its own account and its own cache.',
+'个 / 账号': 'per account',
+'已保存：账号并发不限': 'Saved: per-account concurrency unlimited',
+'请输入 0 到 10 的整数（0 = 不限）': 'Enter a whole number from 0 to 10 (0 = unlimited)',
+'更稳的会话粘滞键': 'Stable conversation key',
+'会话粘滞（同一段对话每轮回到同一个账号）默认只用「system 提示 + 首条提问」算会话键。两个开场白相同的会话会算出同一个键、共享同一个绑定槽，于是每轮互相覆盖、轮流换账号，缓存每轮归零。开启后把「首条 assistant 回复」也算进键里，两个会话从第 2 轮起各走各的账号。默认关闭，关着时与上游逻辑一字不差。': 'Sticky sessions (every turn of a conversation returning to the same account) key off the system prompt plus the first user message by default. Two conversations that open the same way hash to the same key, share one binding slot, overwrite each other every turn and swap accounts each turn, so the prefix cache is dropped every time. Turning this on also hashes the first assistant reply, so from the second turn on the two conversations keep separate accounts. Off by default: with it off the behaviour is byte-identical to upstream.',
+'代价：前缀真的完全相同的会话仍会共用一个账号（那本来就是最优的缓存共享）；开启后前两条消息的哈希变成前三条，正在进行的对话会一次性重新绑定账号（那一轮缓存掉一次）。': 'The cost: conversations whose prefixes really are identical still share an account (that is the best possible cache sharing anyway); turning it on changes the hash from two messages to three, so conversations already in flight are re-bound once (one turn loses its cache).',
+'启用更稳的会话键': 'Enable stable key',
+'已启用：会话键包含首条回复': 'On: the key includes the first reply',
+'已关闭：会话键只用前两条消息': 'Off: the key uses the first two messages',
     '上游响应头超时': 'Upstream response-header timeout',
     '单次尝试等上游返回响应头的上限（秒）。拿到响应头之前网关不会向客户端发出任何字节，所以这个值就是客户端要空等的时长：设得比客户端的首字节预算还大时，客户端会先断开（表现为 499 / 首字节迟迟不返回），而网关仍会按这个上限继续换账号重试。默认 120。': 'How long one attempt may wait for the upstream to send response headers (seconds). Nothing is sent to the client before those headers arrive, so this is exactly how long the client can end up waiting: set it above the client\'s first-byte budget and the client disconnects first (seen as a 499, or a first byte that never comes) while the gateway keeps retrying on the next account under the same limit. Default 120.',
     '调小的代价：上游偶尔确实算得慢的正常请求会被提前判失败、换账号重试，多消耗一次额度。建议不高于客户端的首字节预算。': 'The cost of lowering it: a normal request the upstream genuinely takes a long time to compute is failed early and retried on another account, spending one more unit of quota. Prefer a value no higher than the client\'s first-byte budget.',
@@ -5254,6 +5284,74 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">账号级并发上限 <em id="setAccountConcurrentState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              一个上游账号同时最多接几个请求。0 = 不限（默认，跟没这个功能一样）；1 = 一个账号同时只接一个；N = 一个账号最多同时接 N 个。
+            </div>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              整个池子能同时接多少 = 账号数 × N（本机 24 个账号：1 → 24 个，3 → 72 个，10 → 240 个）。超出这个数的请求不排队，直接回「每个账号都在忙」，客户端自己重试。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              它只防「同一瞬间两个请求压到同一个账号上」（上游按账号+分钟计 token，压一起会回 429、账号被停放）。它治不了「两个开场白相同的会话每轮互换账号」——那种情况每轮都丢缓存，要靠下面的「更稳的会话粘滞键」。
+            </div>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              1 和 2–10 的实际区别：只有 1 能保证两个同开场白的会话不会同时撞进同一个号；2 以上只是把总容量放大，两个会话又能同时进同一个号（该撞还是撞）；10 在 24 个账号下基本等于「不限」，除非真的同时有 240 个以上请求。日常两三个会话用不到它，保持 0 即可。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setAccountConcurrent" type="number" min="0" max="10" step="1" style="width:90px">
+              个 / 账号
+            </label>
+            <button onclick="saveAccountConcurrent(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">更稳的会话粘滞键 <span class="help-mark" role="button" tabindex="0" aria-label="功能说明" onclick="toggleHelpDetail('affinityStableKeyHelp', event)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleHelpDetail('affinityStableKeyHelp', event);}">!</span> <em id="setAffinityStableKeyState"></em></h2>
+            <div class="help-detail" id="affinityStableKeyHelp" hidden>
+              会话粘滞（同一段对话每轮回到同一个账号）默认只用「system 提示 + 首条提问」算会话键。两个开场白相同的会话会算出同一个键、共享同一个绑定槽，于是每轮互相覆盖、轮流换账号，缓存每轮归零。开启后把「首条 assistant 回复」也算进键里，两个会话从第 2 轮起各走各的账号。默认关闭，关着时与上游逻辑一字不差。
+              <br><br>
+              代价：前缀真的完全相同的会话仍会共用一个账号（那本来就是最优的缓存共享）；开启后前两条消息的哈希变成前三条，正在进行的对话会一次性重新绑定账号（那一轮缓存掉一次）。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setAffinityStableKey" type="checkbox" style="width:16px;height:16px">
+              启用更稳的会话键
+            </label>
+            <button onclick="saveAffinityStableKey(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">上游响应头超时 <em id="setHeaderTimeoutState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              单次尝试等上游返回响应头的上限（秒）。拿到响应头之前网关不会向客户端发出任何字节，所以这个值就是客户端要空等的时长：设得比客户端的首字节预算还大时，客户端会先断开（表现为 499 / 首字节迟迟不返回），而网关仍会按这个上限继续换账号重试。默认 120。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              调小的代价：上游偶尔确实算得慢的正常请求会被提前判失败、换账号重试，多消耗一次额度。建议不高于客户端的首字节预算。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setHeaderTimeout" type="number" min="1" step="1" style="width:90px">
+              秒
+            </label>
+            <button onclick="saveHeaderTimeout(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">日志落库 <em id="setLogDbState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               默认关闭：日志只留在内存（最新 2000 条，重启即失），与上游一致。开启后每条日志追加写入
@@ -8210,6 +8308,18 @@ function accountRow(a){
     + '</div>'
     + '</td></tr>'
     + alertRows;
+}
+
+// 「!」帮助标记的展开/收起：说明文本只写一份（在 .help-detail 里），
+// 点击标记才显示，再点一次收起。
+function toggleHelpDetail(id, evt){
+  if(evt && evt.stopPropagation) evt.stopPropagation();
+  const box = document.getElementById(id);
+  if(!box) return;
+  const willOpen = box.hasAttribute('hidden');
+  if(willOpen) box.removeAttribute('hidden'); else box.setAttribute('hidden', '');
+  const mark = document.querySelector('.help-mark[onclick*="' + id + '"]');
+  if(mark) mark.classList.toggle('open', willOpen);
 }
 
 // 悬停气泡（全局单例）。用自定义 DOM 而不是原生 title：原生 tooltip 由浏览器
@@ -11296,6 +11406,22 @@ async function loadSettings(showToast){
         egressBackoffState.textContent = egressBackoff ? '(已启用)' : '(未启用)';
         egressBackoffState.style.color = egressBackoff ? 'var(--accent2)' : 'var(--dim)';
       }
+      const accountConcurrent = (typeof data.account_max_concurrent === 'number') ? data.account_max_concurrent : 0;
+      const accountConcurrentInput = document.getElementById('setAccountConcurrent');
+      if(accountConcurrentInput) accountConcurrentInput.value = accountConcurrent;
+      const accountConcurrentState = document.getElementById('setAccountConcurrentState');
+      if(accountConcurrentState){
+        accountConcurrentState.textContent = accountConcurrent > 0 ? '(' + accountConcurrent + ' 个 / 账号)' : '(不限)';
+        accountConcurrentState.style.color = accountConcurrent > 0 ? 'var(--accent2)' : 'var(--dim)';
+      }
+      const affinityStableKey = data.affinity_stable_key_enabled === true;
+      const affinityStableKeyInput = document.getElementById('setAffinityStableKey');
+      if(affinityStableKeyInput) affinityStableKeyInput.checked = affinityStableKey;
+      const affinityStableKeyState = document.getElementById('setAffinityStableKeyState');
+      if(affinityStableKeyState){
+        affinityStableKeyState.textContent = affinityStableKey ? '(已启用)' : '(未启用)';
+        affinityStableKeyState.style.color = affinityStableKey ? 'var(--accent2)' : 'var(--dim)';
+      }
       SAVED_QUOTA_SCAN_MODELS = Array.isArray(data.quota_scan_models) ? data.quota_scan_models.slice() : [];
       QUOTA_SCAN_SELECTED = SAVED_QUOTA_SCAN_MODELS.slice();
       await loadQuotaScanCatalog();
@@ -12453,6 +12579,43 @@ async function saveWindowProbe(btn){
   try {
     await postJSON('/settings/save', {window_probe: value});
     toast(value ? '已启用：额度窗口到点自动请求' : '已关闭额度窗口探针', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveAffinityStableKey(btn){
+  const el = document.getElementById('setAffinityStableKey');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {affinity_stable_key_enabled: value});
+    toast(value ? '已启用：会话键包含首条回复' : '已关闭：会话键只用前两条消息', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+/* 账号级并发上限：0 = 不限，1..10 = 每账号同时几个。后端只接受整数，
+   空值/小数/非数字就地拦下，不送上去换 400。 */
+async function saveAccountConcurrent(btn){
+  const el = document.getElementById('setAccountConcurrent');
+  const raw = (el && el.value !== '') ? Number(el.value) : NaN;
+  const value = Math.floor(raw);
+  if(!isFinite(value) || value < 0 || value > 10){
+    toast('请输入 0 到 10 的整数（0 = 不限）', 'bad');
+    return;
+  }
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {account_max_concurrent: value});
+    toast(value > 0 ? ('已保存：每个账号同时最多 ' + value + ' 个请求') : '已保存：账号并发不限', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

@@ -16,6 +16,24 @@ import wb_settings
 from wb_tasks import do_cat_travel
 
 
+def _proxy_module():
+    """返回**正在运行的那一份** wb_proxy。
+
+    网关以 `python[w] wb_proxy.py` 启动时，主模块名为 `__main__`；模块里裸写
+    `import wb_proxy` 会再加载一份副本，副本的 LOG_STORE 是 None、区域暂停状态
+    也是另一份。调度器写的每条日志都会掉进黑洞，巡检看到的 `hold` 恒为 0。
+    """
+    import sys
+    main = sys.modules.get("__main__")
+    if main is not None and hasattr(main, "add_log_entry") and hasattr(main, "LOG_BUFFER"):
+        return main
+    cached = sys.modules.get("wb_proxy")
+    if cached is not None:
+        return cached
+    import wb_proxy as module
+    return module
+
+
 class Scheduler:
     def __init__(self, pool):
         self.pool = pool
@@ -58,7 +76,7 @@ class Scheduler:
             if len(self.logs) > 60:
                 self.logs = self.logs[-60:]
         try:
-            import wb_proxy
+            proxy = _proxy_module()
             # 任务/打卡/旅行类条目同时进入 tasks 模块日志，方便分类查看
             effective_tag = tag
             if not effective_tag:
@@ -67,7 +85,7 @@ class Scheduler:
                     effective_tag = "tasks"
                 else:
                     effective_tag = "scheduler"
-            wb_proxy.add_log_entry(f"[调度器] {msg}", tag=effective_tag)
+            proxy.add_log_entry(f"[调度器] {msg}", tag=effective_tag)
         except Exception:
             pass
 
@@ -319,8 +337,7 @@ class Scheduler:
                 continue
             # 区域级连坐暂停期间（同一窗口内多个账号被限制）整轮都不碰上游。
             try:
-                import wb_proxy
-                hold = wb_proxy.restriction_hold_remaining(acc.realm)
+                hold = _proxy_module().restriction_hold_remaining(acc.realm)
             except Exception:
                 hold = 0.0
             if hold > 0:

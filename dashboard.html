@@ -2101,6 +2101,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '检查失败': 'Check failed',
     '尚未检查': 'Not checked yet',
     '读取失败': 'Could not read',
+    '读取于': 'read at',
     '本月': 'This month',
     '本月 (This Month)': 'This month',
     '本月消耗 Token': 'Tokens used this month',
@@ -8175,6 +8176,25 @@ function accountRow(a){
       expBadge = '<span class="badge mini warn" style="font-size:10px;padding:1px 4px" title="最近套餐包将于 ' + esc(expEnd.slice(5,10)) + ' 到期 (剩' + Math.ceil(d) + '天)">7天内到期</span>';
     }
   }
+  // 账号档位（#505）读自上游计费摘要，包名原样显示（国际版 Free、国内版体验版），
+  // 与 workbuddy 官方叫法一致，不自造「免费 / 付费」标签。tier 为空 = 还没读过，
+  // 那是「未知」而不是免费，所以不画任何胶囊（企业号与被风控限制的号也是空）。
+  //
+  // 位置放在「版本」格里、区域徽章的正下方：这一格只有一枚区域徽章（实测 76px
+  // 宽、内容约 52px），是全表唯一还有余量又不会被别的元素挤到的地方。积分格
+  // 实测只有 120px，加了「临期 / 明细」就顶满；账号格里的次要信息行是 10px 的
+  // 可点击链接，胶囊挤在旁边既会被长名单推走、又容易被当成链接的一部分。
+  // 行高不受影响：账号格本来就比这一格高。
+  const tier = a.tier && typeof a.tier === 'object' ? a.tier : null;
+  const tierPkg = tier && tier.package ? String(tier.package) : '';
+  let tierBadge = '';
+  if(tierPkg){
+    const at = tier.checked_at ? new Date(tier.checked_at * 1000).toLocaleString() : '';
+    tierBadge = '<span class="badge mini' + (tier.paid === true ? ' ok' : '') + '"'
+      + ' title="会员类型: ' + esc(tierPkg) + (at ? ' · 读取于 ' + esc(at) : '') + '">'
+      + esc(tierPkg) + '</span>';
+  }
+  const tierBadgeBlock = tierBadge ? '<div style="margin-top:2px">' + tierBadge + '</div>' : '';
   const credText = cred
     ? ('<div class="credit-stack">'
        + '<div class="credit-main"><b>' + fmt(cred.remain) + '</b>'
@@ -8202,7 +8222,7 @@ function accountRow(a){
   // 有续行时给账号行打 has-alert：两行是同一块内容，中间不该有分割线（见 CSS）。
   const alertRows = coolRow(a) + limitRow(a);
   return '<tr' + (alertRows ? ' class="has-alert"' : '') + '>'
-    + '<td style="text-align:center;white-space:nowrap" data-label="版本">' + realmBadge + '</td>'
+    + '<td style="text-align:center;white-space:nowrap" data-label="版本">' + realmBadge + tierBadgeBlock + '</td>'
     + '<td style="text-align:left" data-label="账号">'
     // 账号名（大一号）+ 备注 chip 同一行；备注从独立一行收进账号后面。
     +   '<div class="acct-name-row">'
@@ -8212,7 +8232,7 @@ function accountRow(a){
           : '<span class="note-chip" title="点击添加备注，比如「批量」/「自用」" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">+ 备注</span>')
     +     '<span class="badge mini ' + (a.tasksEnabled ? 'ok' : 'off') + '" style="cursor:pointer;margin-left:6px" title="参与签到 / 成长任务 / 连登管家 / 猫猫旅行 / 国际版活跃；与 API 取号无关，点一下切换" onclick="toggleAccountTasks(&quot;' + uidAttr + '&quot;,' + (!a.tasksEnabled) + ')">任务' + (a.tasksEnabled ? '开' : '关') + '</span>'
     // 移动端专用：版本 + 状态徽章靠右同行（桌面隐藏，用表格自己的两列）。
-    +     '<span class="acct-mobile-badges">' + realmBadgeMobile + state + '</span>'
+    +     '<span class="acct-mobile-badges">' + realmBadgeMobile + state + tierBadge + '</span>'
     +   '</div>'
     // 次要信息收成一行：值截断到几个字符，完整值走悬浮气泡（data-tip）。
     +   '<div class="acct-meta mono">'

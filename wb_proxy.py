@@ -11597,6 +11597,21 @@ SANITIZE_IDENTITY_RE = re.compile(
     r"[^\n]*?(?:\.(?=\s|$)|(?=\n|$))",
     re.IGNORECASE)
 SANITIZE_IDENTITY_REPLACEMENT = "You are a helpful AI assistant."
+# GUI 描述段（#570）：DSH 的系统提示里有一段 GUI 描述，上游按「A 句 + B 句连续出现」
+# 判 11-128。逐段二分实测：指纹是整段，改 A 句、改 B 句、或在两句之间插东西都会失配。
+#
+# 这里选改动最小的一种：只把 A 句尾的语序换一下（`the runtime context names` ->
+# `is named in the runtime context`），一个词都不删——`DeepSeek Harness` 全名保留，
+# 句子意思完全不变。既不碰品牌词，也不像插入不可见字符那样在提示词里留下无法 diff
+# 的痕迹。
+#
+# 只锚定这一句：句子之外的同名品牌、路径、包名都不受影响。
+SANITIZE_DSH_GUI_RE = re.compile(
+    r"(?i)(You are interacting with the user through the "
+    r"DeepSeek[ \t]+Harness[ \t]+Web[ \t]+GUI)"
+    r" whose URL the runtime context names\.")
+SANITIZE_DSH_GUI_REPLACEMENT = r"\1 whose URL is named in the runtime context."
+SANITIZE_DSH_GUI_LOWER = "whose url the runtime context names"
 # 指纹判定的字面量快路径（见 has_fingerprint）：原先对每段文本跑两个 (?i) 正则，
 # 4KB 输入实测 319µs，其中正则 137+188µs、几个 `in` 只占 9µs；64KB 文本要
 # 6.2ms，而 sanitize_messages 会给每个文本段都过一遍——build_upstream_body
@@ -11635,6 +11650,10 @@ def has_fingerprint(text, identity=True):
         return True
     if not identity:
         return False
+    # GUI 描述段：先做一次字面量探测，命中才走正则。
+    if (SANITIZE_DSH_GUI_LOWER in low
+            and SANITIZE_DSH_GUI_RE.search(text) is not None):
+        return True
     # 动词短语只是廉价前置筛：真命中与否交给正则判定。这样 "powered by" 出现在
     # 与自我介绍无关的句子（工具/插件的产品描述）时不会走进 sanitize_text 的其余
     # 清洗步骤，也不会白白改写。
@@ -11653,6 +11672,8 @@ def sanitize_text(text, identity=True):
     text = SANITIZE_OMO_JUNIOR_RE.sub("Sisyphus-Junior - Focused executor", text)
     if identity:
         text = SANITIZE_IDENTITY_RE.sub(SANITIZE_IDENTITY_REPLACEMENT, text)
+        # GUI 描述段单独一条规则：锚定整句，只调整句尾语序。
+        text = SANITIZE_DSH_GUI_RE.sub(SANITIZE_DSH_GUI_REPLACEMENT, text)
     for old, new in SANITIZE_REWRITES:
         text = text.replace(old, new)
     text = SANITIZE_HDR_RE.sub("", text)

@@ -2,40 +2,15 @@
 FROM python:3.11-alpine
 
 # Set environment
-ENV PYTHONUNBUFFERED=1 \
-    HOST=0.0.0.0 \
-    PORT=8788 \
-    API_KEY= \
-    WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn \
-    TZ=Asia/Shanghai \
-    CHROMIUM_PATH=/usr/bin/chromium-browser \
-    CHROMEDRIVER_PATH=/usr/bin/chromedriver \
-    CAPSOLVER_API_KEY=
+ENV PYTHONUNBUFFERED=1     HOST=0.0.0.0     PORT=8788     API_KEY=     TZ=Asia/Shanghai
 
 WORKDIR /app
 
 # Alpine timezone & certs
-RUN apk add --no-cache \
-      tzdata \
-      ca-certificates \
-      chromium \
-      chromium-chromedriver \
-      font-noto-cjk \
-    && cp /usr/share/zoneinfo/${TZ} /etc/localtime \
-    && echo "${TZ}" > /etc/timezone
+RUN apk add --no-cache tzdata ca-certificates &&     cp /usr/share/zoneinfo/${TZ} /etc/localtime &&     echo "${TZ}" > /etc/timezone
 
-# curl_cffi provides the native Chrome TLS/HTTP2 impersonation used by the
-# protocol-registration page. Keep the version pinned so chrome150 remains a
-# deterministic transport contract across image rebuilds.
-RUN pip install --no-cache-dir \
-      curl_cffi==0.16.3 \
-      "selenium>=4.30,<5" \
-      "Pillow>=11,<14" \
-      "numpy>=2,<3"
-
-# Copy application files and the isolated protocol client package.
+# Copy application files (Zero external pip dependencies needed)
 COPY wb_*.py dashboard.html ./
-COPY workbuddy_protocol ./workbuddy_protocol
 
 # Create data directories
 RUN mkdir -p /app/accounts /app/usage

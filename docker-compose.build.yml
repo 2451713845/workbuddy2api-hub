@@ -11,9 +11,6 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8788
-      - WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn
-      # Tencent CAPTCHA automatic continuation (CapSolver VisionEngine).
-      # - CAPSOLVER_API_KEY=CAP-...
       # - API_KEY=your_secret_key
       - TZ=Asia/Shanghai
     volumes:

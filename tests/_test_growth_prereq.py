@@ -14,7 +14,6 @@ import os
 import sys
 import unittest
 import urllib.error
-from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -131,51 +130,6 @@ class GrowthPrereqTests(unittest.TestCase):
         self.assertEqual(T.TASK_SPECS["first_buddy"]["kind"], "chat")
         self.assertEqual(T.TASK_SPECS["first_buddy"]["reward"], 300)
         self.assertTrue(T.TASK_SPECS["wb_wechat_oa_subscribe_task"]["unforgeable"])
-
-    def test_external_task_is_accepted_then_claimed_after_real_completion(self):
-        state = {"status": "not_accepted"}
-        calls = []
-
-        def fetch(acc):
-            current = 1 if state["status"] in ("completed", "claimed") else 0
-            return [_task("wb_wechat_oa_subscribe_task", status=state["status"],
-                          current=current, target=1)]
-
-        def accept(acc, codes, chunk=20):
-            calls.append(("accept", tuple(codes)))
-            state["status"] = "accepted"
-            return {"ok": True, "accepted": list(codes), "failed": [], "msg": "",
-                    "reasons": []}
-
-        def claim(acc, code):
-            calls.append(("claim", code))
-            state["status"] = "claimed"
-            return {"ok": True, "credit": 100}
-
-        original = (T.fetch_growth_tasks, T.accept_tasks, T.claim_task,
-                    T.report_events, T.do_cat_travel)
-        T.fetch_growth_tasks = fetch
-        T.accept_tasks = accept
-        T.claim_task = claim
-        T.report_events = lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("外部条件任务不应伪造进度"))
-        T.do_cat_travel = lambda acc: {"ok": True, "msg": "ok"}
-        try:
-            first = T.run_growth_tasks(FakeAccount(), gap=0)
-            self.assertEqual(state["status"], "accepted")
-            self.assertEqual(first["earned_credit"], 0)
-            self.assertEqual(calls, [("accept", ("wb_wechat_oa_subscribe_task",))])
-
-            # 模拟用户满足真实条件后，上游在次日巡检中返回 completed。
-            state["status"] = "completed"
-            second = T.run_growth_tasks(FakeAccount(), gap=0)
-        finally:
-            (T.fetch_growth_tasks, T.accept_tasks, T.claim_task,
-             T.report_events, T.do_cat_travel) = original
-
-        self.assertEqual(state["status"], "claimed")
-        self.assertEqual(second["earned_credit"], 100)
-        self.assertIn(("claim", "wb_wechat_oa_subscribe_task"), calls)
 
     def test_travel_without_buddy_is_friendly(self):
         calls = []
@@ -349,51 +303,6 @@ class GrowthPrereqTests(unittest.TestCase):
         self.assertEqual(events[0]["id"], "ex_xQHHD1u5Jkua")
         self.assertEqual(events[0]["name"], "无畏契约拼豆专家")
         self.assertEqual(earned, 100)
-
-    def test_all_rewards_runs_every_reward_stage(self):
-        class RewardAccount(FakeAccount):
-            def __init__(self):
-                super().__init__()
-                self.credits = {"remain": 3450}
-
-            def is_enterprise(self):
-                return False
-
-            def can_checkin(self):
-                return True
-
-            def checkin(self, trigger=""):
-                self.assert_trigger = trigger
-                return {"ok": True, "msg": "checked"}
-
-            def can_report_activity(self):
-                return True
-
-            def report_activity(self):
-                return {"ok": True, "msg": "reported"}
-
-            def fetch_credits(self):
-                return {"ok": True, "remain": self.credits["remain"]}
-
-        account = RewardAccount()
-        with mock.patch.object(T, "run_growth_tasks", return_value={
-                "ok": True, "msg": "growth done", "earned_credit": 1450,
-                "logs": ["growth log"],
-        }) as growth, mock.patch.object(T, "run_streak_bonus", return_value={
-                "ok": True, "msg": "streak done", "logs": ["streak log"],
-        }) as streak, mock.patch.object(T, "run_night_growth", return_value={
-                "ok": True, "earned_credit": 100, "logs": ["night log"],
-        }) as night:
-            result = T.run_all_rewards(account, trigger="registration", gap=0)
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["earned_credit"], 1550)
-        self.assertEqual(result["remain"], 3450)
-        self.assertEqual(account.assert_trigger, "registration")
-        self.assertIn("growth log", result["logs"])
-        growth.assert_called_once_with(account, gap=0, claim=True)
-        streak.assert_called_once_with(account)
-        night.assert_called_once_with(account)
 
 
 if __name__ == "__main__":

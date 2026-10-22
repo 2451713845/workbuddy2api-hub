@@ -82,20 +82,6 @@ check(
 )
 check("names preserved", [s["name"] for s in again] == ["one", "two"], again)
 
-# The registration page saves the proxy textarea as URL-only entries. Saving
-# unchanged URLs must not churn ids, because accounts persist their binding by
-# slot id.
-url_only = S.set_proxy_slots(
-    d,
-    [{"url": item["url"], "enabled": item["enabled"]} for item in again],
-)
-check(
-    "URL-only bulk save preserves existing ids",
-    [s["id"] for s in url_only] == [s["id"] for s in again],
-    url_only,
-)
-again = url_only
-
 print()
 print("[3] new ids never collide with existing ones")
 saved2 = S.set_proxy_slots(d, again + [{"name": "three", "url": "http://x:3"}])

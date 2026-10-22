@@ -17583,6 +17583,16 @@ def _release_key_slot(key_entry):
         else:
             _key_active_concurrency.pop(k_id, None)
 
+# 面板上「不带参数」的 POST 按钮：按钮会带一个 `{}` body，而路由从不解析它。
+# 这些 body 必须在分发前排空 —— 否则那 2 个字节留在 socket 里，同一条 keep-alive
+# 连接上的下一个请求会以 "{}GET /usage?..." 进场 → 501，面板那一轮轮询白丢（日志里
+# 是 `code 501, message Unsupported method ('{}GET')`，紧跟在一条 200 的 POST
+# 之后一两秒）。集中一处是因为按路由各写一遍已经漏过两回：/console/toggle 与
+# /shutdown 修好之后，/updates/check、/updates/install、/quota-scan/run 又漏了。
+# 新增这类「不读 body」的面板路由，请加进这个元组，别在路由里另写一份。
+BODYLESS_PANEL_POSTS = ("/console/toggle", "/shutdown", "/updates/check",
+                        "/updates/install", "/quota-scan/run")
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # 关掉 Nagle（对连接设 TCP_NODELAY）：响应头和响应体是两次独立 write，Nagle
@@ -17798,6 +17808,9 @@ class Handler(BaseHTTPRequestHandler):
         headers = getattr(self, "headers", None)
         if headers is None:
             return
+        # 排空即视为「body 已取走」：分发处排空过一次之后，路由里的 _error() 还会
+        # 再调一次，重复读同一段 Content-Length 字节会一直等到客户端放弃。
+        self._body_consumed = True
         transfer_encoding = (headers.get("Transfer-Encoding") or "").lower()
         try:
             if "chunked" in transfer_encoding:
@@ -18341,21 +18354,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, {"supported": True, "mode": "web", "visible": False})
 
     def _route_console_toggle(self):
-        # 按钮请求均携带 `{}` body 但不解析：必须把残留字节读掉，否则同一条
-        # keep-alive 连接上的下一个请求会以 "{}POST /console/toggle" 进场 →
-        # 501（2026-10-16 面板连点按钮实测）。顺序与 _error 相同：先应对
-        # Expect: 100-continue，否则排空会等待一个永远不会发出的 body。
-        self._handle_expect_continue()
-        self._discard_body()
+        # 按钮的 `{}` body 已在 do_POST 分发前排空（见 BODYLESS_PANEL_POSTS）。
         # 兼容旧面板：新面板直接 window.open，不再请求这里。
         return self._json(200, {"ok": True, "mode": "web",
                                 "url": "/dashboard?tab=logs", "visible": False})
 
     def _route_shutdown(self):
-        # 同 toggle：按钮的 `{}` body 不解析也必须排空，否则它会污染同一条
-        # keep-alive 连接上的下一个请求（连点触发 501）。
-        self._handle_expect_continue()
-        self._discard_body()
+        # 同 toggle：按钮的 `{}` body 已在 do_POST 分发前排空（见 BODYLESS_PANEL_POSTS）。
         # 回响应、延迟退出：0.4s 让 _json 的 body 先 flush 到 socket；端口
         # 随进程释放，下次启动走原来的启动脚本。
         def _bye():
@@ -21408,6 +21413,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self._apply_pinned_route():
             return
         path = self.path.split("?")[0]
+        if path in BODYLESS_PANEL_POSTS:
+            # 这一组路由不解析 body，但面板按钮确实会发一个 `{}`：不在这里排空，
+            # 残留字节就会成为同一条连接上下一个请求的请求行（见 BODYLESS_PANEL_POSTS
+            # 的注释）。顺序与 _error() 相同：先应对 `Expect: 100-continue`，否则客户端
+            # 根本不发 body，排空会一直等一个永远不会到的载荷。
+            self._handle_expect_continue()
+            self._discard_body()
         if path == "/console/toggle":
             # Panel-only management write: 收起/唤出本进程自己的控制台窗口，
             # 与设置、定价那几个写入同一个门。按钮带 `{}` body，

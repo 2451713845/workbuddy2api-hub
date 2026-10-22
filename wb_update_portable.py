@@ -224,6 +224,33 @@ def validate_stage(stage, version, root_name):
     return manifest
 
 
+def profile_files(manifest, profile=None):
+    """The file list one deployment profile owns (issue #573).
+
+    A portable package owns the whole manifest: launchers, the aliyun updater
+    units and the bundled pricing snapshot are all part of it. An image /
+    rootfs deployment only owns the app layer it runs, and writing the rest
+    into it creates files the image never had - `pricing/pricing.json` then
+    shadows the snapshot inlined in wb_pricing.py with nothing to keep the two
+    in sync. `None` keeps the historical full-list behaviour, so an executor
+    that predates this feature behaves exactly as before.
+    """
+    files = manifest["files"]
+    if not profile:
+        return list(files)
+    profiles = manifest.get("profiles")
+    if not isinstance(profiles, dict):
+        raise UpdateError("更新包不支持部署档位 %s" % profile)
+    chosen = profiles.get(profile)
+    if not isinstance(chosen, list) or not chosen:
+        raise UpdateError("更新包没有部署档位 %s" % profile)
+    keep = {rel for rel in chosen if isinstance(rel, str)}
+    selected = [rel for rel in files if rel in keep]
+    if "wb_proxy.py" not in selected or "dashboard.html" not in selected:
+        raise UpdateError("部署档位 %s 缺少应用层文件" % profile)
+    return selected
+
+
 def backup_current(root, package, files, version):
     backup = os.path.join(root, UPDATES_DIR, "backup-" + version)
     os.makedirs(backup, exist_ok=True)
@@ -242,13 +269,17 @@ def backup_current(root, package, files, version):
         shutil.copy2(current_manifest, os.path.join(backup, MANIFEST_NAME))
     with open(os.path.join(backup, "backup.json"), "w",
               encoding="utf-8", newline="\n") as fh:
-        json.dump({"version": version, "saved": saved, "absent": absent}, fh)
+        # `files` records the set this run actually manages: a profile-filtered
+        # update backs up fewer files than the manifest lists, and
+        # backup_complete has to compare against this, not the manifest (#573).
+        json.dump({"version": version, "files": list(files),
+                   "saved": saved, "absent": absent}, fh)
     return backup, saved, absent
 
 
-def apply_stage(stage, root, package, manifest):
+def apply_stage(stage, root, package, manifest, files=None):
     source_root = os.path.join(stage, manifest["root"])
-    for rel in manifest["files"]:
+    for rel in (manifest["files"] if files is None else files):
         src = os.path.join(source_root, *rel.split("/"))
         dst = os.path.join(root, *rel.split("/"))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -348,6 +379,23 @@ def _served_version(path):
     return match.group(1) if match else ""
 
 
+def _backup_managed_files(backup):
+    """The file set this backup claims to manage, or None for older backups.
+
+    Backups written before #573 have no `files` key; they were always the full
+    manifest, so callers fall back to comparing against that.
+    """
+    try:
+        with open(os.path.join(backup, "backup.json"), encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return None
+    files = meta.get("files") if isinstance(meta, dict) else None
+    if not isinstance(files, list) or not all(isinstance(x, str) for x in files):
+        return None
+    return files
+
+
 def backup_version(backup):
     """The version a backup would *restore*, read from its own wb_proxy.py.
 
@@ -381,15 +429,22 @@ def backup_complete(backup, dir_version=None):
             return False, "备份缺少文件 %s" % rel
     if not re.fullmatch(r"\d+\.\d+\.\d+", backup_version(backup)):
         return False, "备份里的 wb_proxy.py 没有可识别的版本"
-    manifest = os.path.join(backup, MANIFEST_NAME)
-    if os.path.isfile(manifest):
-        try:
-            with open(manifest, encoding="utf-8") as fh:
-                files = json.load(fh).get("files")
-        except (OSError, ValueError, TypeError):
-            files = None
-        if isinstance(files, list) and len(files) != len(saved) + len(absent):
-            return False, "备份文件数与 manifest 不一致"
+    # A profile-filtered backup manages fewer files than the manifest lists,
+    # so the recorded set wins when the backup has one (#573).
+    managed = _backup_managed_files(backup)
+    if managed is not None:
+        if len(managed) != len(saved) + len(absent):
+            return False, "备份文件数与备份记录不一致"
+    else:
+        manifest = os.path.join(backup, MANIFEST_NAME)
+        if os.path.isfile(manifest):
+            try:
+                with open(manifest, encoding="utf-8") as fh:
+                    files = json.load(fh).get("files")
+            except (OSError, ValueError, TypeError):
+                files = None
+            if isinstance(files, list) and len(files) != len(saved) + len(absent):
+                return False, "备份文件数与 manifest 不一致"
     return True, ""
 
 
@@ -686,8 +741,14 @@ def request_rollback(version, current_version, port=8788, lan=False):
 
 
 def run_update(root, package, tag, version, port, lan, pid, repo,
-               status_file=None, start_service_fn=_UNSET, keep_backups=1):
-    """Helper entry point: download, verify, apply, restart, roll back."""
+               status_file=None, start_service_fn=_UNSET, keep_backups=1,
+               profile=None):
+    """Helper entry point: download, verify, apply, restart, roll back.
+
+    `profile` selects a manifest sub-list (see profile_files). Portable
+    packages leave it unset; an image / rootfs deployment passes "app" so the
+    update only touches the layer that deployment actually runs (#573).
+    """
     if start_service_fn is _UNSET:
         start_service_fn = start_service
     state = {"applied": False, "stopped": False, "backup": None,
@@ -727,10 +788,11 @@ def run_update(root, package, tag, version, port, lan, pid, repo,
             raise UpdateError("更新包缺少 root")
         safe_extract(zip_path, stage, root_name)
         manifest = validate_stage(stage, version, root_name)
+        files = profile_files(manifest, profile)
 
         mark("backing_up", "正在备份程序文件")
         backup, saved, absent = backup_current(root, package,
-                                               manifest["files"], version)
+                                               files, version)
         state.update({"backup": backup, "saved": saved, "absent": absent})
 
         mark("stopping", "正在停止网关")
@@ -741,7 +803,7 @@ def run_update(root, package, tag, version, port, lan, pid, repo,
             raise UpdateError("端口 %s 未在超时内释放" % port)
 
         mark("applying", "正在安装程序")
-        apply_stage(stage, root, package, manifest)
+        apply_stage(stage, root, package, manifest, files)
         state["applied"] = True
 
         mark("restarting", "正在重启网关")

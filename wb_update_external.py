@@ -59,6 +59,10 @@ def main(argv=None):
                                                "/run/workbuddy2api-hub-updater"))
     parser.add_argument("--repo", default=os.environ.get("WB_UPDATE_REPO", ""))
     parser.add_argument("--root", default=os.environ.get("WB_APP_ROOT", "/app"))
+    # "app" = only wb_*.py + dashboard.html (image / rootfs deployments);
+    # empty = the full portable manifest, the historical behaviour (#573).
+    parser.add_argument("--profile",
+                        default=os.environ.get("WB_UPDATE_PROFILE", ""))
     # -1 = read the panel's setting from the app's own settings.json.
     parser.add_argument("--keep-backups", type=int, default=-1)
     args = parser.parse_args(argv)
@@ -96,6 +100,7 @@ def main(argv=None):
             raise UpdateError("更新目标目录无效: %s" % root)
         pid = int(payload.get("pid") or 0)
         port = int(payload.get("port") or 8788)
+        profile = str(payload.get("profile") or args.profile or "").strip().lower()
         if pid <= 0:
             raise UpdateError("更新请求缺少 pid")
     except Exception as exc:
@@ -115,7 +120,8 @@ def main(argv=None):
                                 start_service_fn=None, keep_backups=keep)
         return run_update(root, root, tag, version, port, False, pid,
                           args.repo, status_file=status_file,
-                          start_service_fn=None, keep_backups=keep)
+                          start_service_fn=None, keep_backups=keep,
+                          profile=profile or None)
     except Exception as exc:
         try:
             _write_status("failed", version, str(exc)[:200], path=status_file)

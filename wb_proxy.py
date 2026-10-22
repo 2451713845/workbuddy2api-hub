@@ -10184,7 +10184,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.25",
+        "version": "1.7.26",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -11579,8 +11579,9 @@ SANITIZE_OMO_JUNIOR_RE = re.compile(
 # 大小写不敏感、连续子串匹配；单独品牌词或改词后放行。这里整句换成中性句，
 # 不依赖具体品牌，也不保留 "powered by / built on" 结构。
 #
-# 只作用于 system / developer 角色（见 sanitize_messages）：user / tool 里的品牌词
-# 是用户数据，改写会让模型看到与磁盘不一致的内容（#537）。
+# 只作用于 system / developer / assistant 角色（见 sanitize_messages）：user / tool
+# 里的品牌词是用户数据，改写会让模型看到与磁盘不一致的内容（#537）。assistant 在
+# 1.7.25 及以前没被覆盖，而同一句放进 assistant 历史会稳定 400（#574）。
 #
 # 1.7.18 及以前只认 "agent powered by" / "assistant built on" 两种动词搭配，而同一类
 # 经纬句还有 "built by"（如 "You are <Product> Agent, built by <Vendor>."）、
@@ -11616,6 +11617,17 @@ SANITIZE_DSH_GUI_RE = re.compile(
     r" whose URL the runtime context names\.")
 SANITIZE_DSH_GUI_REPLACEMENT = r"\1 whose URL is named in the runtime context."
 SANITIZE_DSH_GUI_LOWER = "whose url the runtime context names"
+# 品牌词缩减（#574）：`DeepSeek Harness` 单独出现放行，但它和 GUI 描述句
+# （`this page` / `this GUI` / `this app`）连续出现时命中同一套 11-128 校验。
+# 逐段二分实测：只把品牌缩成 `DeepSeek` 就能通过，句子其余部分不用动；
+# 换成 DSH / the project / AI assistant 也都能过，取语义损失最小的那个。
+#
+# 只匹配散文里的空格 / 制表符形式。`deepseek-harness`、`deepseek_harness`、
+# `/opt/deepseek-harness/app` 这类路径与标识符保持原样（#574 里实测过
+# `[ \t_-]*` 会把它们一起改坏）。
+SANITIZE_BRAND_RE = re.compile(r"DeepSeek[ \t]+Harness", re.IGNORECASE)
+SANITIZE_BRAND_REPLACEMENT = "DeepSeek"
+SANITIZE_BRAND_LOWER = "harness"
 # 指纹判定的字面量快路径（见 has_fingerprint）：原先对每段文本跑两个 (?i) 正则，
 # 4KB 输入实测 319µs，其中正则 137+188µs、几个 `in` 只占 9µs；64KB 文本要
 # 6.2ms，而 sanitize_messages 会给每个文本段都过一遍——build_upstream_body
@@ -11654,6 +11666,10 @@ def has_fingerprint(text, identity=True):
         return True
     if not identity:
         return False
+    # 品牌词缩减：`harness` 是廉价前置筛，真命中交给正则。
+    if (SANITIZE_BRAND_LOWER in low
+            and SANITIZE_BRAND_RE.search(text) is not None):
+        return True
     # GUI 描述段：先做一次字面量探测，命中才走正则。
     if (SANITIZE_DSH_GUI_LOWER in low
             and SANITIZE_DSH_GUI_RE.search(text) is not None):
@@ -11678,6 +11694,8 @@ def sanitize_text(text, identity=True):
         text = SANITIZE_IDENTITY_RE.sub(SANITIZE_IDENTITY_REPLACEMENT, text)
         # GUI 描述段单独一条规则：锚定整句，只调整句尾语序。
         text = SANITIZE_DSH_GUI_RE.sub(SANITIZE_DSH_GUI_REPLACEMENT, text)
+        # 品牌词缩减放在最后：GUI 规则还认全名，先让它匹配原文。
+        text = SANITIZE_BRAND_RE.sub(SANITIZE_BRAND_REPLACEMENT, text)
     for old, new in SANITIZE_REWRITES:
         text = text.replace(old, new)
     text = SANITIZE_HDR_RE.sub("", text)
@@ -11751,7 +11769,10 @@ def sanitize_messages(messages):
             item = dict(m)
             preserve_tool_result = (preserve_request_contract_enabled()
                                     and item.get("role") in ("tool", "function"))
-            identity = item.get("role") in ("system", "developer")
+            # assistant 历史里的身份句同样是已确认的指纹（#574：同一句放在
+            # assistant 里 400/400/400，放在 user 里 200/200/200）。user / tool
+            # 仍是用户数据，不改写。
+            identity = item.get("role") in ("system", "developer", "assistant")
             if "content" in item and not preserve_tool_result:
                 item["content"] = sanitize_content(item["content"],
                                                    identity=identity)
@@ -17627,7 +17648,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.25"
+    server_version = "wb-proxy/1.7.26"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。

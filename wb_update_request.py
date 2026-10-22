@@ -238,7 +238,7 @@ def _bridge_status():
 
 def _request_fields(version, port):
     """The parts every request carries: which process to stop, where it runs."""
-    return {
+    fields = {
         "version": version,
         "requested_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         # The external executor needs to know which process to stop and
@@ -247,6 +247,20 @@ def _request_fields(version, port):
         "port": int(port),
         "root": os.path.dirname(os.path.abspath(__file__)),
     }
+    # 镜像 / 自建 rootfs 部署只拥有应用层（wb_*.py + dashboard.html）。把档位随
+    # 请求带下去，执行者就不会再写进 start-wb-proxy*、ops/ 和 pricing/pricing.json
+    # —— 后者一旦落盘就会盖掉 wb_pricing.py 的内联快照，而且两份没有同步机制
+    # （#573）。便携包照旧按整份清单更新。
+    try:
+        # 便携包的清单在包根、代码在 `wb-proxy/` 子目录；镜像 / rootfs 部署的
+        # 清单（如果有）和代码在同一层。用这个结构差异判断，而不是看清单文件
+        # 是否存在——旧执行者会把清单写进 /app，之后再判断就会误认成便携包。
+        if (wb_update_portable.package_root()
+                == wb_update_portable.app_root()):
+            fields["profile"] = "app"
+    except Exception:
+        pass
+    return fields
 
 
 def _queue_request(fields):

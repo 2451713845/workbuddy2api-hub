@@ -21826,6 +21826,16 @@ class Handler(BaseHTTPRequestHandler):
                                 # been flushed at end of stream.
                                 pending_finish = ch["finish_reason"]
                                 ch["finish_reason"] = None
+                    # One response must carry one id. Upstream frames keep the
+                    # upstream id while the text frames this gateway rewrites
+                    # carry its own `chatcmpl-wb-*` one, so a single reply went
+                    # out as two interleaved streams. Clients that key stream
+                    # state by id then see the reasoning half (upstream id,
+                    # never a finish_reason) and the answer half separately,
+                    # and the turn hangs on "still generating" forever even
+                    # though both halves arrived. Normalise before emitting.
+                    if isinstance(maybe, dict) and maybe.get("id"):
+                        maybe["id"] = stream_chunk_id
                     cleaned = clean_chunk(
                         json.dumps(maybe, ensure_ascii=False)
                         if isinstance(maybe, dict) else data)

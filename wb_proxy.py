@@ -10184,7 +10184,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.27",
+        "version": "1.7.28",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -10334,9 +10334,22 @@ _LOG_COUNTER = 0
 # 根本凑不满 11 位，二者的数字边界 (?!\d)/(?<!\d) 依旧成立。
 _PHONE_EXACT = re.compile(r"^1[3-9]\d{9}$")
 _PHONE_SEP = r"[ \t\-.·]?"
+# 文本级还要挡住「标识符里恰好有一段 3-4-4 数字」：#581 的国内号 uid
+# `6ef20bf4-76fa-4085-b179-97517476cc1e` 里的 `179-97517476` 满足 3-4-4 形状，
+# 掩码后 uid 变成 `…b179****7476cc1e`，面板拿这个假 uid 回传，
+# `AccountPool.get()` 永远返回 None → 404 no such account → 前端「操作失败」。
+# 左右都要求不是标识符字符（字母 / 数字 / 下划线），散文里的号码不受影响
+# （中文、空格、标点都是合法边界）。
 _PHONE_IN_TEXT = re.compile(
-    r"(?<!\d)(1[3-9]\d)" + _PHONE_SEP + r"(\d{4})" + _PHONE_SEP + r"(\d{4})(?!\d)"
+    r"(?<![0-9A-Za-z_])(1[3-9]\d)" + _PHONE_SEP + r"(\d{4})" + _PHONE_SEP
+    + r"(\d{4})(?![0-9A-Za-z_])"
 )
+# 键名本身承载标识符：这些值里的数字串不是手机号，一律原样返回。
+# 值级正则（_mask_phone）只看 nickname，不受影响。
+_IDENTITY_KEYS = frozenset((
+    "uid", "account", "accountId", "id", "file", "path", "machineId",
+    "sessionId", "key", "token", "accessToken", "refreshToken",
+))
 
 
 def _mask_phone(value):
@@ -10382,6 +10395,9 @@ def _redact_account_names(obj):
                 nv = _mask_phone(v)
                 if nv is v:
                     nv = _mask_text(v)
+            elif isinstance(v, str) and k in _IDENTITY_KEYS:
+                # 标识符原样：改写 uid 会让面板拿到池子里不存在的 id（#581）。
+                nv = v
             else:
                 nv = _redact_account_names(v)
             if nv is not v:
@@ -17648,7 +17664,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.27"
+    server_version = "wb-proxy/1.7.28"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。

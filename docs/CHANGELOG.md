@@ -1,3 +1,11 @@
+## v1.7.28
+
+面板「操作失败: no such account」的根因修复（#581）：手机号脱敏把 uid 改写成了池子里不存在的值。套件 209 个（156 Python + 53 JS）。
+
+- **uid 不再被脱敏改写**（#581）：`_redact_account_names()` 对所有字符串值跑手机号文本正则，国内号 uid `6ef20bf4-76fa-4085-b179-97517476cc1e` 里的 `179-97517476` 恰好满足 3-4-4 分组，被改成 `…b179****7476cc1e`。`/accounts` 把这个假 uid 返回给浏览器，前端点「停用账号 / 测试」时回传，`AccountPool.get()` 查不到 → 404 `no such account` → 「操作失败」。现在 `uid` / `account` / `accountId` / `id` / `file` / `path` / `machineId` / `sessionId` / `key` / `token` 这些标识符键一律原样返回；`nickname` 的脱敏不变。
+- **文本级边界收紧**：`_PHONE_IN_TEXT` 的左右边界从「不是数字」扩到「不是标识符字符」（字母 / 数字 / 下划线），日志或摘要串里嵌着的十六进制 id 不会再被切一段出来当号码。
+- **测试**：`tests/_test_nickname_privacy.py` 新增 3 项，覆盖该 uid 原样、标识符字段不被改写、同载荷里的昵称仍然脱敏。
+
 ## v1.7.27
 
 账号档位改为读计费摘要（#505）：付费 / 免费不再靠猜，`is_paid_user` 有了权威来源。套件 209 个（156 Python + 53 JS）。

@@ -797,6 +797,17 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   table.data-cards tr{padding:10px}
   .log-ts{font-size:11px}
 }
+@media (max-width: 860px){
+  /* 窄屏统计条：把「积分消耗」与「请求成功率」对调，让积分消耗落在最后、
+     独占一整行。积分卡的副行是「估算价值: ¥49.57 / $6.68」这类长文本，
+     和别的卡挤成半宽时会被 nowrap + ellipsis 截成「$6...」；独占一行后
+     宽度够，再允许换行就能完整显示。
+     只改窄屏的排列顺序，PC 三列布局与卡片内容一字未动。 */
+  #cards .card:nth-child(2){order:3}
+  #cards .card:nth-child(3){order:2}
+  #cards .card:nth-child(2){grid-column:1/-1}
+  #cards .card:nth-child(2) .s{white-space:normal;overflow:visible;text-overflow:clip}
+}
 
 /* ==================================================================
    数据看板页重设计（B 版）——作用域全部限定在 #pageAnalytics 内，

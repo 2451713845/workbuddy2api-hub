@@ -1,3 +1,12 @@
+## v1.7.27
+
+账号档位改为读计费摘要（#505）：付费 / 免费不再靠猜，`is_paid_user` 有了权威来源。套件 209 个（156 Python + 53 JS）。
+
+- **档位来自计费摘要**（#505）：`/billing/meter/get-user-resource-summary` 的 `IsPaidUser` / `SubscriptionPackageName` / `IsProtectedPriceUser` / `ProTrialStatus` 解析成账号上的 `tier` 记录并落盘。国内版的详细积分路径本来就在打这个接口，直接复用同一份响应，零新增请求；国际版的 `get-user-resource` 没有档位字段，因此每账号每天最多多一次摘要请求（`TIER_TTL_SECONDS` = 24h）。
+- **失败不写结论**：401 / 非 0 code / 网络错误保留旧值与时间戳，绝不把一次失败写成「免费」；企业账号（上游语义未验证）与风控限制中的账号跳过。`tier` 按 `VOLATILE_FIELDS` 处理，导入到另一台机器时不沿用上一台的结论。
+- **接线**：`fetch_credits()` 成功后顺带刷新档位，不新开定时器；`is_paid_user` 优先取 `tier`，没有结论时回落到上一次积分快照（与旧行为一致）。面板「会员类型」旁显示包名与读取时刻，hover 给出摘要时间。
+- **测试**：新增 `tests/_test_account_tier.py`（19 项），覆盖解析、缺字段不当免费、企业 / 限制跳过、一天一次、国际版余额取档位、落盘与导入。
+
 ## v1.7.26
 
 两个已确认的修复：assistant 历史里的身份句 / 品牌词指纹，以及镜像部署升级写进便携包专用文件。套件 208 个（155 Python + 53 JS）。

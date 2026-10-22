@@ -9230,6 +9230,10 @@ async function openCreditsDetail(uid, forceRefresh = false){
       tierEl.style.display = "inline-block";
       tierEl.className = acct.credits.is_paid_user ? "badge mini ok" : "badge mini";
       tierEl.textContent = acct.credits.is_paid_user ? "付费用户" : "普通用户";
+      const tier = acct.tier;
+      tierEl.title = (tier && tier.package)
+        ? (tier.package + (tier.checked_at ? " · " + new Date(tier.checked_at * 1000).toLocaleString() : ""))
+        : "";
     } else {
       tierEl.style.display = "none";
     }
@@ -9443,7 +9447,15 @@ function renderCreditsDetail(credits, acct){
       if(c.today_credit) items.push('今日领取: ' + c.today_credit + ' 积分');
     }
     if(credits.is_paid_user !== undefined){
-      items.push('会员类型: ' + (credits.is_paid_user ? '<span class="badge ok mini">付费用户</span>' : '<span class="badge mini">普通/体验用户</span>'));
+      // 档位来自计费摘要（#505）：付费 / 免费之外把包名也带上，方便一眼看出
+      // 池子里哪些号是免费档、结论是什么时候读的。
+      let tierText = credits.is_paid_user ? '<span class="badge ok mini">付费用户</span>' : '<span class="badge mini">普通/体验用户</span>';
+      const tier = acct && acct.tier;
+      if(tier && tier.package){
+        const checked = tier.checked_at ? new Date(tier.checked_at * 1000).toLocaleString() : '';
+        tierText += ' <span class="badge mini" title="计费摘要' + (checked ? ' · ' + checked : '') + '">' + escapeHtml(tier.package) + '</span>';
+      }
+      items.push('会员类型: ' + tierText);
     }
     if(items.length){
       checkinText.innerHTML = items.join(' · ');

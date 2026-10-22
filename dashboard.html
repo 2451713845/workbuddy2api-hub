@@ -7072,7 +7072,16 @@ function applyTableSort(id){
   table.setAttribute('data-sort-id', id);
   const rows = Array.from(tbody.children).filter(r => r.tagName === 'TR');
   const pinN = SORT_PIN_ROWS[id] || 0;
-  const body = rows.slice(pinN);
+  /* 续行（账号表里 cool-row 的冷却 / 达限胶囊）是上一行的附注，不是独立数据行：
+     只排 accountRow 会把胶囊留在原地，排完就是「账号 账号 胶囊 胶囊」——胶囊跟
+     的不是它自己那行账号。按「行 + 它的续行」成组排，整块一起走。 */
+  const isCont = r => !!(r.classList && r.classList.contains('cool-row'));
+  const units = [];
+  for(const r of rows){
+    if(units.length && isCont(r)) units[units.length - 1].extras.push(r);
+    else units.push({row: r, extras: []});
+  }
+  const body = units.slice(pinN).map(u => u.row);
   const ths = Array.from(thead.querySelectorAll('th'));
   const kinds = ths.map((th, i) => colKind(id, i, body, ths.length));
   const st = SORT_STATE[id] || null;
@@ -7116,8 +7125,8 @@ function applyTableSort(id){
   if(!st || !kinds[st.col]) return;
   const kind = kinds[st.col];
   const dir = st.dir === 'asc' ? 1 : -1;
-  const sorted = body
-    .map((r, i) => [cellSortValue(r.children[st.col], kind), i, r])
+  const sorted = units.slice(pinN)
+    .map((u, i) => [cellSortValue(u.row.children[st.col], kind), i, u])
     .sort((a, b) => {
       const av = a[0], bv = b[0];
       if(av == null || bv == null){
@@ -7129,7 +7138,8 @@ function applyTableSort(id){
       return c ? c * dir : a[1] - b[1];   // 同值保持原序，表不会自己抖
     })
     .map(t => t[2]);
-  const ordered = rows.slice(0, pinN).concat(sorted);
+  const ordered = units.slice(0, pinN).concat(sorted)
+    .reduce((acc, u) => acc.concat([u.row], u.extras), []);
   /* 顺序没变就别碰 DOM：每一轮轮询都会走这里，白挪一遍行没有任何收益，只会多触发
      一轮 i18n 的 MutationObserver 重扫。 */
   if(ordered.some((r, i) => rows[i] !== r)){

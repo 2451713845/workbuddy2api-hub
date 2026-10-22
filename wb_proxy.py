@@ -11021,7 +11021,7 @@ def remote_config_headers(account, realm, ua=None):
     realm's fixed desktop UA rather than the account's current identity.
     """
     cfg = wb_accounts.get_realm_config(realm)
-    return {
+    headers = {
         "Accept": "application/json, text/plain, */*",
         "User-Agent": ua or cfg["chat_ua"],
         "Origin": cfg["origin"],
@@ -11029,6 +11029,12 @@ def remote_config_headers(account, realm, ua=None):
         "Authorization": "Bearer " + account.access_token,
         "X-User-Id": account.uid,
     }
+    # 静态 API Key 必须额外带 X-API-Key：只发 Authorization 时上游下发 54 条
+    # 而不是 56 条，且 HTTP 仍是 200、没有任何提示（实测）。少的四条正是
+    # glm-5.2-aicc / glm-5.3-flashx / kimi-k3-2 / minimax-m3-pay。
+    if getattr(account, "is_api_key", False):
+        headers["X-API-Key"] = account.access_token
+    return headers
 
 
 def _agent_model_lists(payload):
@@ -20174,6 +20180,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_accounts_delete(payload)
         if path == "/accounts/import":
             return self._route_accounts_import(payload)
+        if path == "/accounts/add-api-key":
+            return self._route_accounts_add_api_key(payload)
         return self._error(404, "unknown account endpoint", "invalid_request_error")
     def _route_accounts_product(self, payload):
         """切换出站身分（cli <-> workbuddy），并即时回传结果。
@@ -20582,7 +20590,12 @@ class Handler(BaseHTTPRequestHandler):
     def _route_accounts_checkin(self, payload):
         uid = payload.get("uid")
         invalidate_tasks_cache()          # 签到会改连续打卡状态，成长任务快照随之作废
-        targets = [POOL.get(uid)] if uid else [a for a in (POOL.accounts if POOL else []) if a.realm == "cn"]
+        # 只挑有个人成长体系的号：静态 API Key 与企业号都没有，签到端点对它们
+        # 一律拒绝，发过去只是白烧一次上游请求。
+        targets = ([POOL.get(uid)] if uid
+                   else [a for a in (POOL.accounts if POOL else [])
+                         if a.realm == "cn"
+                         and not a.uses_enterprise_billing()])
         results = []
         for account in targets:
             if account is None:
@@ -20910,6 +20923,73 @@ class Handler(BaseHTTPRequestHandler):
         removed = POOL.remove(uid)
         log("account %s deleted" % uid[:8])
         return self._json_panel(200, {"deleted": removed, "accounts": account_views()})
+
+    def _route_accounts_add_api_key(self, payload):
+        """新增静态 API Key 账号（CodeBuddy 平台签发，ck_/pt_ 前缀）。
+
+        与 OAuth 扫码是两条并列的入口：静态 Key 无法走设备流（CodeBuddy 的
+        登录页不支持企业微信扫码），只能手工粘贴。
+
+        流程是「先验后落盘」：这类 Key 没有本地可校验的签名字段，唯一可靠的
+        判据是拿它打一次企业额度端点。探测失败就 400 且不写任何文件——坏号
+        进池之后选号侧会反复选中它、每次失败都要冷却换号，表象是「网关时好
+        时坏」，比拒绝添加难查得多。
+        """
+        key = str(payload.get("key") or payload.get("accessToken") or "").strip()
+        if not key:
+            return self._error(400, "key is required", "invalid_request_error")
+        if not wb_accounts.is_api_key_token(key):
+            return self._error(
+                400,
+                "this is not a static API key: expected the ck_/pt_ prefix "
+                "issued by the CodeBuddy API console",
+                "invalid_request_error")
+        nickname = str(payload.get("nickname") or "").strip()
+        uid = str(payload.get("uid") or "").strip()
+        try:
+            account = wb_accounts.Account({
+                "uid": uid,
+                "nickname": nickname,
+                "accessToken": key,
+                "realm": "cn",
+                "platform": "CLI",
+                "source": wb_accounts.SOURCE_API_KEY,
+                "enabled": True,
+                "tasksEnabled": False,
+            })
+        except Exception as exc:
+            return self._error(400, "cannot build account: %s" % exc,
+                               "invalid_request_error")
+        if not account.uid:
+            return self._error(
+                400,
+                "cannot derive a uid from this key; pass uid explicitly",
+                "invalid_request_error")
+        probe = account.probe_api_key()
+        if not probe.get("ok"):
+            return self._error(
+                400,
+                "the key did not pass the balance probe, so it was not saved: %s"
+                % (probe.get("error") or "unknown error"),
+                "invalid_request_error")
+        existed = POOL.get(account.uid) is not None if POOL else False
+        POOL.add(account)
+        try:
+            account.fetch_credits()
+        except Exception:
+            # 额度读失败不影响账号可用性：add() 已落盘，下一个刷新周期会补。
+            pass
+        log("account added (api key): uid=%s nickname=%r probe=ok(%s/%s)"
+            % (account.uid[:8], account.nickname,
+               probe.get("used"), probe.get("limit")), tag="accounts")
+        return self._json_panel(200, {
+            "ok": True,
+            "uid": account.uid,
+            "nickname": account.nickname or account.uid[:8],
+            "updated": existed,
+            "probe": probe,
+            "account": account.public(),
+        })
 
     def _route_accounts_import(self, payload):
         # Import a previously exported document (or any hand-written list

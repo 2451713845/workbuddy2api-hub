@@ -277,6 +277,43 @@ RESOURCE_FREE_PACKAGES_PATH = "/billing/meter/get-user-resource-free-packages"
 RESOURCE_PAID_PACKAGES_PATH = "/billing/meter/get-user-resource-paid-packages"
 CHECKIN_STATUS_PATH = "/v2/billing/meter/checkin-activity-status"
 ENTERPRISE_USAGE_PATH = "/billing/meter/get-enterprise-user-usage"
+#: 静态 API Key 上企业用量走 /v2 前缀（实测）：不带 /v2 的同一路径被 APISIX
+#: 直接回 401 的 HTML 页，带 /v2 才进业务层。OAuth 账号维持原路径不动——
+#: 那一条已经在生产跑着，没有理由陪着改。
+ENTERPRISE_USAGE_PATH_V2 = "/v2/billing/meter/get-enterprise-user-usage"
+
+#: 静态 API Key 的前缀。CodeBuddy 平台签发的 key 形如 ck_<id>.<secret>；
+#: pt_ 是同一套签发体系里见过的另一种前缀。这类凭证不是 JWT：不能刷新、
+#: 没有过期时间、也没有登录账号的个人身份，额度走企业口径端点。
+API_KEY_PREFIXES = ("ck_", "pt_")
+
+#: 静态 API Key 账号的 source 标记。与 OAuth / cockpit / import / desktop-app
+#: 并列，落盘可读，导出导入照常携带。
+SOURCE_API_KEY = "api-key"
+
+
+def api_key_id(token):
+    """从 ck_<id>.<secret> 里取 <id> 段（剥前缀、截到首个点之前）。
+
+    只保留 [A-Za-z0-9_-]：这个值会拼进凭证文件名，净化是路径穿越的防线。
+    """
+    text = str(token or "")
+    for prefix in API_KEY_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    if "." in text:
+        text = text.split(".", 1)[0]
+    return re.sub(r"[^A-Za-z0-9_-]", "", text)
+
+
+def is_api_key_token(token):
+    """该凭证是不是静态 API Key（ck_/pt_ 前缀）。
+
+    判据只有前缀：静态 Key 没有本地可校验的签名，唯一可靠的验证是拿它打一次
+    上游（见 Account.probe_api_key）。
+    """
+    return str(token or "").startswith(API_KEY_PREFIXES)
 
 #: 账号档位（付费 / 免费）的有效期。计费摘要里的 `IsPaidUser` 只在真正
 #: 刷新时读一次，一天一次足够：档位不会分钟级变化，而这是国际版唯一一次
@@ -638,7 +675,17 @@ class Account(object):
         # optional X-Device-Token) can resolve settings without a pool lookup.
         self.accounts_dir = os.path.dirname(path) if path else ""
         token = str(data.get("accessToken") or "")
-        self.uid = str(data.get("uid") or jwt_uid(token))
+        # 静态 API Key 与 OAuth token 是两条鉴权路径：前者不是 JWT，没有
+        # refreshToken / 过期时间 / 个人身份，也不该走任何刷新与签到逻辑。
+        # 先定这个标志，后面所有「是不是 JWT 账号」的分支都读它。
+        self.is_api_key = is_api_key_token(token)
+        # 静态 Key 解析不出 sub 声明，uid 只能来自落盘字段或 key 的 <id> 段
+        # （ck_<id>.<secret> → apikey-<id>，与 Go 版面板同一口径）。
+        uid = str(data.get("uid") or "").strip()
+        if not uid and self.is_api_key:
+            derived = api_key_id(token)
+            uid = ("apikey-" + derived) if derived else ""
+        self.uid = uid or jwt_uid(token)
         # The CN desktop build stores its nickname as an encrypted envelope
         # ({"$wbEncrypted": ...}) rather than plain text. Stringifying that would
         # paint an entire dictionary into the account row, so anything that is not
@@ -649,7 +696,12 @@ class Account(object):
         else:
             self.nickname = ""
         self.domain = str(data.get("domain") or "")
-        self.realm = str(data.get("realm") or detect_realm_from_token(token, self.domain))
+        if self.is_api_key:
+            # 静态 Key 只在国内版出口有效（国际版不认这套签发），落盘写着
+            # intl 也不能照单全收——那会让每个请求打到不支持它的上游。
+            self.realm = "cn"
+        else:
+            self.realm = str(data.get("realm") or detect_realm_from_token(token, self.domain))
         if not self.domain:
             self.domain = get_realm_config(self.realm)["domain"]
         self.platform = str(data.get("platform") or "CLI")
@@ -662,14 +714,18 @@ class Account(object):
         self.enterprise_id = str(data.get("enterpriseId") or "")
         self.access_token = token
         self.refresh_token = str(data.get("refreshToken") or "")
-        self.expires_at = normalize_epoch(data.get("expiresAt")) or jwt_exp(token)
+        # 静态 Key 永不过期（expiresAt 恒 0）。写 0 而不是「解 JWT 得到的 0」
+        # 是有意的：ready() 里 exp 为 0 表示「不按时间淘汰」。
+        self.expires_at = (0 if self.is_api_key
+                           else normalize_epoch(data.get("expiresAt")) or jwt_exp(token))
         # 企业账号登录时切到企业空间（token_source=enterprise_switch），企业 id
         # 只写在 token 里，凭据文件的 enterpriseId 往往是空的。不回填的话每个
         # 请求都会带上 X-No-Enterprise-Id: 1，企业目录/配额分支走错。
         if not self.enterprise_id:
             self.enterprise_id = self.jwt_enterprise_id(token)
         self.added_at = data.get("addedAt") or time.time()
-        self.source = str(data.get("source") or "oauth")
+        self.source = str(data.get("source")
+                          or (SOURCE_API_KEY if self.is_api_key else "oauth"))
         self.proxy_slot = str(data.get("proxySlot") or "").strip()
         self.proxy_legacy = str(data.get("proxy") or "").strip()
         # Runtime-resolved value; recomputed by AccountPool.apply_proxy_slots().
@@ -887,6 +943,9 @@ class Account(object):
             "expiresAt": self.expires_at,
             "addedAt": self.added_at,
             "source": self.source,
+            # 静态 API Key 账号：面板据此渲染「API Key」标签并隐藏签到/任务，
+            # 导入导出也靠它把账号还原成同一类型。
+            "apiKey": bool(self.is_api_key),
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy_legacy,
             "enabled": self.enabled,
@@ -963,6 +1022,8 @@ class Account(object):
             "note": self.note,
             "disabledModels": list(self.disabled_models),
             "source": self.source,
+            "apiKey": bool(self.is_api_key),
+            "credentialMask": self.credential_mask(),
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy,
             "expiresAt": exp,
@@ -1012,12 +1073,58 @@ class Account(object):
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
             "lastActivityReport": self.last_activity_report,
-            "canCheckin": self.realm == "cn" and not self.is_enterprise(),
+            "canCheckin": self.realm == "cn" and not self.uses_enterprise_billing(),
             "canDailyChat": self.realm == "intl",
-            "canReportActivity": self.realm == "cn" and not self.is_enterprise(),
+            "canReportActivity": (self.realm == "cn"
+                                  and not self.uses_enterprise_billing()),
             "machineId": derive_id(self.uid, "machine"),
             "sessionId": session_id(self.uid),
         }
+
+    def credential_mask(self):
+        """脱敏后的凭证：静态 Key 显示 `ck_<id>.***`，OAuth token 不回显。
+
+        OAuth token 是一串完整可用的凭证，面板从来没有展示过它，这里继续
+        返回空串而不是「前四位 + 后四位」——那已经足够在日志里定位，也足够
+        让人误以为面板可以拿回原值。
+        """
+        if not self.is_api_key:
+            return ""
+        token = str(self.access_token or "")
+        head = token.split(".", 1)[0]
+        return (head + ".***") if head else "***"
+
+    def probe_api_key(self, timeout=15):
+        """用企业额度端点验一次这个 Key 是否有效。
+
+        静态 Key 没有任何本地可校验的签名字段，唯一可靠的验证就是拿它打一次
+        真实端点。加账号时必须先探再落盘：探测失败的 key 进了池子，选号侧会
+        反复选中它、每次失败都要冷却换号，表象是「网关时好时坏」。
+        """
+        if not self.is_api_key:
+            return {"ok": False, "error": "not an API key"}
+        url = get_realm_config("cn")["billing_upstream"] + ENTERPRISE_USAGE_PATH_V2
+        headers = {
+            "Authorization": "Bearer " + str(self.access_token or ""),
+            # 官方 CLI 两个头都发；这里同样两个都给，省得探测通过、真跑却
+            # 因为少了另一个头被判成不同的调用方。
+            "X-API-Key": str(self.access_token or ""),
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": get_realm_config("cn")["chat_ua"],
+        }
+        try:
+            res = http_json(url, data=b"{}", method="POST", headers=headers,
+                            timeout=timeout, proxy=self.proxy)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        if not isinstance(res, dict) or res.get("code") != 0:
+            return {"ok": False,
+                    "error": "code %s: %s" % (res.get("code"), res.get("msg"))}
+        data = res.get("data") or {}
+        return {"ok": True, "used": data.get("credit"),
+                "limit": data.get("limitNum"),
+                "cycle_end": data.get("cycleEndTime")}
 
     def save(self, directory):
         os.makedirs(directory, exist_ok=True)
@@ -1518,6 +1625,10 @@ class Account(object):
                 "X-Machine-ID": derive_id(self.uid, "machine"),
                 "X-Session-ID": session_id(self.uid),
             }
+            # 静态 API Key：与 chat 链路口径一致，两个鉴权头都发。计费端点
+            # 本身任一个都认，但统一形态省得两条路径各写一套。
+            if self.is_api_key:
+                headers["X-API-Key"] = self.access_token
             if self.enterprise_id:
                 headers["X-Enterprise-Id"] = self.enterprise_id
                 headers["X-Tenant-Id"] = self.enterprise_id
@@ -1631,6 +1742,11 @@ class Account(object):
             return self._refresh_locked()
 
     def _refresh_locked(self):
+        if self.is_api_key:
+            # 静态 Key 无法 refresh（refresh 端点只认 OAuth 设备流）。返回
+            # False 而不是把 token_expired 置 True：这类账号按定义就是长期
+            # 有效，标成「过期」会把一个健康的号踢出池子并要求重新登录。
+            return False
         if not self.refresh_token:
             self.token_expired = True
             self._set_last_error("no refresh token; sign in again")
@@ -1692,7 +1808,8 @@ class Account(object):
     def can_checkin(self):
         if self.realm != "cn":
             return False
-        if self.is_enterprise():
+        # 无个人成长体系：企业号上游直接拒，静态 Key 连个人身份都没有。
+        if self.uses_enterprise_billing():
             return False
         if not self.last_checkin:
             return True
@@ -1711,7 +1828,7 @@ class Account(object):
         """国内版每天一次的对话活跃上报（点亮 growth 连登）是否还没做过。"""
         if self.realm != "cn":
             return False
-        if self.is_enterprise():
+        if self.uses_enterprise_billing():
             return False
         if not self.last_activity_report:
             return True
@@ -2096,6 +2213,8 @@ class Account(object):
         """
         if self.realm != "cn":
             return {"ok": False, "error": "checkin is only available for CN realm accounts"}
+        if self.is_api_key:
+            return {"ok": False, "error": "API key accounts have no checkin programme"}
         if self.is_enterprise():
             return {"ok": False, "error": "enterprise accounts do not support checkin"}
         res = self._checkin_upstream()
@@ -2146,6 +2265,8 @@ class Account(object):
         """
         if self.realm != "cn":
             return {"ok": False, "error": "activity report is only for CN realm accounts"}
+        if self.is_api_key:
+            return {"ok": False, "error": "API key accounts have no activity programme"}
         if self.is_enterprise():
             return {"ok": False, "error": "enterprise accounts do not support activity report"}
         import wb_tasks
@@ -2512,6 +2633,15 @@ class Account(object):
         """
         return bool(self.enterprise_id or self.jwt_enterprise_id())
 
+    def uses_enterprise_billing(self):
+        """额度是不是该走企业口径端点。
+
+        静态 API Key 也走这一条：它没有个人账号身份，个人
+        get-user-resource 对它返回 200 但 Accounts 为空（实测），复用个人
+        逻辑的话余额恒 0，积分保底会把可用号当成耗尽号挡死。
+        """
+        return bool(self.is_api_key or self.is_enterprise())
+
     def _fetch_credits_enterprise(self):
         """企业账号积分：周期内已用 + 周期额度，剩余 = 额度 - 已用。
 
@@ -2520,7 +2650,10 @@ class Account(object):
         所以合成一个包条目，让看板的明细弹窗与到期提示照常工作。
         """
         cfg = get_realm_config(self.realm)
-        url = cfg["billing_upstream"] + ENTERPRISE_USAGE_PATH
+        # 静态 Key 必须走 /v2 前缀（见 ENTERPRISE_USAGE_PATH_V2 的注释）。
+        path = (ENTERPRISE_USAGE_PATH_V2 if self.is_api_key
+                else ENTERPRISE_USAGE_PATH)
+        url = cfg["billing_upstream"] + path
         headers = self.headers(purpose="billing")
         headers["X-Client-Platform"] = "web"
         try:
@@ -2645,8 +2778,9 @@ class Account(object):
         conclusion: 401 / non-zero code / network error leaves the previous
         value and its timestamp exactly as they were.
         """
-        if self.is_enterprise():
+        if self.uses_enterprise_billing():
             # 企业空间的 IsPaidUser 语义未验证（#505），先按「未知」处理。
+            # 静态 Key 的个人计费摘要端点直接 401，同样按未知处理。
             return None
         if self.restricted_until > time.time():
             # 账号正被上游限制：这时再打计费接口只会继续喂风控。
@@ -2698,6 +2832,14 @@ class Account(object):
             return res
 
     def _fetch_credits_raw(self):
+        # 静态 API Key 没有套餐概览/个人资源包：/billing/meter/get-user-resource-summary
+        # 对它直接 401（实测，APISIX 层挡掉），个人 get-user-resource 返回空
+        # Accounts。所以不进个人链路，直接问企业口径。
+        if self.is_api_key:
+            ent = self._fetch_credits_enterprise()
+            if ent.get("ok"):
+                return ent
+            return ent
         if self.realm == "cn":
             try:
                 res = self._fetch_credits_cn_detailed()
@@ -4555,7 +4697,10 @@ def normalise_import_row(row, realm=None):
     token = str(pick("accessToken") or "").strip()
     if not token:
         raise ValueError("no accessToken")
-    if token.count(".") != 2:
+    api_key = is_api_key_token(token)
+    # 静态 API Key 不是 JWT，不能按 JWT 校验；其余形态仍要求三段式，
+    # 那是「这串东西确实是 OAuth token」唯一可靠的本地判据。
+    if not api_key and token.count(".") != 2:
         raise ValueError("accessToken is not a JWT")
 
     # Where the account belongs. A realm forced by the caller still wins (that
@@ -4564,6 +4709,10 @@ def normalise_import_row(row, realm=None):
     # then exported again) must not keep dragging itself back there, and the
     # wrong region sends every request to the wrong upstream.
     forced = str(realm or "").strip().lower()
+    if api_key:
+        # 静态 Key 只在国内版出口有效。强制成 cn，忽略调用方的 realm 参数与
+        # 行里的旧值——把这类账号放进国际版列表，每个请求都会打空。
+        forced = "cn"
     evidence = realm_evidence(token, pick("domain"))
     row_realm = str(pick("realm") or "").strip().lower()
     if forced in ("intl", "cn"):
@@ -4577,6 +4726,10 @@ def normalise_import_row(row, realm=None):
     cfg = get_realm_config(detected)
 
     raw_uid = str(pick("uid") or "").strip() or jwt_uid(token)
+    if not raw_uid and api_key:
+        # 静态 Key 从自己的 <id> 段派生 uid：ck_<id>.<secret> → apikey-<id>。
+        # 与 Go 版面板同一口径，两边导出的文件可以互认。
+        raw_uid = "apikey-" + api_key_id(token)
     uid = re.sub(r"[^A-Za-z0-9_-]", "_", raw_uid).strip("_ ")
     if not uid:
         raise ValueError("cannot determine uid (no uid field and no sub claim)")
@@ -4591,8 +4744,9 @@ def normalise_import_row(row, realm=None):
         "enterpriseId": str(pick("enterpriseId") or ""),
         "accessToken": token,
         "refreshToken": str(pick("refreshToken") or ""),
-        "expiresAt": normalize_epoch(pick("expiresAt")) or jwt_exp(token),
-        "source": str(pick("source") or "import"),
+        "expiresAt": (0 if api_key
+                      else normalize_epoch(pick("expiresAt")) or jwt_exp(token)),
+        "source": str(pick("source") or (SOURCE_API_KEY if api_key else "import")),
         "enabled": True,
         # Imported accounts start with tasks on (they are new to this pool);
         # an export that carries the flag keeps the operator's choice.

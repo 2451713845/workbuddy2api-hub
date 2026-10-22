@@ -143,7 +143,7 @@ class TaskGatingTests(unittest.TestCase):
 
     def _run_at(self, scheduler, account, hour, force=False):
         stamp = time.struct_time((2026, 10, 20, hour, 0, 0, 0, 0, -1))
-        seen = {"travel": 0, "bonus": 0, "cat": 0}
+        seen = {"travel": 0, "bonus": 0, "cat": 0, "all": 0}
 
         def travel(_acc):
             seen["travel"] += 1
@@ -157,9 +157,21 @@ class TaskGatingTests(unittest.TestCase):
             seen["cat"] += 1
             return {"logs": []}
 
+        def all_rewards(acc, trigger="", gap=0):
+            seen["all"] += 1
+            checkin = acc.checkin(trigger=trigger)
+            activity = acc.report_activity()
+            return {
+                "ok": True,
+                "msg": "all done",
+                "logs": [],
+                "steps": {"checkin": checkin, "activity": activity},
+            }
+
         with mock.patch.object(wb_scheduler.time, "localtime", lambda *a: stamp), \
                 mock.patch.object(wb_scheduler.time, "sleep", lambda *_: None), \
                 mock.patch.object(wb_scheduler, "do_cat_travel", travel), \
+                mock.patch.object(wb_scheduler.wb_tasks, "run_all_rewards", all_rewards), \
                 mock.patch.object(wb_scheduler.wb_tasks, "run_streak_bonus", bonus), \
                 mock.patch.object(wb_scheduler.wb_tasks, "run_night_growth", night):
             scheduler._run_cycle("test", force=force)
@@ -181,6 +193,7 @@ class TaskGatingTests(unittest.TestCase):
             self.assertEqual((account.checkins, account.reports), (0, 0))
             self.assertEqual((seen["travel"], seen["bonus"], seen["cat"]),
                              (0, 0, 0))
+            self.assertEqual(seen["all"], 0)
             self.assertEqual(account.refreshes, 1)
 
     def test_task_flag_on_still_runs_checkin(self):
@@ -209,6 +222,7 @@ class TaskGatingTests(unittest.TestCase):
             seen = self._run_at(scheduler, account, 1)
             self.assertEqual((account.checkins, account.reports), (0, 0))
             self.assertEqual((seen["travel"], seen["bonus"], seen["cat"]), (0, 0, 1))
+            self.assertEqual(seen["all"], 0)
 
     def test_checkin_hour_runs_checkin_and_report_but_not_travel(self):
         with tempfile.TemporaryDirectory(prefix="sched-gate-") as directory:
@@ -222,7 +236,9 @@ class TaskGatingTests(unittest.TestCase):
 
             seen = self._run_at(scheduler, account, 10)
             self.assertEqual((account.checkins, account.reports), (1, 1))
+            self.assertEqual(seen["all"], 1)
             self.assertEqual((seen["travel"], seen["bonus"], seen["cat"]), (0, 0, 0))
+            self.assertEqual(seen["all"], 1)
 
     def test_manual_trigger_forces_every_task(self):
         with tempfile.TemporaryDirectory(prefix="sched-gate-") as directory:
@@ -236,7 +252,8 @@ class TaskGatingTests(unittest.TestCase):
 
             seen = self._run_at(scheduler, account, 3, force=True)
             self.assertEqual((account.checkins, account.reports), (1, 1))
-            self.assertEqual((seen["travel"], seen["bonus"], seen["cat"]), (1, 1, 1))
+            self.assertEqual((seen["travel"], seen["bonus"], seen["cat"]), (0, 0, 0))
+            self.assertEqual(seen["all"], 1)
 
 
 if __name__ == "__main__":

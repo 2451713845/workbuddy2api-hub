@@ -290,6 +290,7 @@ class Scheduler:
         checkin_count = 0
         report_count = 0
         travel_count = 0
+        rewards_count = 0
         daily_chat_count = 0
         daily_chat_targets = []
         cycle_hour = time.localtime().tm_hour
@@ -331,6 +332,7 @@ class Scheduler:
             # daily activity (issue #521). Keepalive below stays on for every
             # account - it only keeps the credential fresh.
             task_active = acc.task_active()
+            rewards_ran = False
             # 1. 检查 Token 剩余寿命 (小于 2 小时自动刷新保活)
             if run_keepalive:
                 exp = acc.expires_at or 0
@@ -345,27 +347,27 @@ class Scheduler:
             # 2. 如果是国内版账号，检查每日签到与猫猫旅行
             if acc.realm == "cn" and task_active:
                 if run_checkin:
-                    if acc.can_checkin():
-                        self.log(f"检测到国内版账号 [{uid8}] 今日尚未签到，执行自动签到...")
-                        res = acc.checkin(trigger="scheduler")
-                        if res.get("ok"):
+                    rewards_due = (force or acc.can_checkin()
+                                   or acc.can_report_activity())
+                    if rewards_due:
+                        self.log(f"账号 [{uid8}] 开始执行每日全部任务与积分领取...")
+                        rewards = wb_tasks.run_all_rewards(
+                            acc, trigger="scheduler", gap=1.0)
+                        rewards_ran = True
+                        checkin = (rewards.get("steps") or {}).get("checkin") or {}
+                        activity = (rewards.get("steps") or {}).get("activity") or {}
+                        if checkin.get("ok") and not checkin.get("skipped"):
                             checkin_count += 1
-                            self.log(f"✓ 账号 [{uid8}] 自动签到成功: {res.get('msg')}")
-                        else:
-                            self.log(f"! 账号 [{uid8}] 自动签到未成功: {res.get('error') or res.get('msg')}")
-                        time.sleep(1.0)
-
-                    if acc.can_report_activity():
-                        self.log(f"检测到国内版账号 [{uid8}] 今日尚未活跃上报，执行对话活跃上报...")
-                        res = acc.report_activity()
-                        if res.get("ok"):
+                        if activity.get("ok") and not activity.get("skipped"):
                             report_count += 1
-                            self.log(f"✓ 账号 [{uid8}] {res.get('msg')}")
-                        else:
-                            self.log(f"! 账号 [{uid8}] 对话活跃上报失败: {res.get('error') or res.get('msg')}")
+                        if rewards.get("ok"):
+                            rewards_count += 1
+                        for line in rewards.get("logs") or []:
+                            self.log(f"账号 [{uid8}] {line}")
+                        self.log(f"账号 [{uid8}] {rewards.get('msg')}")
                         time.sleep(1.0)
 
-                if run_travel:
+                if run_travel and not rewards_ran:
                     # 检查猫猫旅行
                     tr = do_cat_travel(acc)
                     if tr.get("action") in ("claim", "depart"):
@@ -380,7 +382,7 @@ class Scheduler:
                             self.log(f"★ 账号 [{uid8}] {l}")
                         time.sleep(1.0)
 
-                if run_cat:
+                if run_cat and not rewards_ran:
                     # 01:00 夜猫子专属任务: black_cat 只在 23:00-08:00 上报计数,
                     # 之前这个整点只是空转通用巡检, 从未真正上报过夜猫事件。
                     night = wb_tasks.run_night_growth(acc)
@@ -396,7 +398,7 @@ class Scheduler:
         if daily_chat_targets:
             daily_chat_count = self._run_daily_chat_batch(daily_chat_targets)
 
-        self.log(f"巡检完成：Token保活 {refreshed_count} 个，国内签到 {checkin_count} 个，活跃上报 {report_count} 个，猫猫日常 {travel_count} 个，国际活跃 {daily_chat_count} 个")
+        self.log(f"巡检完成：Token保活 {refreshed_count} 个，国内签到 {checkin_count} 个，活跃上报 {report_count} 个，全部福利任务 {rewards_count} 个，猫猫日常 {travel_count} 个，国际活跃 {daily_chat_count} 个")
 
     def _daily_chat_concurrency(self):
         directory = getattr(self.pool, "dir", "") or ""

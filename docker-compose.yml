@@ -18,6 +18,11 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8788
+      # Some residential proxy providers reject CONNECT to copilot.tencent.com
+      # with 803, while the official WorkBuddy edge exposes the same CN APIs.
+      - WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn
+      # Tencent CAPTCHA automatic continuation (CapSolver VisionEngine).
+      # - CAPSOLVER_API_KEY=CAP-...
       # 留空则启动时自动生成高强度 API Key 写入 ./accounts/settings.json 并打印在启动日志中
       # - API_KEY=your_secret_key
       - TZ=Asia/Shanghai

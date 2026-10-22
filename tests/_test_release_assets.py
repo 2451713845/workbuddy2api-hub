@@ -41,7 +41,7 @@ import release_tools as tools  # noqa: E402
 # expectation the reader checks that derivation against.
 EXPECTED_LEGS = (
     # Pinned because ubuntu-latest moved to 26.04, which has no 3.9 build.
-    "ubuntu-22.04 / python 3.9",
+    "ubuntu-24.04 / python 3.9",
     "ubuntu-latest / python 3.12",
     "windows-latest / python 3.12",
 )

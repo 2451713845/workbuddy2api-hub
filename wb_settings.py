@@ -48,6 +48,14 @@ CREDITS_REFRESH_HOURS_KEY = "credits_refresh_hours"
 SECTION_MAX_HEIGHT_KEY = "section_max_height"
 DEFAULT_SECTION_MAX_HEIGHT = 640
 MAX_SECTION_MAX_HEIGHT = 4000
+# How many app-layer backups a successful update keeps under <app>/updates.
+# Rollback works off those backups, so 0 means "no rollback at all"; 1 is the
+# default because it is enough to undo one step and each backup is a few MB.
+# Capped at 3: the app layer is ~5 MB per copy and the container's rootfs is
+# small, so an unbounded value is a foot-gun rather than a feature.
+KEEP_BACKUPS_KEY = "keep_backups"
+DEFAULT_KEEP_BACKUPS = 1
+MAX_KEEP_BACKUPS = 3
 # Whether a model name may inherit its price from a suffix-stripped base
 # (deepseek-r1-0528-lkeap → deepseek-r1-0528). Missing key reads as on.
 PRICING_VARIANT_INHERIT_KEY = "pricing_variant_inherit"
@@ -971,6 +979,39 @@ def set_credits_refresh_hours(accounts_dir, value):
         data[CREDITS_REFRESH_HOURS_KEY] = hours
         save(accounts_dir, data)
     return hours
+
+
+def keep_backups(accounts_dir):
+    """How many update backups to retain, 0-3.
+
+    Read by the update path after every success (prune) and by the panel before
+    it offers a rollback, so a missing or hand-edited value must never be
+    something the callers have to guard: anything that is not an int reads as
+    the default, and the result is always inside 0..MAX_KEEP_BACKUPS.
+    """
+    with _lock:
+        raw = load(accounts_dir).get(KEEP_BACKUPS_KEY)
+    if raw is None or isinstance(raw, bool):
+        return DEFAULT_KEEP_BACKUPS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_KEEP_BACKUPS
+    return max(0, min(MAX_KEEP_BACKUPS, value))
+
+
+def set_keep_backups(accounts_dir, value):
+    """Persist the backup retention count. Returns the stored value."""
+    try:
+        keep = int(value)
+    except (TypeError, ValueError):
+        keep = DEFAULT_KEEP_BACKUPS
+    keep = max(0, min(MAX_KEEP_BACKUPS, keep))
+    with _lock:
+        data = load(accounts_dir)
+        data[KEEP_BACKUPS_KEY] = keep
+        save(accounts_dir, data)
+    return keep
 
 
 #: 后台排程时段（CST 24 小时制）。默认值与旧版硬编码完全一致，老安装行为不变。

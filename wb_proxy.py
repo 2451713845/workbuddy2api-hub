@@ -10144,6 +10144,12 @@ def runtime_settings_view():
                                                default=wb_accounts.WEB_TURN_TIMEOUT),
         "daily_chat_web_timeout_default": wb_accounts.WEB_TURN_TIMEOUT,
         "daily_chat_web_timeout_max": wb_settings.DAILY_CHAT_WEB_TIMEOUT_MAX,
+        "daily_chat_web_retry_backoff":
+            wb_settings.daily_chat_web_retry_backoff(
+                ACCOUNTS_DIR, default=wb_accounts.WEB_RETRY_BACKOFF),
+        "daily_chat_web_retry_backoff_default": wb_accounts.WEB_RETRY_BACKOFF,
+        "daily_chat_web_retry_backoff_max":
+            wb_settings.DAILY_CHAT_WEB_RETRY_BACKOFF_MAX,
         "daily_chat_web_fallback": wb_settings.daily_chat_web_fallback(ACCOUNTS_DIR),
         "daily_chat_web_fallback_models":
             wb_settings.daily_chat_web_fallback_models(ACCOUNTS_DIR),
@@ -19418,6 +19424,16 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._error(400, str(exc), "invalid_request_error")
             reply["daily_chat_web_timeout"] = raw
+        if "daily_chat_web_retry_backoff" in payload:
+            # Whole seconds, 0 = off. Only rounds that never reached the turn
+            # sleep, and each wait is capped, so a stray extra digit costs
+            # seconds rather than hours - wb_settings owns both checks.
+            raw = payload.get("daily_chat_web_retry_backoff")
+            try:
+                wb_settings.set_daily_chat_web_retry_backoff(ACCOUNTS_DIR, raw)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            reply["daily_chat_web_retry_backoff"] = raw
         if "daily_chat_web_fallback" in payload:
             raw = payload.get("daily_chat_web_fallback")
             if not isinstance(raw, bool):

@@ -58,6 +58,27 @@ WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
 #: 网页通道一共试几次（含第一轮）。第 N 轮的等待是首轮的 N 倍，所以
 #: 3 次 = 最多等 base×(1+2+4) 秒。设置页可改（见 wb_settings.daily_chat_web_attempts）。
 WEB_TURN_ATTEMPTS = 3
+#: 还没跑到 turn 就失败（建会话 5xx、取沙箱失败）时的退避基数（秒）。
+#: 那几轮只花掉几百毫秒、不消耗任何等待预算，背靠背重试等于把全部尝试挤进
+#: 同一个上游故障窗口（issue #558：8 个账号 × 6 次尝试全落进约 100 秒的抖动）。
+#: 设 0 关闭退避，恢复旧行为。
+WEB_RETRY_BACKOFF = float(os.environ.get("WB_WEB_RETRY_BACKOFF") or "5")
+#: 单次退避上限（秒）：指数增长到它就封顶，避免把整批巡检拖太久。
+WEB_RETRY_BACKOFF_MAX = float(os.environ.get("WB_WEB_RETRY_BACKOFF_MAX") or "30")
+
+
+def web_retry_backoff(round_index, base=None, cap=None):
+    """第 round_index 轮（从 0 起）失败后要等多久，秒；0 表示不退避。
+
+    base 默认取 WB_RETRY_BACKOFF（设置页可改，见 wb_settings.
+    daily_chat_web_retry_backoff）；cap 默认取 WB_RETRY_BACKOFF_MAX，但不会小于
+    base —— 否则操作者把基数调大后会被一个更小的上限悄悄压回去。
+    """
+    base = WEB_RETRY_BACKOFF if base is None else base
+    cap = WEB_RETRY_BACKOFF_MAX if cap is None else cap
+    if base <= 0:
+        return 0.0
+    return min(base * (2 ** round_index), max(cap, base))
 
 
 class TLSVerifyError(RuntimeError):
@@ -1845,6 +1866,9 @@ class Account(object):
         120 / 240 / 360。最典型的失败是「会话还没跑完」（状态=working），它往往
         只是慢，多等一轮就好，所以这里把等待时间当成重试的代价，不再额外 sleep。
         业务拒绝（建会话返回非 0 code）不再试：同一个被拒的请求再发一次也一样被拒。
+        例外是「还没跑到 turn 就失败」的轮次（建会话 5xx、取沙箱失败）：那几轮
+        一秒都没等，再打一次仍落在同一个上游故障窗口里，所以补一段指数退避
+        （见 _web_retry_pause / web_retry_backoff）。
 
         返回里带 attempts（实际跑了几轮），其余字段与 _daily_chat_web_once 一致。
         """
@@ -1872,6 +1896,8 @@ class Account(object):
                     if not res.get("retryable"):
                         return res
                     tried.append(model)
+                    if attempt + 1 < attempts:
+                        self._web_retry_pause(res, attempt)
                 return last
         attempt = 0
         while True:
@@ -1879,7 +1905,36 @@ class Account(object):
             res["attempts"] = attempt + 1
             if res.get("ok") or attempt + 1 >= total or not res.get("retryable"):
                 return res
+            self._web_retry_pause(res, attempt)
             attempt += 1
+
+    def _web_retry_pause(self, res, round_index):
+        """还没跑到 turn 就失败时补一段退避，返回实际等了多少秒。
+
+        跑过 turn 的轮次已经把等待预算（wait_seconds）花掉了，再睡一次就是双重
+        惩罚；而建会话 / 取沙箱失败只用掉几百毫秒，背靠背重试会把所有尝试挤进
+        同一个上游故障窗口。phase 缺失时按「已跑到 turn」处理，旧调用方和测试
+        桩返回的结果形状因此保持原样。
+        """
+        if res.get("phase") not in ("create", "session"):
+            return 0.0
+        delay = web_retry_backoff(round_index,
+                                  base=self.daily_chat_web_retry_backoff())
+        if delay > 0:
+            time.sleep(delay)
+        return delay
+
+    def daily_chat_web_retry_backoff(self):
+        """建会话 / 取沙箱阶段失败后的退避基数（秒）。设置页改过就按设置页的来。
+
+        没配过时用内置默认 WEB_RETRY_BACKOFF —— 它吃 WB_WEB_RETRY_BACKOFF
+        环境变量，别让这个新设置项把它悄悄顶掉。没配 settings 的账号（单测里
+        手工构造的）同样按内置默认走。0 = 不退避（旧行为）。
+        """
+        if not self.path:
+            return WEB_RETRY_BACKOFF
+        return wb_settings.daily_chat_web_retry_backoff(
+            os.path.dirname(self.path), default=WEB_RETRY_BACKOFF)
 
     def daily_chat_web_policy(self):
         """(首轮等待秒数, 总尝试次数)。设置页改过就按设置页的来。
@@ -1905,6 +1960,9 @@ class Account(object):
         结果里的 retryable 说明这一轮的失败值不值得再试一次（重试策略见
         _daily_chat_web_upstream）。model 为空时按账号首选模型；回退模式显式
         传入当前候选，保证建会话与 session/set_model 用的是同一个模型。
+
+        phase 标出失败停在哪一步：create（建会话）/ session（取沙箱）/ turn
+        （接上沙箱跑这一轮）。重试方按它判断这一轮到底有没有花掉等待预算。
         """
         if wait_seconds is None:
             wait_seconds = WEB_TURN_TIMEOUT
@@ -1930,30 +1988,35 @@ class Account(object):
             except Exception:
                 detail = str(exc)
             return {"ok": False, "error": "HTTP %d: %s" % (exc.code, detail[:120]),
-                    "retryable": exc.code >= 500 or exc.code in (408, 429)}
+                    "retryable": exc.code >= 500 or exc.code in (408, 429),
+                    "phase": "create"}
         except Exception as exc:
-            return {"ok": False, "error": str(exc), "retryable": True}
+            return {"ok": False, "error": str(exc), "retryable": True,
+                    "phase": "create"}
         if not isinstance(payload, dict):
-            return {"ok": False, "error": "unexpected response", "retryable": True}
+            return {"ok": False, "error": "unexpected response", "retryable": True,
+                    "phase": "create"}
         conversation = (payload.get("data") or {}).get("id")
         if payload.get("code") not in (0, None) or not conversation:
             return {"ok": False, "error": "code=%s msg=%s"
                     % (payload.get("code"), payload.get("msg")),
-                    "retryable": False}
+                    "retryable": False, "phase": "create"}
 
         # 建完只是排队：接上沙箱、请求这一轮，它才会真的跑起来（issue #90）。
         try:
             session = (self._web_conversation_get(conversation, "/session") or {}).get("data") or {}
         except Exception as exc:
             return {"ok": False, "conversation": conversation,
-                    "error": "session 查询失败: %s" % exc, "retryable": True}
+                    "error": "session 查询失败: %s" % exc, "retryable": True,
+                    "phase": "session"}
         link = session.get("link") or session.get("endpoint") or ""
         token = session.get("token") or ""
         session_id = session.get("sessionId") or session.get("session_id") or conversation
         cwd = session.get("cwd") or "/workspace"
         if not link or not token:
             return {"ok": False, "conversation": conversation,
-                    "error": "沙箱未就绪（没有 link/token）", "retryable": True}
+                    "error": "沙箱未就绪（没有 link/token）", "retryable": True,
+                    "phase": "session"}
 
         result = wb_webagent.run_turn(
             link, token, session_id, cwd, chosen_prompt,
@@ -1963,6 +2026,7 @@ class Account(object):
             model=model)
         result["conversation"] = conversation
         result["model"] = model
+        result["phase"] = "turn"
         if result.get("ok"):
             result["msg"] = "网页通道会话跑完（%s）：%d 段输出，%d ms" % (
                 model, result.get("chunks") or 0, result.get("elapsed_ms") or 0)

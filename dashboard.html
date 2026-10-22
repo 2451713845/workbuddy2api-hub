@@ -4,6 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WorkBuddy 用量看板</title>
+<!-- 首帧判定：必须留在 <head>、在任何页面内容之前同步执行。
+     没有面板会话令牌（无痕 / 首次访问 / 已登出）→ 不动 markup 上的 display:flex，
+     登录闸门随首帧一起出现，看板骨架不会被先画出来再盖住。
+     有令牌 → 先隐藏闸门，交给 bootPanel() 用 /panel/status 复核；令牌过期或网关
+     重启导致复核失败时，panelNeedsLogin() 会摘掉这个类把闸门放回屏幕上。
+     这里必须 !important：闸门的可见性写在它自己的内联 style 上，普通规则压不住。 -->
+<style>html.wb-panel-session #panelGate{display:none!important}</style>
+<script>
+/* 面板会话令牌的存储键。全页只在这里定义一次：首帧判定要用它，所以必须先于
+   任何页面内容；后面的脚本直接复用这个绑定，不要再写一遍字面量。 */
+const PANEL_STORE = 'wb-proxy-panel-token';
+(function(){
+  try{
+    if(sessionStorage.getItem(PANEL_STORE)){
+      document.documentElement.classList.add('wb-panel-session');
+    }
+  }catch(e){}
+})();
+</script>
 <style>
 :root{
   /* 对比度增强 v2（2026-10-15）：信号元素进一步推强。
@@ -3910,7 +3929,11 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     </div>
   </div>
 </header>
-<div id="panelGate" style="position:fixed;inset:0;z-index:600;display:none;
+<!-- 面板闸门默认可见（fail-closed）。看板骨架是静态标记，闸门若初始 display:none，
+     首帧会先把整块看板画出来、等 /panel/status 回来才盖住：无痕窗口 / 首次访问每次
+     都能看到「登录后的界面」闪一下。有会话令牌时由 <head> 里那段首帧判定先隐藏
+     （html.wb-panel-session），复核失败再由 panelNeedsLogin() 显示。 -->
+<div id="panelGate" style="position:fixed;inset:0;z-index:600;display:flex;
      align-items:center;justify-content:center;padding:20px;background:var(--bg)">
   <div style="width:min(380px,100%);background:var(--panel);border:1px solid var(--line);
               border-radius:14px;padding:26px 24px;box-shadow:0 10px 30px rgba(15,23,42,.12)">
@@ -7639,7 +7662,7 @@ function card(k, v, sub, cls){
 
 /* ---- api key handling ---- */
 const KEY_STORE = 'wb-proxy-api-key';
-const PANEL_STORE = 'wb-proxy-panel-token';
+// PANEL_STORE 在 <head> 里定义（首帧判定要用它），这里不再重复声明。
 let API_KEY = '';
 let PANEL_TOKEN = '';
 try { PANEL_TOKEN = sessionStorage.getItem(PANEL_STORE) || ''; } catch(e) { PANEL_TOKEN = ''; }
@@ -10325,6 +10348,10 @@ function isAuthError(err){
 }
 
 function panelNeedsLogin(){
+  // 闸门的可见性有两处来源：markup 上的 display:flex，和 <head> 首帧判定加的
+  // html.wb-panel-session（!important）。必须先摘掉那个类，否则闸门永远出不来
+  // ——会话过期、登录失败都靠这个函数把登录框放回屏幕。
+  document.documentElement.classList.remove('wb-panel-session');
   const gate = document.getElementById('panelGate');
   if(gate) gate.style.display = 'flex';
   const input = document.getElementById('panelPwdInput');
@@ -10353,6 +10380,9 @@ function panelSessionLost(){
 }
 
 function panelHideGate(){
+  // 首帧判定的类只在「复核还没回来」时有用；一旦确认已登录就清掉，
+  // 让「有类 ⇔ 闸门被首帧判定隐藏」这条不变式只作用于启动阶段。
+  document.documentElement.classList.remove('wb-panel-session');
   const gate = document.getElementById('panelGate');
   if(gate) gate.style.display = 'none';
 }
@@ -10372,6 +10402,10 @@ async function submitPanelLogin(){
     const data = await r.json().catch(() => ({}));
     if(!r.ok){
       if(msg) msg.textContent = (data.error && data.error.message) || '密码错误';
+      // 登录失败必须保证闸门在屏幕上：带 ?pwd= 自动登录时页面不会走 bootPanel 的
+      // 未认证分支，闸门若停在首帧判定的隐藏态，用户看到的是「看着已登录、其实
+      // 进不去」的空看板，连重输的框都没有。
+      panelNeedsLogin();
       return;
     }
     PANEL_TOKEN = data.token || '';
@@ -10385,6 +10419,8 @@ async function submitPanelLogin(){
     await startDashboard();
   } catch(e) {
     if(msg) msg.textContent = '登录失败: ' + e.message;
+    // 网络层失败（网关没起来、反代 502）同样要把闸门留在屏幕上。
+    panelNeedsLogin();
   }
 }
 

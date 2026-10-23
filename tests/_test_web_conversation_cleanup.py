@@ -355,6 +355,26 @@ class CleanupTests(unittest.TestCase):
         with wb_accounts._WEB_LIVE_LOCK:
             wb_accounts._WEB_LIVE[(str(uid), str(conversation))]["started"] = time.time() - age
 
+    def test_the_registry_cannot_grow_without_bound(self):
+        """没人调 reclaim 的部署里，登记表也不能无限长。"""
+        acc = self.account()
+        try:
+            self.register_stale(acc.uid, "conv-ancient",
+                                age=wb_accounts.WEB_LIVE_REGISTRY_TTL + 60)
+            wb_accounts.web_live_register(acc.uid, "conv-new", "m1")
+            kept = [i["conversation"] for i in wb_accounts.web_live_snapshot(acc.uid)]
+            self.assertEqual(kept, ["conv-new"],
+                             "超过 TTL 的旧条目在注册新条目时被丢掉")
+
+            for index in range(wb_accounts.WEB_LIVE_REGISTRY_MAX + 10):
+                wb_accounts.web_live_register("bulk-uid", "conv-%03d" % index, "m1")
+            self.assertLessEqual(len(wb_accounts.web_live_snapshot()),
+                                 wb_accounts.WEB_LIVE_REGISTRY_MAX,
+                                 "条数硬上限：再多也只留这么多")
+        finally:
+            with wb_accounts._WEB_LIVE_LOCK:
+                wb_accounts._WEB_LIVE.clear()
+
     def _with_stub(self, stub, fn):
         real_urlopen = wb_accounts.urlopen
         wb_accounts.urlopen = stub

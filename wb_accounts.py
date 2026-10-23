@@ -102,6 +102,12 @@ WEB_LIVE_STALE_FACTOR = 2
 #: 清扫「上一个进程留下的活跃会话」时只动创建超过这么久的：一轮最多几分钟，
 #: 半小时还没结束的一定不是正在跑的本轮（也避免误杀另一个网关实例正在跑的会话）。
 WEB_ORPHAN_SWEEP_SECONDS = 1800
+#: 登记表里的条目最多留这么久。正常路径会注销，只有卡死的才会留到现在；万一某个
+#: 部署根本不跑调度器（没人调 reclaim），注册新条目时按这个年龄把老条目丢掉，
+#: 保证这张表不会无限长。
+WEB_LIVE_REGISTRY_TTL = 24 * 3600
+#: 登记表的硬上限（条）。TTL 之外的兜底：病态情况下也不会堆到几十万条。
+WEB_LIVE_REGISTRY_MAX = 128
 
 
 #: 本进程里「已经建出来、还没收尾」的网页会话：(uid, 会话 id) -> 登记信息。
@@ -119,10 +125,18 @@ def web_live_register(uid, conversation, model=""):
     """记下一条刚建出来、还没收尾的网页会话（供别的线程代收尾）。"""
     if not uid or not conversation:
         return
+    now = time.time()
     with _WEB_LIVE_LOCK:
+        # 这张表不能无限长：正常路径会注销，卡死的条目按年龄和条数兜底清掉。
+        for key, item in list(_WEB_LIVE.items()):
+            if now - item.get("started", 0) > WEB_LIVE_REGISTRY_TTL:
+                _WEB_LIVE.pop(key, None)
+        while len(_WEB_LIVE) >= WEB_LIVE_REGISTRY_MAX:
+            oldest = min(_WEB_LIVE, key=lambda k: _WEB_LIVE[k].get("started", 0))
+            _WEB_LIVE.pop(oldest, None)
         _WEB_LIVE[(str(uid), str(conversation))] = {
             "uid": str(uid), "conversation": str(conversation),
-            "model": model or "", "started": time.time(),
+            "model": model or "", "started": now,
         }
 
 

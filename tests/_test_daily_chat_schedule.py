@@ -297,6 +297,37 @@ class HangWatchdogTests(unittest.TestCase):
         with mock.patch.object(self.sched, "_daily_chat_budget", return_value=0):
             self.assertTrue(self.sched._run_one_daily_chat(acc))
 
+    def test_abandoned_workers_are_bounded(self):
+        """卡住的线程通常几十秒就结束；病态情况下也不能无限堆。"""
+        import threading
+        alive = [mock.MagicMock() for _ in range(wb_scheduler.DAILY_CHAT_ABANDONED_MAX)]
+        for item in alive:
+            item.is_alive.return_value = True
+        self.sched._daily_chat_abandoned = list(alive)
+        acc = self.account(hang=False)
+        self.assertFalse(self.sched._run_one_daily_chat(acc, wait=5),
+                         "线程堆到上限时这一轮跳过，而不是继续开新的")
+        acc.daily_chat.assert_not_called()
+        self.assertIn("跳过", " ".join(self.logs))
+
+    def test_finished_abandoned_workers_are_forgotten(self):
+        dead = mock.MagicMock()
+        dead.is_alive.return_value = False
+        self.sched._daily_chat_abandoned = [dead]
+        acc = self.account(hang=False)
+        self.assertTrue(self.sched._run_one_daily_chat(acc, wait=5))
+        self.assertEqual(self.sched._daily_chat_abandoned, [],
+                         "已经结束的线程要从计数里去掉，否则会一直占着上限")
+
+    def test_a_hung_account_counts_against_the_cap(self):
+        acc = self.account()
+        try:
+            self.sched._run_one_daily_chat(acc, wait=0.2)
+        finally:
+            self.release.set()
+        self.assertEqual(len(self.sched._daily_chat_abandoned), 1)
+        self.assertEqual(self.sched._daily_chat_status()["abandoned"], 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

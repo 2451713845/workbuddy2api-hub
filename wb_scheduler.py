@@ -22,6 +22,10 @@ from wb_tasks import do_cat_travel
 DAILY_CHAT_SLOT_GRACE_MINUTES = 720
 #: 批次截止的余量（秒）：每个账号有自己的预算，批次再给一份等待/收尾的余量。
 DAILY_CHAT_BATCH_SLACK = 60
+#: 被放弃的工作线程最多留这么多条。它们通常几十秒内自己结束（每一轮的网络调用
+#: 都有 20~30 秒超时），留上限是为了「上游一直滴数据 / DNS 卡住」这种病态情况：
+#: 到了上限就不再开新的工作线程，宁可这一轮跳过账号，也不让线程无限堆。
+DAILY_CHAT_ABANDONED_MAX = 8
 
 
 def _proxy_module():
@@ -105,6 +109,9 @@ class Scheduler:
         # 正在跑的网页活跃：uid8 -> {uid, started, budget}。面板要能看见「现在
         # 卡在哪个账号、还剩多少预算」，否则一次卡死只能是黑盒。
         self._daily_chat_live = {}
+        # 被放弃的工作线程（卡在网络上、到点不再等它）。它们通常几十秒内自己结束，
+        # 但「上游一直滴数据」这种病态情况会拖很久——留个上限，别让线程无限堆。
+        self._daily_chat_abandoned = []
         # 启动后第一次巡检要补跑当天还没活跃的国际版账号：进程在时段内停过
         # （或调度线程被卡住）时，旧实现只能等下一个时段，最多再等 12 小时。
         self._catchup_pending = True
@@ -552,6 +559,12 @@ class Scheduler:
         坑，只是换了个入口）。
         """
         uid8 = acc.uid[:8] if acc.uid else "?"
+        self._prune_abandoned_workers()
+        if len(self._daily_chat_abandoned) >= DAILY_CHAT_ABANDONED_MAX:
+            self.log(f"! 账号 [{uid8}] 本轮跳过：还有 {len(self._daily_chat_abandoned)} 条"
+                     f"上几轮的工作线程没退出（都卡在网络上），先不再开新的，"
+                     f"免得线程越堆越多；这个账号留到下一个时段")
+            return False
         self.log(f"检测到国际版账号 [{uid8}] 今日尚未活跃，执行每日活跃打卡对话...")
         budget = self._daily_chat_budget()
         if wait is None:
@@ -581,6 +594,7 @@ class Scheduler:
                     pass
                 self.log(f"! 账号 [{uid8}] 超过 {int(wait)}s 仍未返回（线程卡在网络上），"
                          f"已代为收尾 {reclaimed} 条网页会话，本轮放弃、留到下一个时段")
+                self._daily_chat_abandoned.append(worker)
                 self._record_daily_chat_hang(acc, wait, reclaimed)
                 return False
             exc = outcome.get("exc")
@@ -597,6 +611,11 @@ class Scheduler:
             return True
         self.log(f"! 账号 [{uid8}] 每日活跃对话失败: {res.get('error') or res.get('msg')}")
         return False
+
+    def _prune_abandoned_workers(self):
+        """把已经结束的「被放弃线程」从列表里去掉（还活着的留着继续计数）。"""
+        self._daily_chat_abandoned = [t for t in self._daily_chat_abandoned
+                                      if t.is_alive()]
 
     def _record_daily_chat_hang(self, acc, wait, reclaimed):
         """给被放弃的账号补一条活动记录，免得面板上整天看不到这个账号的结论。"""
@@ -746,4 +765,5 @@ class Scheduler:
             "next_slot": upcoming[0] if upcoming else "",
             "live": live,
             "budget_s": self._daily_chat_budget(),
+            "abandoned": len(self._daily_chat_abandoned),
         }

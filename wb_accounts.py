@@ -3295,6 +3295,15 @@ class Account(object):
         succeeded is the one piece of evidence that the vendor lifted it. (In
         normal dispatch a restricted account is never picked, so this only fires
         from a manual test.)
+
+        It also lifts the `token_expired` park. A response the upstream really
+        served is direct proof that the credential still works, yet that flag is
+        process-local and only ever cleared by a successful refresh, a re-login
+        or a restart. So an account parked by one credential-shaped 401 stayed
+        unusable for the rest of the process lifetime: the panel's "test" would
+        return a real model reply and still render 「凭证失效」, because
+        `ready()` kept the account out of rotation. Nothing re-tests the token
+        in between, so it never came back on its own.
         """
         with self._throttle_lock:
             if model:
@@ -3312,6 +3321,7 @@ class Account(object):
             self.last_error = ""
             self.last_error_detail = ""
             self.cooldown_until = 0.0
+            self.token_expired = False
 
     def throttle_wait(self, model=None):
         """Seconds until this account can serve `model` again (0 = right now)."""

@@ -166,9 +166,13 @@ class CleanupTests(unittest.TestCase):
                                        "error": "会话在 120s 内没有跑完（状态=working）"},
                            acc=acc)
         self.assertFalse(res.get("ok"))
-        # 每一轮失败都要收尾（现在至少两轮：第二轮留给「会话只是慢」）。
-        self.assertGreaterEqual(len(stub.actions("stop")), 1)
-        self.assertGreaterEqual(len(stub.actions("delete")), 1)
+        # 轮数由候选序列推出（至少两轮：第二轮留给「会话只是慢」），所以不再断言
+        # 「恰好一轮」；改断言不变量——建出来的每一条会话都必须被收尾。
+        # 失败的一轮是「先 stop 再 delete」，所以两者都该等于建出来的会话数。
+        self.assertEqual(len(stub.actions("stop")), len(stub.created()),
+                         "每建一条会话都必须 stop")
+        self.assertEqual(len(stub.actions("delete")), len(stub.created()),
+                         "失败的一轮 stop 之后还要 delete")
 
     def test_cleanup_runs_when_the_sandbox_lookup_fails(self):
         stub = WebStub(session_error=OSError("connection reset"))
@@ -176,8 +180,8 @@ class CleanupTests(unittest.TestCase):
         res = self.run_web(stub, acc=acc)
         self.assertFalse(res.get("ok"))
         self.assertIn("session 查询失败", res.get("error", ""))
-        self.assertGreaterEqual(len(stub.actions("delete")), 1,
-                                "会话已经建出来了，失败也必须收尾")
+        self.assertEqual(len(stub.actions("delete")), len(stub.created()),
+                         "会话已经建出来了，失败也必须收尾")
 
     def test_cleanup_runs_when_the_sandbox_has_no_link(self):
         stub = WebStub(session={"code": 0, "msg": "OK", "data": {}})
@@ -185,7 +189,8 @@ class CleanupTests(unittest.TestCase):
         res = self.run_web(stub, acc=acc)
         self.assertFalse(res.get("ok"))
         self.assertIn("沙箱", res.get("error", ""))
-        self.assertGreaterEqual(len(stub.actions("delete")), 1)
+        self.assertEqual(len(stub.actions("delete")), len(stub.created()),
+                         "建完就崩的分支也要收尾")
 
     # -- 10105：先清理再重试 -------------------------------------------------
     def leaked(self, count=10, name="Hi"):

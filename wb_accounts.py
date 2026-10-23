@@ -1,5 +1,6 @@
 import re
 import base64
+import datetime
 import json
 import os
 import random
@@ -47,17 +48,23 @@ WEB_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
                   "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0")
 DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
 DAILY_CHAT_WEB_PROMPT = "Hi"
-#: 回退组合在没配置时的候选：账号首选模型之外，再带上各区域的免费模型。
-#: 实际顺序按目录倍率排序（免费 → 低积分 → 高积分），见 _model_credit_rank。
-DAILY_CHAT_WEB_FREE_FALLBACK_INTL = ("hy3", "hy4-preview-f", "hy4-preview",
-                                     "glm-5.3-flash")
-DAILY_CHAT_WEB_FREE_FALLBACK_CN = ("hy3", "hy4-preview-f", "hy4-preview")
 #: 网页通道一轮最多等多久（秒）。实测一次「Hi」十几秒就跑完，留足余量。
 #: 没配 settings 的账号（如单测里手工构造的）用它兜底。
 WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
-#: 网页通道一共试几次（含第一轮）。第 N 轮的等待是首轮的 N 倍，所以
-#: 3 次 = 最多等 base×(1+2+4) 秒。设置页可改（见 wb_settings.daily_chat_web_attempts）。
+#: 网页通道至少跑几轮：第二轮留给「会话只是慢」（状态=working），一轮没跑完
+#: 不代表坏了。候选序列更长时按候选数量走（每个候选一轮）。
+WEB_MIN_ROUNDS = 2
+#: 兼容旧调用方：早期版本用它当「总尝试次数」。现在轮数由候选序列推出。
 WEB_TURN_ATTEMPTS = 3
+#: 单账号总预算（秒）的默认值；0 = 不限制。与 wb_settings 同值：没配 settings
+#: 的账号（单测里手工构造的）按它走。
+WEB_BUDGET_DEFAULT = 600
+#: 剩余预算低于这个值就不再开新的一轮：一轮至少要能等到会话真的跑起来。
+WEB_BUDGET_MIN_ROUND = 30
+#: 桌面腿（轻量对话）在首选模型冷却时顺延用的免费模型。网页腿不看这份名单 ——
+#: 那边的回退就是面板上的候选序列。
+DAILY_CHAT_DESKTOP_FALLBACKS = ("hy3", "hy4-preview-f", "hy4-preview",
+                                "glm-5.3-flash")
 #: 还没跑到 turn 就失败（建会话 5xx、取沙箱失败）时的退避基数（秒）。
 #: 那几轮只花掉几百毫秒、不消耗任何等待预算，背靠背重试等于把全部尝试挤进
 #: 同一个上游故障窗口（issue #558：8 个账号 × 6 次尝试全落进约 100 秒的抖动）。
@@ -89,6 +96,70 @@ WEB_CONVERSATION_ACTIVE_LIMIT = 10
 WEB_CONVERSATION_PRUNE_KEEP = 8
 #: 上游把「还在跑」的会话记成这些状态；只有它们占活跃名额。
 WEB_CONVERSATION_ACTIVE_STATUSES = ("working", "creating", "pending")
+#: 本进程记着的「已建未收尾」网页会话，超过这个时长就当跑过头了，由别的线程代收尾。
+#: 取值是单轮上限的两倍——正常一轮最多 turn_cap 秒，翻倍后仍没注销就一定是卡住了。
+WEB_LIVE_STALE_FACTOR = 2
+#: 清扫「上一个进程留下的活跃会话」时只动创建超过这么久的：一轮最多几分钟，
+#: 半小时还没结束的一定不是正在跑的本轮（也避免误杀另一个网关实例正在跑的会话）。
+WEB_ORPHAN_SWEEP_SECONDS = 1800
+#: 登记表里的条目最多留这么久。正常路径会注销，只有卡死的才会留到现在；万一某个
+#: 部署根本不跑调度器（没人调 reclaim），注册新条目时按这个年龄把老条目丢掉，
+#: 保证这张表不会无限长。
+WEB_LIVE_REGISTRY_TTL = 24 * 3600
+#: 登记表的硬上限（条）。TTL 之外的兜底：病态情况下也不会堆到几十万条。
+WEB_LIVE_REGISTRY_MAX = 128
+
+
+#: 本进程里「已经建出来、还没收尾」的网页会话：(uid, 会话 id) -> 登记信息。
+#:
+#: 正常路径靠 _daily_chat_web_once 的 finally 注销；但 finally 只有在那一轮**能
+#: 返回**时才跑得掉。getaddrinfo 不吃 socket 超时，服务端也可以一点一点滴数据，
+#: 于是存在「线程卡在 socket 上、永远走不到 finally」的窗口——那条会话就会一直
+#: 占着上游的活跃名额，直到进程重启。这张表让**别的线程**能在超时之后替它收尾：
+#: 收尾不能依赖那个卡住的线程本身。
+_WEB_LIVE = {}
+_WEB_LIVE_LOCK = threading.Lock()
+
+
+def web_live_register(uid, conversation, model=""):
+    """记下一条刚建出来、还没收尾的网页会话（供别的线程代收尾）。"""
+    if not uid or not conversation:
+        return
+    now = time.time()
+    with _WEB_LIVE_LOCK:
+        # 这张表不能无限长：正常路径会注销，卡死的条目按年龄和条数兜底清掉。
+        for key, item in list(_WEB_LIVE.items()):
+            if now - item.get("started", 0) > WEB_LIVE_REGISTRY_TTL:
+                _WEB_LIVE.pop(key, None)
+        while len(_WEB_LIVE) >= WEB_LIVE_REGISTRY_MAX:
+            oldest = min(_WEB_LIVE, key=lambda k: _WEB_LIVE[k].get("started", 0))
+            _WEB_LIVE.pop(oldest, None)
+        _WEB_LIVE[(str(uid), str(conversation))] = {
+            "uid": str(uid), "conversation": str(conversation),
+            "model": model or "", "started": now,
+        }
+
+
+def web_live_unregister(uid, conversation):
+    """这条会话已经收尾了，从登记表里去掉。"""
+    with _WEB_LIVE_LOCK:
+        _WEB_LIVE.pop((str(uid), str(conversation)), None)
+
+
+def web_live_snapshot(uid=None, min_age=0.0):
+    """还记着的未收尾会话；给了 uid 只看这个账号，min_age 只挑跑过头的。"""
+    now = time.time()
+    with _WEB_LIVE_LOCK:
+        items = [dict(item) for item in _WEB_LIVE.values()]
+    out = []
+    for item in items:
+        if uid and item["uid"] != str(uid):
+            continue
+        if min_age and now - item["started"] < min_age:
+            continue
+        out.append(item)
+    return out
+
 
 
 class TLSVerifyError(RuntimeError):
@@ -704,6 +775,25 @@ def degrade_backoff(fails):
                                 DEGRADE_THRESHOLD)
 
 
+def _clean_candidates(models):
+    """Order-preserving de-duplication of a candidate list.
+
+    Both the panel's list and the automatic one can contain the same id twice
+    (the preferred model is also a free model), and an empty id must never
+    reach the upstream. Kept separate from wb_settings._clean_models because
+    this one must not truncate: the caller decides how many rounds it walks.
+    """
+    seen = set()
+    ordered = []
+    for model in models or []:
+        name = str(model or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    return ordered
+
+
 def _model_credit_rank(model, realm):
     """The catalogue multiplier as a number; unknown models sort last.
 
@@ -726,6 +816,27 @@ def _model_credit_rank(model, realm):
                 pass
         break
     return float("inf")
+
+
+def _parse_created_at(value):
+    """把上游的 createdAt 解析成 epoch 秒；解析不出来返回 0.0。
+
+    上游给的是带时区的 ISO 8601（如 2026-10-22T09:00:00+08:00）。解析不出来时
+    返回 0.0，调用方一律当「判断不了年龄」跳过——宁可漏收一条，也不要误停用户
+    或另一个实例正在跑的会话（漏掉的由撞 10105 时的 web_conversation_prune 兜）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return 0.0
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp.timestamp()
 
 
 def _active_conversation_limit(status, detail):
@@ -1925,24 +2036,19 @@ class Account(object):
         }
 
     def daily_chat_model(self):
-        """Which model this account's daily activity runs on.
+        """Which model the desktop-identity leg of the activity runs on.
 
-        The panel's setting wins when set; otherwise the built-in free id. Both
-        legs (the desktop-identity completion and the web conversation) read
-        this, so one setting moves the whole activity.
+        Shares the candidate list with the web leg (`daily_chat_models`, first
+        entry preferred): one setting now drives both legs, and a model that is
+        cooling down or capped falls through to the next candidate instead of
+        failing the activity.
         """
-        candidates = []
-        if self.path:
-            picked = wb_settings.daily_chat_model(os.path.dirname(self.path))
-            if picked:
-                candidates.append(picked)
-        candidates.append(DAILY_CHAT_MODEL)
-        # Add fallback free models for the account's realm if preferred model is cooling down
-        if self.realm == "intl":
-            candidates.extend(["hy3", "hy4-preview-f", "hy4-preview", "glm-5.3-flash"])
-        else:
-            candidates.extend(["hy3", "hy4-preview-f", "hy4-preview"])
-
+        candidates = self.web_fallback_models() or [DAILY_CHAT_MODEL]
+        if len(candidates) < 2:
+            # 桌面腿历史上会在首选模型冷却 / 达限时顺延到其它免费模型。候选序列
+            # 只配了一个（或没配）时保留这份顺延；网页腿的轮数仍只看候选序列。
+            candidates = candidates + [model for model in DAILY_CHAT_DESKTOP_FALLBACKS
+                                       if model not in candidates]
         now = time.time()
         with self._throttle_lock:
             for cand in candidates:
@@ -1953,38 +2059,27 @@ class Account(object):
         return candidates[0]
 
     def web_fallback_models(self):
-        """The ordered model combination the web leg falls back through.
+        """The ordered model candidates the web leg walks through.
 
-        The panel's combination wins; when it is empty the account's preferred
-        model plus the realm's free models form the default. Either way the
-        result is sorted by catalogue multiplier, so a free model runs before a
-        cheap paid one and that one before an expensive one. The account's
-        preferred model is first when it shares the cheapest tier, because it
-        is what the operator picked.
+        An explicit list in the panel wins and is used **in that order** - it is
+        the operator's priority, not a suggestion. Only the automatic mode (no
+        list configured) sorts by catalogue multiplier, so a free model runs
+        before a cheap paid one and that one before an expensive one.
+
+        This replaces the old pair of settings (`daily_chat_model` for the
+        preferred model plus a separate fallback switch and combination): with
+        both set, the fallback branch took every model from the combination and
+        the preferred model never ran at all.
         """
         configured = []
         if self.path:
-            configured = wb_settings.daily_chat_web_fallback_models(
+            configured = wb_settings.daily_chat_models(
                 os.path.dirname(self.path))
         if configured:
-            candidates = list(configured)
-        else:
-            candidates = [self.daily_chat_model()]
-            if self.realm == "cn":
-                candidates.extend(DAILY_CHAT_WEB_FREE_FALLBACK_CN)
-            else:
-                candidates.extend(DAILY_CHAT_WEB_FREE_FALLBACK_INTL)
-        preferred = self.daily_chat_model()
-        seen = set()
-        ordered = []
-        for model in candidates:
-            if not model or model in seen:
-                continue
-            seen.add(model)
-            ordered.append(model)
-        ordered.sort(key=lambda model: (_model_credit_rank(model, self.realm),
-                                        0 if model == preferred else 1))
-        return ordered
+            return _clean_candidates(configured)
+        # 自动模式只有内置的免费模型一个候选：候选序列就是回退，没配就是不回退。
+        # 旧实现在这里额外塞进各区域的免费模型，只因为那套「回退组合」必须有人填。
+        return [DAILY_CHAT_MODEL]
 
     def daily_chat_web_prompt(self):
         """The prompt this turn sends on the web channel.
@@ -2034,52 +2129,78 @@ class Account(object):
     def _daily_chat_web_upstream(self, prompt=None):
         """网页通道的实际流程；返回形状见 daily_chat_web。
 
-        失败会再试（见 daily_chat_web_policy）：一共最多 attempts 次（含第一轮），
-        第 N 轮的等待是首轮的 N 倍 —— 默认 3 次、首轮 120 秒，也就是
-        120 / 240 / 360。最典型的失败是「会话还没跑完」（状态=working），它往往
-        只是慢，多等一轮就好，所以这里把等待时间当成重试的代价，不再额外 sleep。
-        业务拒绝（建会话返回非 0 code）不再试：同一个被拒的请求再发一次也一样被拒。
-        例外是「还没跑到 turn 就失败」的轮次（建会话 5xx、取沙箱失败）：那几轮
-        一秒都没等，再打一次仍落在同一个上游故障窗口里，所以补一段指数退避
-        （见 _web_retry_pause / web_retry_backoff）。
+        一次打卡 = **一个预算 + 一个候选序列**：按候选顺序一轮一轮试，每轮最多等到
+        「单轮上限」与「剩余预算」里较小的那个；建会话 / 取沙箱失败后的退避也从同
+        一个预算里扣。预算用尽必定给出结论（phase="budget"），不再有「跑了几个小
+        时没动静、面板一片空白」这种状态。
 
-        返回里带 attempts（实际跑了几轮），其余字段与 _daily_chat_web_once 一致。
+        轮数由候选序列推出（至少两轮：第二轮留给「会话只是慢」），所以面板上不再
+        需要「最多尝试次数」这个与候选数量互相覆盖的旋钮——旧实现里它被
+        `max(总次数, 候选数)` 顶掉，设 1 次也照样跑 6 次。
+
+        业务拒绝（建会话返回非 0 code）不再试：同一个被拒的请求再发一次也一样被拒。
+
+        返回里带 attempts（实际跑了几轮）、models_tried、model，其余字段与
+        _daily_chat_web_once 一致。
         """
-        base, total = self.daily_chat_web_policy()
-        directory = os.path.dirname(self.path) if self.path else ""
-        if directory and wb_settings.daily_chat_web_fallback(directory):
-            models = self.web_fallback_models()
-            if models:
-                # At least one try per candidate, so a combination the operator
-                # picked is actually walked; the configured attempt count still
-                # applies when it is larger (a second pass over the list).
-                attempts = max(total, len(models))
-                tried = []
-                last = None
-                for attempt in range(attempts):
-                    model = models[attempt % len(models)]
-                    res = self._daily_chat_web_once(
-                        prompt, wait_seconds=base * (2 ** attempt), model=model)
-                    res["attempts"] = attempt + 1
-                    res["models_tried"] = tried + [model]
-                    res["model"] = model
-                    if res.get("ok"):
-                        return res
-                    last = res
-                    if not res.get("retryable"):
-                        return res
-                    tried.append(model)
-                    if attempt + 1 < attempts:
-                        self._web_retry_pause(res, attempt)
-                return last
-        attempt = 0
-        while True:
-            res = self._daily_chat_web_once(prompt, wait_seconds=base * (attempt + 1))
-            res["attempts"] = attempt + 1
-            if res.get("ok") or attempt + 1 >= total or not res.get("retryable"):
+        models = self.web_fallback_models() or [self.daily_chat_model()]
+        turn_cap, rounds = self.daily_chat_web_policy()
+        budget = self.daily_chat_budget()
+        deadline = time.time() + budget if budget > 0 else None
+        tried = []
+        last = None
+        budget_hit = False
+        # 开跑之前先把「上一次跑剩下的」收干净，两层：
+        # 1. 本进程登记着、却已经超过两轮上限还没注销的会话——上一轮卡在 socket 上，
+        #    它的 finally 永远跑不到，只能由本线程代收；
+        # 2. 上一个进程留下的（登记表跟着进程一起没了，只能按上游会话列表兜底）。
+        # 任何一步失败都不影响这一轮：名额真不够时建会话会走 10105 的清理重试。
+        try:
+            self.web_conversation_reclaim(max_age=turn_cap * WEB_LIVE_STALE_FACTOR)
+            self.web_conversation_sweep_orphans()
+        except Exception:
+            pass
+        for index in range(rounds):
+            wait = turn_cap
+            if deadline is not None:
+                remaining = deadline - time.time()
+                if remaining < WEB_BUDGET_MIN_ROUND:
+                    budget_hit = True
+                    break
+                # 向上取整：面板上「单轮最长 120 秒」就该等满 120 秒，
+                # 别因为几毫秒的已用时间把它变成 119。
+                wait = min(turn_cap, int(remaining + 0.999))
+            model = models[index % len(models)]
+            res = self._daily_chat_web_once(prompt, wait_seconds=wait, model=model)
+            res["attempts"] = index + 1
+            res["models_tried"] = tried + [model]
+            res["model"] = model
+            if res.get("ok"):
                 return res
-            self._web_retry_pause(res, attempt)
-            attempt += 1
+            last = res
+            if not res.get("retryable"):
+                return res
+            tried.append(model)
+            if index + 1 >= rounds:
+                break
+            self._web_retry_pause(res, index)
+            if deadline is not None and deadline - time.time() < WEB_BUDGET_MIN_ROUND:
+                budget_hit = True
+                break
+        if last is None:
+            # 预算小到连第一轮都放不下：仍然要给一个明确结论，不能返回空。
+            return {"ok": False, "phase": "budget", "budget_exhausted": True,
+                    "attempts": 0,
+                    "error": "单账号预算 %ds 不足一轮（至少需要 %ds 秒）"
+                             % (budget, WEB_BUDGET_MIN_ROUND)}
+        if budget_hit:
+            last = dict(last)
+            last["phase"] = "budget"
+            last["budget_exhausted"] = True
+            last["error"] = ("单账号预算 %ds 用尽（尝试 %d 轮，最后状态 %s）：%s"
+                             % (budget, len(tried), last.get("status") or "未知",
+                                last.get("error") or "会话没有跑完"))
+        return last
 
     def _web_retry_pause(self, res, round_index):
         """还没跑到 turn 就失败时补一段退避，返回实际等了多少秒。
@@ -2109,23 +2230,36 @@ class Account(object):
         return wb_settings.daily_chat_web_retry_backoff(
             os.path.dirname(self.path), default=WEB_RETRY_BACKOFF)
 
-    def daily_chat_web_policy(self):
-        """(首轮等待秒数, 总尝试次数)。设置页改过就按设置页的来。
+    def daily_chat_budget(self):
+        """单账号跑完网页活跃的总预算（秒）；0 = 不限制。
 
-        重试开关默认开（见 wb_settings.daily_chat_web_retry），关掉就是只试一次。
-        等待时间没设过时用 WEB_TURN_TIMEOUT —— 它吃 WB_WEB_TURN_TIMEOUT 环境变量，
-        别让这个新设置项把它悄悄顶掉。没配 settings 的账号（单测里手工构造的）
-        同样按内置默认走。
+        这是这套流程里唯一的时间上限：每轮等待、建会话失败后的退避都从它里面扣，
+        所以「一次打卡最长占住调度器多久」是一个可预测的数（默认 600 秒）。旧实现
+        没有这个上限，一个卡在「会话永远 working」的账号能把整轮巡检拖住数小时。
         """
         if not self.path:
-            return WEB_TURN_TIMEOUT, WEB_TURN_ATTEMPTS
+            return WEB_BUDGET_DEFAULT
+        return wb_settings.daily_chat_budget(
+            os.path.dirname(self.path), default=WEB_BUDGET_DEFAULT)
+
+    def daily_chat_web_policy(self):
+        """(单轮最长等待秒数, 轮数)。设置页改过就按设置页的来。
+
+        轮数 = max(WEB_MIN_ROUNDS, 候选数)：候选序列每多一个模型就多一轮，最少两轮
+        —— 第二轮留给「会话只是慢」（状态=working），一轮没跑完不代表坏了。总时长由
+        单账号预算兜底（见 daily_chat_budget），所以这里不需要「最多尝试次数」这个
+        与候选数量互相覆盖的旋钮。
+
+        等待时间没设过时用 WEB_TURN_TIMEOUT —— 它吃 WB_WEB_TURN_TIMEOUT 环境变量，
+        别让这个设置项把它悄悄顶掉。没配 settings 的账号（单测里手工构造的）同样按
+        内置默认走。
+        """
+        rounds = max(WEB_MIN_ROUNDS, len(self.web_fallback_models()))
+        if not self.path:
+            return WEB_TURN_TIMEOUT, rounds
         directory = os.path.dirname(self.path)
-        total = 1
-        if wb_settings.daily_chat_web_retry(directory):
-            total = wb_settings.daily_chat_web_attempts(directory,
-                                                        default=WEB_TURN_ATTEMPTS)
         return (wb_settings.daily_chat_web_timeout(directory, default=WEB_TURN_TIMEOUT),
-                total)
+                rounds)
 
     def _daily_chat_web_once(self, prompt=None, wait_seconds=None, model=None):
         """网页通道的一轮尝试；返回形状见 daily_chat_web。
@@ -2171,6 +2305,9 @@ class Account(object):
                     "phase": "create"}
 
         keep = False
+        # 建出来就先登记：万一这一轮卡在 socket 上走不到 finally，别的线程还能
+        # 按这张表替它收尾（见 web_conversation_reclaim）。
+        web_live_register(self.uid, conversation, model)
         try:
             # 建完只是排队：接上沙箱、请求这一轮，它才会真的跑起来（issue #90）。
             try:
@@ -2209,7 +2346,10 @@ class Account(object):
             # 这个账号就再也建不出会话（HTTP 429 / 10105）。成功的一轮保留记录
             # （stop 只把状态改成 completed），失败的一轮直接删掉，免得网页端历史
             # 里堆满「Hi」。
-            self.web_conversation_release(conversation, delete=not keep)
+            try:
+                self.web_conversation_release(conversation, delete=not keep)
+            finally:
+                web_live_unregister(self.uid, conversation)
 
     def _web_conversation_get(self, conversation, suffix=""):
         """读一条网页端会话（suffix 为空拿会话本身，"/session" 拿沙箱信息）。"""
@@ -2312,6 +2452,58 @@ class Account(object):
             if str((conversation or {}).get("name") or "").strip() not in pool:
                 continue
             if self._web_conversation_call(conversation.get("id"), "stop"):
+                stopped += 1
+        return stopped
+
+    def web_conversation_reclaim(self, max_age=0.0):
+        """替**别的线程**收尾它建出来、却还没注销的网页会话；返回收掉的条数。
+
+        为什么需要它：_daily_chat_web_once 的 finally 只在这一轮能返回时才跑得掉，
+        而 socket 层存在走不到返回的窗口（getaddrinfo 不吃 socket 超时、服务端可
+        以一点一点滴数据）。那一路卡住时，那条会话会一直占着上游的活跃名额，攒够
+        十条这个账号就再也建不出会话——和 #623 修的是同一个坑，只是那条路径靠
+        finally 兜不住。
+
+        max_age=0 表示「这个账号登记着的一律收掉」；给了秒数就只收超过这个时长的
+        （正常一轮的 finally 会自己注销，只有跑过头的才会被收）。收尾用本线程自己
+        的短超时连接，与卡住的那条线程无关，所以它卡着也照样能收。
+        """
+        reclaimed = 0
+        for item in web_live_snapshot(self.uid, min_age=max_age):
+            conversation = item.get("conversation")
+            # 先从表里摘掉再收：万一收尾又卡住，不会在下一轮被反复重收。
+            web_live_unregister(self.uid, conversation)
+            if self.web_conversation_release(conversation, delete=True):
+                reclaimed += 1
+        return reclaimed
+
+    def web_conversation_sweep_orphans(self, older_than=WEB_ORPHAN_SWEEP_SECONDS):
+        """清扫**上一个进程**留下的活跃会话；返回停掉的条数。
+
+        进程被 kill 或崩掉时登记表跟着没了，靠 web_conversation_reclaim 收不到；
+        这里按上游的会话列表兜底：只停「名字来自每日活跃提示词池」且创建超过
+        older_than 秒、仍处于活跃状态的会话（用户自己在网页端的对话不碰）。
+
+        阈值默认 30 分钟——一轮最多几分钟，半小时还没结束的一定不是正在跑的本轮，
+        也避免误杀另一个网关实例正在跑的会话。只 stop 不 delete：历史留着。
+        """
+        try:
+            conversations = self.web_conversation_list()
+        except Exception:
+            return 0
+        cutoff = time.time() - max(0, older_than)
+        pool = self._daily_activity_prompt_pool()
+        stopped = 0
+        for conversation in conversations:
+            data = conversation or {}
+            if str(data.get("status") or "").lower() not in WEB_CONVERSATION_ACTIVE_STATUSES:
+                continue
+            if str(data.get("name") or "").strip() not in pool:
+                continue
+            created = _parse_created_at(data.get("createdAt"))
+            if not created or created > cutoff:
+                continue
+            if self._web_conversation_call(data.get("id"), "stop"):
                 stopped += 1
         return stopped
 

@@ -3571,6 +3571,39 @@ class Account(object):
             return
         with self._throttle_lock:
             self.model_cooldowns.pop(model, None)
+            # 起始时刻一起清：留着它，同一个模型下次再被限流时，面板会显示
+            # 上一次的开始时间（早于本次限流），把「刚开始 2 分钟」说成「很久了」。
+            self.model_cooldowns_at.pop(model, None)
+
+    def arm_model_cooldown(self, model, until, started_at=None):
+        """把一条**已知**的限流窗口挂成模型冷却（重启后恢复用）。
+
+        与 note_error 的分工：那个是「刚撞到」的现场记录，会一起写 last_error
+        与 last_error_detail；这个是从盘上读回来的恢复，只补冷却，不改错误文案
+        ——重启不该把「上次的报错」重新贴到账号行上。
+
+        返回是否真的挂上了（窗口已过期或已有更晚的冷却时返回 False）。
+        """
+        if not model:
+            return False
+        try:
+            until = float(until)
+        except (TypeError, ValueError):
+            return False
+        now = time.time()
+        if until <= now:
+            return False
+        with self._throttle_lock:
+            if self.model_cooldowns.get(model, 0.0) >= until:
+                return False
+            self.model_cooldowns[model] = until
+            try:
+                started = float(started_at or 0)
+            except (TypeError, ValueError):
+                started = 0.0
+            if started:
+                self.model_cooldowns_at.setdefault(model, started)
+        return True
 
 def _human_delta(seconds):
     if seconds is None: return None
@@ -3927,6 +3960,11 @@ class AccountPool(object):
             # 6004 的恢复时间跨重启有效：把还在恢复时间内的组合重新挂成模型
             # 冷却，否则重启会把它们重新放出去，直到下次撞 429 才又停。
             self.restore_model_caps()
+            # 普通 429（非 6004，比如国内版的频率限制）带的重置时刻由窗口探针
+            # 落在 model_windows.json 里，跨重启有效；但 restore_model_caps 只读
+            # 凭证档的 modelCaps，读不到它。不补这一次，重启后这些窗口就只对
+            # 探针可见：池子照常派单（每单再吃一次 429），面板「当前禁用」也空着。
+            self.restore_window_cooldowns()
             return self.accounts
 
     def restore_model_caps(self, now=None):
@@ -3940,6 +3978,43 @@ class AccountPool(object):
                     restored[account.uid] = mids
         for uid, mids in sorted(restored.items()):
             self.log("account %s: 模型 %s 仍在额度恢复期内（至上游给定时刻）"
+                     % (uid[:8], ", ".join(mids)))
+        return restored
+
+    def restore_window_cooldowns(self, now=None):
+        """把 wb_window_probe 登记的限流窗口挂回模型冷却（重启后恢复）。
+
+        与 restore_model_caps 的分工：那个管 6004（配额用满，来源是凭证档的
+        modelCaps），这个管「429 带重置时刻」的普通限流（来源是
+        accounts/model_windows.json）。两者都只在 reset_at 还没到时才挂，到点由
+        窗口探针清掉（_fire 成功后调 clear_model_cooldown），不会永久钉住账号。
+
+        读不到探针状态（模块缺失、文件坏）只写日志，不影响加载：宁可这次不恢复，
+        也不能因为一个附属文件让整个账号池加载失败。
+        """
+        now = time.time() if now is None else now
+        directory = getattr(self, "dir", "") or ""
+        if not directory:
+            return {}
+        try:
+            import wb_window_probe
+            windows = wb_window_probe.snapshot(directory, now)
+        except Exception as exc:
+            self.log("窗口探针状态读取失败（跳过限流窗口恢复）: %s" % exc)
+            return {}
+        restored = {}
+        with self._lock:
+            by_uid = {a.uid: a for a in self.accounts}
+            for row in windows or ():
+                uid = str(row.get("uid") or "")
+                model = str(row.get("model") or "")
+                account = by_uid.get(uid)
+                if account is None or not model:
+                    continue
+                if account.arm_model_cooldown(model, row.get("reset_at")):
+                    restored.setdefault(uid, []).append(model)
+        for uid, mids in sorted(restored.items()):
+            self.log("account %s: 模型 %s 仍在上游限流窗口内（重启后按窗口恢复）"
                      % (uid[:8], ", ".join(mids)))
         return restored
 

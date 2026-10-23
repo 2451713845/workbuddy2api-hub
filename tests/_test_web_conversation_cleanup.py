@@ -293,6 +293,25 @@ class CleanupTests(unittest.TestCase):
         finally:
             wb_accounts.web_live_unregister(acc.uid, "conv-stuck")
 
+    def test_failed_reclaim_keeps_the_entry_for_the_next_attempt(self):
+        """收尾请求失败不能先摘登记：那会把唯一的回收线索丢掉。"""
+        stub = WebStub(action_error=OSError("cleanup endpoint down"))
+        acc = self.account()
+        wb_accounts.web_live_register(acc.uid, "conv-retry", "m1")
+        try:
+            reclaimed = self._with_stub(stub, lambda: acc.web_conversation_reclaim(0))
+            self.assertEqual(reclaimed, 0)
+            self.assertEqual([i["conversation"] for i in
+                              wb_accounts.web_live_snapshot(acc.uid)],
+                             ["conv-retry"])
+
+            stub.action_error = None
+            reclaimed = self._with_stub(stub, lambda: acc.web_conversation_reclaim(0))
+            self.assertEqual(reclaimed, 1)
+            self.assertEqual(wb_accounts.web_live_snapshot(acc.uid), [])
+        finally:
+            wb_accounts.web_live_unregister(acc.uid, "conv-retry")
+
     def test_reclaim_ignores_a_round_that_is_still_within_its_budget(self):
         stub = WebStub()
         acc = self.account()

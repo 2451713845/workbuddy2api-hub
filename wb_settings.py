@@ -2408,9 +2408,30 @@ def daily_chat_models(accounts_dir):
     combination by catalogue multiplier, which is how a model picked in the
     panel ended up never running at all.
     """
-    stored = load(accounts_dir).get("daily_chat_models")
+    data = load(accounts_dir)
+    stored = data.get("daily_chat_models")
     if isinstance(stored, (list, tuple)):
         return _clean_models(stored)
+    # Upgrade path for installs that configured the old pair. The old fallback
+    # list was only active when its switch was on; the preferred model still
+    # ran first. Fold both into one ordered list so the panel starts from the
+    # operator's actual prior behaviour instead of silently resetting.
+    legacy_fallback = data.get("daily_chat_web_fallback") is True
+    candidates = []
+    preferred = str(data.get("daily_chat_model") or "").strip()
+    if preferred:
+        candidates.append(preferred)
+    if legacy_fallback:
+        raw = data.get("daily_chat_web_fallback_models")
+        if isinstance(raw, str):
+            raw = raw.replace("，", ",").split(",")
+        elif isinstance(raw, (list, tuple)):
+            raw = list(raw)
+        else:
+            raw = []
+        candidates.extend(str(item or "").strip() for item in raw)
+    if candidates:
+        return _clean_models(candidates)
     return []
 
 

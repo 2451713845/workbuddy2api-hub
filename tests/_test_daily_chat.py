@@ -7,6 +7,7 @@ pinned here so it cannot drift from what the web app actually sends.
 import io
 import json
 import urllib.error, os, sys, unittest, time
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
@@ -459,6 +460,39 @@ class WebChannelTests(unittest.TestCase):
         for bad in (-1, wb_settings.DAILY_CHAT_BUDGET_MAX + 1, "600", True):
             with self.assertRaises(ValueError):
                 wb_settings.set_daily_chat_budget(directory, bad)
+
+    def test_legacy_model_and_fallback_settings_migrate_to_the_candidate_list(self):
+        """升级不能把老部署选过的模型与回退组合静默丢掉。"""
+        directory = os.path.join(_TMP.name, "web-legacy-candidates")
+        os.makedirs(directory, exist_ok=True)
+        with open(wb_settings.settings_path(directory), "w", encoding="utf-8") as fh:
+            json.dump({
+                "daily_chat_model": "hy3",
+                "daily_chat_web_fallback": True,
+                "daily_chat_web_fallback_models": ["glm-5.3-flash", "hy3"],
+            }, fh)
+        self.assertEqual(wb_settings.daily_chat_models(directory),
+                         ["hy3", "glm-5.3-flash"])
+
+        with open(wb_settings.settings_path(directory), "w", encoding="utf-8") as fh:
+            json.dump({
+                "daily_chat_model": "hy3",
+                "daily_chat_web_fallback": False,
+                "daily_chat_web_fallback_models": ["glm-5.3-flash"],
+            }, fh)
+        self.assertEqual(wb_settings.daily_chat_models(directory), ["hy3"])
+
+    def test_backoff_is_clamped_to_the_remaining_budget(self):
+        """建会话失败后的退避不能睡过单账号总预算。"""
+        acc = self.account_in("web-backoff-budget", budget=600)
+        deadline = time.time() + 2.0
+        with mock.patch.object(wb_accounts.time, "sleep") as sleep:
+            waited = acc._web_retry_pause(
+                {"phase": "create"}, 5, deadline=deadline)
+        self.assertGreater(waited, 0)
+        self.assertLessEqual(waited, 2.0)
+        sleep.assert_called_once()
+        self.assertLessEqual(sleep.call_args[0][0], 2.0)
 
     def test_the_web_toggle_defaults_on_and_round_trips(self):
         directory = os.path.join(_TMP.name, "web-toggle")

@@ -99,7 +99,7 @@ class Scheduler:
         self.travel_hours = [9, 21]      # 每日 09:00 派出、21:00 领奖闭环
         self.keepalive_hours = [22]      # 每日 22:00 集中 Token 保活检查
         self.cat_hours = [1]             # 每日 01:00 夜猫子专属任务
-        # 网页活跃（国际版每日活跃）的独立时段，HH:MM；空 = 跟随 checkin 整点。
+        # 网页活跃（国际版每日活跃）的独立时段，HH:MM；空 = 当天随机抽两个。
         self.daily_chat_times = []
         # 生效时段是不是「今天随机抽的两个」（面板没填时段时的默认行为）。
         self.daily_chat_random_slots = True

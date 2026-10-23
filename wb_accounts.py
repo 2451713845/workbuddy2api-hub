@@ -2183,7 +2183,7 @@ class Account(object):
             tried.append(model)
             if index + 1 >= rounds:
                 break
-            self._web_retry_pause(res, index)
+            self._web_retry_pause(res, index, deadline=deadline)
             if deadline is not None and deadline - time.time() < WEB_BUDGET_MIN_ROUND:
                 budget_hit = True
                 break
@@ -2202,18 +2202,21 @@ class Account(object):
                                 last.get("error") or "会话没有跑完"))
         return last
 
-    def _web_retry_pause(self, res, round_index):
+    def _web_retry_pause(self, res, round_index, deadline=None):
         """还没跑到 turn 就失败时补一段退避，返回实际等了多少秒。
 
         跑过 turn 的轮次已经把等待预算（wait_seconds）花掉了，再睡一次就是双重
         惩罚；而建会话 / 取沙箱失败只用掉几百毫秒，背靠背重试会把所有尝试挤进
         同一个上游故障窗口。phase 缺失时按「已跑到 turn」处理，旧调用方和测试
-        桩返回的结果形状因此保持原样。
+        桩返回的结果形状因此保持原样。给了 deadline 时，退避也会被剩余预算钳住，
+        不能睡过总预算。
         """
         if res.get("phase") not in ("create", "session"):
             return 0.0
         delay = web_retry_backoff(round_index,
                                   base=self.daily_chat_web_retry_backoff())
+        if deadline is not None:
+            delay = min(delay, max(0.0, deadline - time.time()))
         if delay > 0:
             time.sleep(delay)
         return delay
@@ -2471,9 +2474,10 @@ class Account(object):
         reclaimed = 0
         for item in web_live_snapshot(self.uid, min_age=max_age):
             conversation = item.get("conversation")
-            # 先从表里摘掉再收：万一收尾又卡住，不会在下一轮被反复重收。
-            web_live_unregister(self.uid, conversation)
             if self.web_conversation_release(conversation, delete=True):
+                # 收尾成功后才摘掉登记：失败时留着重试，否则这个活跃名额会永久
+                # 丢失（进程内登记表是它唯一的回收线索）。
+                web_live_unregister(self.uid, conversation)
                 reclaimed += 1
         return reclaimed
 

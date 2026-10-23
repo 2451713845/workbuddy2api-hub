@@ -1,8 +1,8 @@
 """Web-activity schedule: minute-level slots, independent of the checkin hours.
 
 The intl daily activity used to run at the checkin hours (09:00/21:00). An
-operator can now give it its own HH:MM slots; empty keeps the old behaviour, so
-an install that never touches the setting is unchanged.
+operator can now give it its own HH:MM slots; empty draws two random slots for
+the day, 12 hours apart, to avoid the upstream's top-of-hour batch window.
 """
 import os
 import sys
@@ -127,7 +127,9 @@ class CycleScopeTests(unittest.TestCase):
         self.acc.checkin.assert_not_called()
         self.acc.refresh.assert_not_called()
 
-    def test_empty_slots_follow_the_checkin_hour(self):
+    def test_empty_slots_use_todays_random_slots(self):
+        """时段留空时仍按当天随机时段运行，启动补跑先跑一轮。"""
+        self.sched.daily_chat_random_slots = True
         self.run_cycle()
         self.acc.daily_chat.assert_called_once_with(trigger="scheduler")
 

@@ -17,6 +17,12 @@ import wb_quota_scan
 import wb_settings
 from wb_tasks import do_cat_travel
 
+#: 网页活跃时段到期后还能补多久（分钟）。两个时段相隔 12 小时，所以 12 小时既覆盖
+#: 「巡检被占住 / 进程重启 / 漏了一次 tick」，又不会把昨天没跑的时段补到今天。
+DAILY_CHAT_SLOT_GRACE_MINUTES = 720
+#: 批次截止的余量（秒）：每个账号有自己的预算，批次再给一份等待/收尾的余量。
+DAILY_CHAT_BATCH_SLACK = 60
+
 
 def _proxy_module():
     """返回**正在运行的那一份** wb_proxy。
@@ -91,9 +97,17 @@ class Scheduler:
         self.cat_hours = [1]             # 每日 01:00 夜猫子专属任务
         # 网页活跃（国际版每日活跃）的独立时段，HH:MM；空 = 跟随 checkin 整点。
         self.daily_chat_times = []
+        # 生效时段是不是「今天随机抽的两个」（面板没填时段时的默认行为）。
+        self.daily_chat_random_slots = True
         # 今日已触发的网页活跃时段，防 30 秒轮询重复触发；重启后清空，
         # 账号级 can_daily_chat() 仍会挡住当天已完成的账号。
         self._daily_chat_done = {}
+        # 正在跑的网页活跃：uid8 -> {uid, started, budget}。面板要能看见「现在
+        # 卡在哪个账号、还剩多少预算」，否则一次卡死只能是黑盒。
+        self._daily_chat_live = {}
+        # 启动后第一次巡检要补跑当天还没活跃的国际版账号：进程在时段内停过
+        # （或调度线程被卡住）时，旧实现只能等下一个时段，最多再等 12 小时。
+        self._catchup_pending = True
         self.all_hours = sorted(list(set(self.checkin_hours + self.travel_hours + self.keepalive_hours + self.cat_hours)))
         self.enabled = True
         self._stop_event = threading.Event()
@@ -248,27 +262,39 @@ class Scheduler:
     def _due_daily_chat_slot(self, now=None):
         """The HH:MM web-activity slot due right now, or "" when none is.
 
-        The loop wakes every 30 seconds, so a minute-level slot is caught even
-        though the rest of the grid is hourly. Each slot is returned at most
-        once per day; the account-level can_daily_chat() gate still prevents a
-        restart from re-running a slot the accounts already completed.
+        按**到期窗口**判定，不是精确到分。巡检循环 30 秒醒一次，但一轮巡检可能
+        占住好几分钟（旧实现里甚至几小时），而 `HH:MM == now` 的精确匹配会让这个
+        时段当天直接漏掉 —— 日志里一个字都没有，面板上就是「今天没跑」。现在只要
+        「到点了、今天这个时段还没跑过、且没超过补跑窗口」就命中，所以重启、卡顿、
+        漏 tick 都能补上。
+
+        每个时段一天只返回一次；账号级 can_daily_chat() 仍然挡住当天已完成的账号。
         """
         if not self.daily_chat_times:
             return ""
         now = time.localtime() if now is None else now
-        slot = "%02d:%02d" % (now.tm_hour, now.tm_min)
-        if slot not in self.daily_chat_times:
-            return ""
+        current = now.tm_hour * 60 + now.tm_min
         day = time.strftime("%Y-%m-%d", now)
         done = self._daily_chat_done.setdefault(day, set())
-        if slot in done:
-            return ""
-        done.add(slot)
-        # The map is a same-day guard, not history.
-        for other in list(self._daily_chat_done):
-            if other != day:
-                self._daily_chat_done.pop(other, None)
-        return slot
+        for slot in self.daily_chat_times:
+            if slot in done:
+                continue
+            try:
+                hour, minute = [int(part) for part in str(slot).split(":")]
+            except (TypeError, ValueError):
+                continue
+            target = hour * 60 + minute
+            if current < target:
+                continue
+            if current - target > DAILY_CHAT_SLOT_GRACE_MINUTES:
+                continue
+            done.add(slot)
+            # The map is a same-day guard, not history.
+            for other in list(self._daily_chat_done):
+                if other != day:
+                    self._daily_chat_done.pop(other, None)
+            return slot
+        return ""
 
     def _reload_schedule(self):
         """Re-read the configurable hours; keep the current grid on failure.
@@ -286,9 +312,17 @@ class Scheduler:
         except Exception:
             return False
         try:
-            times = wb_settings.daily_chat_times(directory)
+            # 生效时段 = 面板填的时段；留空时是「今天随机抽的两个、相隔 12 小时」。
+            # 随机值当日只抽一次并落盘（见 wb_settings.daily_chat_random_times），
+            # 所以这里每 30 秒重读不会让时段漂移。
+            times = wb_settings.daily_chat_effective_times(directory)
         except Exception:
             times = list(self.daily_chat_times)
+        try:
+            self.daily_chat_random_slots = not bool(
+                wb_settings.daily_chat_times(directory))
+        except Exception:
+            pass
         changed = (hours["checkin"] != self.checkin_hours
                    or hours["travel"] != self.travel_hours
                    or hours["keepalive"] != self.keepalive_hours
@@ -365,8 +399,10 @@ class Scheduler:
                          and (force or cycle_hour in self.keepalive_hours))
         run_cat = (not daily_chat_only
                    and (force or cycle_hour in self.cat_hours))
-        # 配了独立时段就只按独立时段跑；没配时保持旧行为（跟随 checkin 整点）。
-        run_daily_chat = (force or daily_chat_only
+        # 时段永远存在（面板留空时是「今天随机抽的两个」），所以国际版活跃只按
+        # 时段触发；启动后的第一次巡检额外补跑一次当天还没活跃的账号。
+        catchup = self._consume_startup_catchup()
+        run_daily_chat = (force or daily_chat_only or catchup
                           or (not self.daily_chat_times and run_checkin))
 
         for idx, acc in enumerate(list(self.pool.accounts)):
@@ -476,15 +512,48 @@ class Scheduler:
         except Exception:
             return wb_settings.DAILY_CHAT_WEB_CONCURRENCY_DEFAULT
 
+    def _daily_chat_budget(self):
+        """单账号预算（秒）；0 = 不限制。"""
+        directory = getattr(self.pool, "dir", "") or ""
+        if not directory:
+            return wb_settings.DAILY_CHAT_BUDGET_DEFAULT
+        try:
+            return wb_settings.daily_chat_budget(directory)
+        except Exception:
+            return wb_settings.DAILY_CHAT_BUDGET_DEFAULT
+
+    def _consume_startup_catchup(self):
+        """启动补跑只消费一次，并尊重开关。
+
+        进程重启后旧实现是「今天已经过了时段就算了」——10-23 那次就是这样丢掉
+        5 个账号的一整天：17:01 重启，巡检跑完「国际活跃 0 个」，再没有下一次机会。
+        """
+        if not self._catchup_pending:
+            return False
+        self._catchup_pending = False
+        directory = getattr(self.pool, "dir", "") or ""
+        try:
+            enabled = (wb_settings.daily_chat_startup_catchup(directory)
+                       if directory else True)
+        except Exception:
+            enabled = True
+        if enabled:
+            self.log("启动补跑：检查当天还没完成国际版每日活跃的账号")
+        return enabled
+
     def _run_one_daily_chat(self, acc):
         """Run one account's daily activity; returns whether it succeeded."""
         uid8 = acc.uid[:8] if acc.uid else "?"
         self.log(f"检测到国际版账号 [{uid8}] 今日尚未活跃，执行每日活跃打卡对话...")
+        self._daily_chat_live[uid8] = {"uid": acc.uid, "started": time.time(),
+                                       "budget": self._daily_chat_budget()}
         try:
             res = acc.daily_chat(trigger="scheduler")
         except Exception as exc:
             self.log(f"! 账号 [{uid8}] 每日活跃对话异常: {exc}")
             return False
+        finally:
+            self._daily_chat_live.pop(uid8, None)
         if res.get("ok"):
             # 成功时也把网页通道那一轮的结果带上（completed：N 段输出），
             # 光看「成功」分不清是真跑完了还是只有桌面腿过了（issue #236）。
@@ -496,34 +565,59 @@ class Scheduler:
     def _run_daily_chat_batch(self, accounts):
         """Run today's intl daily activity, honouring the concurrency setting.
 
+        Every account is bounded by its own budget (wb_accounts), and the batch
+        has a deadline of its own on top: a worker that somehow ignores the
+        budget must not be able to hold the whole cycle — and with it the cn
+        check-in — hostage the way the old serial loop did.
+
         Concurrency 1 keeps the historical one-account-at-a-time order with the
         1.5 s gap. Above that, workers are started with a small stagger so the
         first conversations do not hit the upstream in the same millisecond.
         """
         concurrency = self._daily_chat_concurrency()
+        budget = self._daily_chat_budget()
+        deadline = None
+        if budget > 0:
+            waves = -(-len(accounts) // max(1, concurrency))   # ceil
+            deadline = time.time() + waves * (budget + DAILY_CHAT_BATCH_SLACK)
         if concurrency <= 1 or len(accounts) <= 1:
             count = 0
             for acc in accounts:
+                if deadline is not None and time.time() > deadline:
+                    self.log("网页活跃本轮已到批次截止时间，剩余账号留到下一个时段")
+                    break
                 if self._run_one_daily_chat(acc):
                     count += 1
                 time.sleep(1.5)
             return count
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import (ThreadPoolExecutor, as_completed,
+                                        TimeoutError as FutureTimeout)
         count = 0
-        with ThreadPoolExecutor(max_workers=concurrency,
-                                thread_name_prefix="daily-chat") as pool:
+        pool = ThreadPoolExecutor(max_workers=concurrency,
+                                  thread_name_prefix="daily-chat")
+        try:
             futures = {}
             for index, acc in enumerate(accounts):
                 delay = min(index * 0.3, 2.0)
                 futures[pool.submit(self._delayed_daily_chat, acc, delay)] = acc
-            for future in as_completed(futures):
-                try:
-                    if future.result():
-                        count += 1
-                except Exception as exc:
-                    acc = futures[future]
-                    uid8 = acc.uid[:8] if acc.uid else "?"
-                    self.log(f"! 账号 [{uid8}] 每日活跃并发执行异常: {exc}")
+            timeout = None if deadline is None else max(1.0, deadline - time.time())
+            try:
+                for future in as_completed(futures, timeout=timeout):
+                    try:
+                        if future.result():
+                            count += 1
+                    except Exception as exc:
+                        acc = futures[future]
+                        uid8 = acc.uid[:8] if acc.uid else "?"
+                        self.log(f"! 账号 [{uid8}] 每日活跃并发执行异常: {exc}")
+            except FutureTimeout:
+                pending = sum(1 for future in futures if not future.done())
+                self.log("网页活跃本轮已到批次截止时间，%d 个账号留到下一个时段"
+                         % pending)
+        finally:
+            # wait=False：卡住的 worker 不能把整轮巡检一起拖住（它自己的预算
+            # 会结束它；这里只是不让 shutdown 去等）。
+            pool.shutdown(wait=False)
         return count
 
     def _delayed_daily_chat(self, acc, delay):
@@ -572,5 +666,29 @@ class Scheduler:
             "next_run_time": self.next_run_time or "待调度",
             "windows": windows,
             "quota_scans": scans,
+            # 国际版每日活跃的排程与现场：面板「任务与福利」页的状态块读这几项。
+            "daily_chat": self._daily_chat_status(),
             "logs": self.logs[-20:],
+        }
+
+    def _daily_chat_status(self):
+        """网页活跃的生效时段、下一个时段与正在跑的账号。"""
+        now = time.time()
+        live = []
+        for uid8, item in list(self._daily_chat_live.items()):
+            budget = item.get("budget") or 0
+            elapsed = int(now - (item.get("started") or now))
+            live.append({"uid8": uid8, "uid": item.get("uid") or "",
+                         "elapsed_s": elapsed, "budget_s": budget,
+                         "remaining_s": max(0, budget - elapsed) if budget else None})
+        today = time.strftime("%Y-%m-%d")
+        done_slots = sorted(self._daily_chat_done.get(today) or [])
+        upcoming = [slot for slot in self.daily_chat_times if slot not in done_slots]
+        return {
+            "times": list(self.daily_chat_times),
+            "random": bool(getattr(self, "daily_chat_random_slots", False)),
+            "done_slots": done_slots,
+            "next_slot": upcoming[0] if upcoming else "",
+            "live": live,
+            "budget_s": self._daily_chat_budget(),
         }

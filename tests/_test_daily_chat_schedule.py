@@ -132,9 +132,105 @@ class CycleScopeTests(unittest.TestCase):
         self.acc.daily_chat.assert_called_once_with(trigger="scheduler")
 
     def test_explicit_slots_take_over_from_the_checkin_hour(self):
+        """配了显式时段后，整点巡检不再顺带跑活跃；只有到点的时段才跑。
+
+        第一轮是启动补跑（新进程第一次巡检会补当天还没活跃的账号），之后
+        09:00 这个整点巡检不该再碰活跃。
+        """
         self.sched.daily_chat_times = ["09:30"]
         self.run_cycle()
+        self.acc.daily_chat.reset_mock()
+        self.run_cycle()
         self.acc.daily_chat.assert_not_called()
+
+    def test_startup_catchup_runs_once_and_respects_the_switch(self):
+        """启动补跑只消费一次；关掉开关就一个都不补。"""
+        self.sched.daily_chat_times = ["23:30"]      # 今天还没到点
+        self.run_cycle()
+        self.acc.daily_chat.assert_called_once_with(trigger="scheduler")
+        self.acc.daily_chat.reset_mock()
+        self.run_cycle()
+        self.acc.daily_chat.assert_not_called()
+
+        wb_settings.set_daily_chat_startup_catchup(self.dir, False)
+        acc = mock.MagicMock()
+        acc.uid = "u2"
+        acc.realm = "intl"
+        acc.restricted_until = 0.0
+        acc.can_daily_chat.return_value = True
+        acc.daily_chat.return_value = {"ok": True, "msg": "ok"}
+        self.pool.accounts = [acc]
+        self.sched = wb_scheduler.Scheduler(self.pool)
+        self.sched.log = lambda *a, **k: None
+        self.sched.daily_chat_times = ["23:30"]
+        self.run_cycle()
+        acc.daily_chat.assert_not_called()
+
+class RandomSlotTests(unittest.TestCase):
+    """面板留空时段时：每天随机抽两个、间隔 12 小时、当日不重抽。"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="daily-schedule-random-")
+
+    def test_two_slots_twelve_hours_apart(self):
+        times = wb_settings.daily_chat_random_times(self.dir)
+        self.assertEqual(len(times), 2)
+        first = int(times[0][:2]) * 60 + int(times[0][3:])
+        second = int(times[1][:2]) * 60 + int(times[1][3:])
+        self.assertEqual((second - first) % (24 * 60), 12 * 60)
+
+    def test_minutes_stay_off_the_top_of_the_hour(self):
+        """14220 全落在整点批处理窗口，分钟避开 00–04 就绕开了那一段。"""
+        for _ in range(20):
+            times = wb_settings.daily_chat_random_times(self.dir)
+            for slot in times:
+                self.assertGreaterEqual(int(slot[3:]), 5)
+                self.assertLessEqual(int(slot[3:]), 55)
+            os.remove(wb_settings.settings_path(self.dir))
+
+    def test_the_draw_is_stable_within_the_day(self):
+        first = wb_settings.daily_chat_random_times(self.dir)
+        self.assertEqual(wb_settings.daily_chat_random_times(self.dir), first)
+        # 换一天才重抽
+        tomorrow = time.time() + 86400
+        again = wb_settings.daily_chat_random_times(self.dir, now=tomorrow)
+        self.assertEqual(len(again), 2)
+
+    def test_explicit_slots_win_over_the_random_ones(self):
+        wb_settings.set_daily_chat_times(self.dir, ["07:15", "19:15"])
+        self.assertEqual(wb_settings.daily_chat_effective_times(self.dir),
+                         ["07:15", "19:15"])
+        wb_settings.set_daily_chat_times(self.dir, [])
+        self.assertEqual(len(wb_settings.daily_chat_effective_times(self.dir)), 2)
+
+
+class DueWindowTests(unittest.TestCase):
+    """时段按到期窗口判定：漏了 tick、巡检占锁、重启都要能补上。"""
+
+    def setUp(self):
+        pool = mock.MagicMock()
+        pool.dir = ""
+        pool.accounts = []
+        self.sched = wb_scheduler.Scheduler(pool)
+        self.sched.log = lambda *a, **k: None
+        self.sched.daily_chat_times = ["09:37"]
+
+    def at(self, hour, minute, day=21):
+        return time.struct_time((2026, 10, day, hour, minute, 0, 2, 294, -1))
+
+    def test_a_late_tick_still_fires_the_slot(self):
+        self.assertEqual(self.sched._due_daily_chat_slot(self.at(9, 37)), "09:37")
+        self.assertEqual(self.sched._due_daily_chat_slot(self.at(9, 37)), "")
+
+    def test_a_missed_minute_is_caught_later(self):
+        """09:37 那分钟没有 tick：10:05 醒来照样补这一次。"""
+        self.assertEqual(self.sched._due_daily_chat_slot(self.at(10, 5)), "09:37")
+
+    def test_a_slot_older_than_the_grace_window_is_skipped(self):
+        self.assertEqual(self.sched._due_daily_chat_slot(self.at(22, 0)), "")
+
+    def test_before_the_slot_nothing_fires(self):
+        self.assertEqual(self.sched._due_daily_chat_slot(self.at(9, 36)), "")
 
 
 if __name__ == "__main__":

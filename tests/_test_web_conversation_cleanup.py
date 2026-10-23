@@ -115,8 +115,6 @@ class CleanupTests(unittest.TestCase):
         if name is not None:
             directory = os.path.join(_TMP.name, name)
             os.makedirs(directory, exist_ok=True)
-            if retry is not None:
-                wb_settings.set_daily_chat_web_retry(directory, retry)
             acc.path = os.path.join(directory, "acc-intl.json")
         return acc
 
@@ -168,8 +166,9 @@ class CleanupTests(unittest.TestCase):
                                        "error": "会话在 120s 内没有跑完（状态=working）"},
                            acc=acc)
         self.assertFalse(res.get("ok"))
-        self.assertEqual(len(stub.actions("stop")), 1)
-        self.assertEqual(len(stub.actions("delete")), 1)
+        # 每一轮失败都要收尾（现在至少两轮：第二轮留给「会话只是慢」）。
+        self.assertGreaterEqual(len(stub.actions("stop")), 1)
+        self.assertGreaterEqual(len(stub.actions("delete")), 1)
 
     def test_cleanup_runs_when_the_sandbox_lookup_fails(self):
         stub = WebStub(session_error=OSError("connection reset"))
@@ -177,8 +176,8 @@ class CleanupTests(unittest.TestCase):
         res = self.run_web(stub, acc=acc)
         self.assertFalse(res.get("ok"))
         self.assertIn("session 查询失败", res.get("error", ""))
-        self.assertEqual(len(stub.actions("delete")), 1,
-                         "会话已经建出来了，失败也必须收尾")
+        self.assertGreaterEqual(len(stub.actions("delete")), 1,
+                                "会话已经建出来了，失败也必须收尾")
 
     def test_cleanup_runs_when_the_sandbox_has_no_link(self):
         stub = WebStub(session={"code": 0, "msg": "OK", "data": {}})
@@ -186,7 +185,7 @@ class CleanupTests(unittest.TestCase):
         res = self.run_web(stub, acc=acc)
         self.assertFalse(res.get("ok"))
         self.assertIn("沙箱", res.get("error", ""))
-        self.assertEqual(len(stub.actions("delete")), 1)
+        self.assertGreaterEqual(len(stub.actions("delete")), 1)
 
     # -- 10105：先清理再重试 -------------------------------------------------
     def leaked(self, count=10, name="Hi"):
@@ -243,7 +242,6 @@ class CleanupTests(unittest.TestCase):
     def test_the_limit_error_is_not_retried_by_the_outer_loop(self):
         directory = os.path.join(_TMP.name, "limit-retry")
         os.makedirs(directory, exist_ok=True)
-        wb_settings.set_daily_chat_web_retry(directory, True)
         acc = self.account()
         acc.path = os.path.join(directory, "acc-intl.json")
         stub = WebStub(creates=[active_limit_error()],

@@ -47,17 +47,23 @@ WEB_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
                   "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0")
 DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
 DAILY_CHAT_WEB_PROMPT = "Hi"
-#: 回退组合在没配置时的候选：账号首选模型之外，再带上各区域的免费模型。
-#: 实际顺序按目录倍率排序（免费 → 低积分 → 高积分），见 _model_credit_rank。
-DAILY_CHAT_WEB_FREE_FALLBACK_INTL = ("hy3", "hy4-preview-f", "hy4-preview",
-                                     "glm-5.3-flash")
-DAILY_CHAT_WEB_FREE_FALLBACK_CN = ("hy3", "hy4-preview-f", "hy4-preview")
 #: 网页通道一轮最多等多久（秒）。实测一次「Hi」十几秒就跑完，留足余量。
 #: 没配 settings 的账号（如单测里手工构造的）用它兜底。
 WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
-#: 网页通道一共试几次（含第一轮）。第 N 轮的等待是首轮的 N 倍，所以
-#: 3 次 = 最多等 base×(1+2+4) 秒。设置页可改（见 wb_settings.daily_chat_web_attempts）。
+#: 网页通道至少跑几轮：第二轮留给「会话只是慢」（状态=working），一轮没跑完
+#: 不代表坏了。候选序列更长时按候选数量走（每个候选一轮）。
+WEB_MIN_ROUNDS = 2
+#: 兼容旧调用方：早期版本用它当「总尝试次数」。现在轮数由候选序列推出。
 WEB_TURN_ATTEMPTS = 3
+#: 单账号总预算（秒）的默认值；0 = 不限制。与 wb_settings 同值：没配 settings
+#: 的账号（单测里手工构造的）按它走。
+WEB_BUDGET_DEFAULT = 600
+#: 剩余预算低于这个值就不再开新的一轮：一轮至少要能等到会话真的跑起来。
+WEB_BUDGET_MIN_ROUND = 30
+#: 桌面腿（轻量对话）在首选模型冷却时顺延用的免费模型。网页腿不看这份名单 ——
+#: 那边的回退就是面板上的候选序列。
+DAILY_CHAT_DESKTOP_FALLBACKS = ("hy3", "hy4-preview-f", "hy4-preview",
+                                "glm-5.3-flash")
 #: 还没跑到 turn 就失败（建会话 5xx、取沙箱失败）时的退避基数（秒）。
 #: 那几轮只花掉几百毫秒、不消耗任何等待预算，背靠背重试等于把全部尝试挤进
 #: 同一个上游故障窗口（issue #558：8 个账号 × 6 次尝试全落进约 100 秒的抖动）。
@@ -702,6 +708,25 @@ def degrade_backoff(fails):
     """Degrade window for `fails` consecutive unknown failures."""
     return _exponential_backoff(fails, DEGRADE_COOLDOWN, DEGRADE_COOLDOWN_MAX,
                                 DEGRADE_THRESHOLD)
+
+
+def _clean_candidates(models):
+    """Order-preserving de-duplication of a candidate list.
+
+    Both the panel's list and the automatic one can contain the same id twice
+    (the preferred model is also a free model), and an empty id must never
+    reach the upstream. Kept separate from wb_settings._clean_models because
+    this one must not truncate: the caller decides how many rounds it walks.
+    """
+    seen = set()
+    ordered = []
+    for model in models or []:
+        name = str(model or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    return ordered
 
 
 def _model_credit_rank(model, realm):
@@ -1925,24 +1950,19 @@ class Account(object):
         }
 
     def daily_chat_model(self):
-        """Which model this account's daily activity runs on.
+        """Which model the desktop-identity leg of the activity runs on.
 
-        The panel's setting wins when set; otherwise the built-in free id. Both
-        legs (the desktop-identity completion and the web conversation) read
-        this, so one setting moves the whole activity.
+        Shares the candidate list with the web leg (`daily_chat_models`, first
+        entry preferred): one setting now drives both legs, and a model that is
+        cooling down or capped falls through to the next candidate instead of
+        failing the activity.
         """
-        candidates = []
-        if self.path:
-            picked = wb_settings.daily_chat_model(os.path.dirname(self.path))
-            if picked:
-                candidates.append(picked)
-        candidates.append(DAILY_CHAT_MODEL)
-        # Add fallback free models for the account's realm if preferred model is cooling down
-        if self.realm == "intl":
-            candidates.extend(["hy3", "hy4-preview-f", "hy4-preview", "glm-5.3-flash"])
-        else:
-            candidates.extend(["hy3", "hy4-preview-f", "hy4-preview"])
-
+        candidates = self.web_fallback_models() or [DAILY_CHAT_MODEL]
+        if len(candidates) < 2:
+            # 桌面腿历史上会在首选模型冷却 / 达限时顺延到其它免费模型。候选序列
+            # 只配了一个（或没配）时保留这份顺延；网页腿的轮数仍只看候选序列。
+            candidates = candidates + [model for model in DAILY_CHAT_DESKTOP_FALLBACKS
+                                       if model not in candidates]
         now = time.time()
         with self._throttle_lock:
             for cand in candidates:
@@ -1953,38 +1973,27 @@ class Account(object):
         return candidates[0]
 
     def web_fallback_models(self):
-        """The ordered model combination the web leg falls back through.
+        """The ordered model candidates the web leg walks through.
 
-        The panel's combination wins; when it is empty the account's preferred
-        model plus the realm's free models form the default. Either way the
-        result is sorted by catalogue multiplier, so a free model runs before a
-        cheap paid one and that one before an expensive one. The account's
-        preferred model is first when it shares the cheapest tier, because it
-        is what the operator picked.
+        An explicit list in the panel wins and is used **in that order** - it is
+        the operator's priority, not a suggestion. Only the automatic mode (no
+        list configured) sorts by catalogue multiplier, so a free model runs
+        before a cheap paid one and that one before an expensive one.
+
+        This replaces the old pair of settings (`daily_chat_model` for the
+        preferred model plus a separate fallback switch and combination): with
+        both set, the fallback branch took every model from the combination and
+        the preferred model never ran at all.
         """
         configured = []
         if self.path:
-            configured = wb_settings.daily_chat_web_fallback_models(
+            configured = wb_settings.daily_chat_models(
                 os.path.dirname(self.path))
         if configured:
-            candidates = list(configured)
-        else:
-            candidates = [self.daily_chat_model()]
-            if self.realm == "cn":
-                candidates.extend(DAILY_CHAT_WEB_FREE_FALLBACK_CN)
-            else:
-                candidates.extend(DAILY_CHAT_WEB_FREE_FALLBACK_INTL)
-        preferred = self.daily_chat_model()
-        seen = set()
-        ordered = []
-        for model in candidates:
-            if not model or model in seen:
-                continue
-            seen.add(model)
-            ordered.append(model)
-        ordered.sort(key=lambda model: (_model_credit_rank(model, self.realm),
-                                        0 if model == preferred else 1))
-        return ordered
+            return _clean_candidates(configured)
+        # 自动模式只有内置的免费模型一个候选：候选序列就是回退，没配就是不回退。
+        # 旧实现在这里额外塞进各区域的免费模型，只因为那套「回退组合」必须有人填。
+        return [DAILY_CHAT_MODEL]
 
     def daily_chat_web_prompt(self):
         """The prompt this turn sends on the web channel.
@@ -2034,52 +2043,68 @@ class Account(object):
     def _daily_chat_web_upstream(self, prompt=None):
         """网页通道的实际流程；返回形状见 daily_chat_web。
 
-        失败会再试（见 daily_chat_web_policy）：一共最多 attempts 次（含第一轮），
-        第 N 轮的等待是首轮的 N 倍 —— 默认 3 次、首轮 120 秒，也就是
-        120 / 240 / 360。最典型的失败是「会话还没跑完」（状态=working），它往往
-        只是慢，多等一轮就好，所以这里把等待时间当成重试的代价，不再额外 sleep。
-        业务拒绝（建会话返回非 0 code）不再试：同一个被拒的请求再发一次也一样被拒。
-        例外是「还没跑到 turn 就失败」的轮次（建会话 5xx、取沙箱失败）：那几轮
-        一秒都没等，再打一次仍落在同一个上游故障窗口里，所以补一段指数退避
-        （见 _web_retry_pause / web_retry_backoff）。
+        一次打卡 = **一个预算 + 一个候选序列**：按候选顺序一轮一轮试，每轮最多等到
+        「单轮上限」与「剩余预算」里较小的那个；建会话 / 取沙箱失败后的退避也从同
+        一个预算里扣。预算用尽必定给出结论（phase="budget"），不再有「跑了几个小
+        时没动静、面板一片空白」这种状态。
 
-        返回里带 attempts（实际跑了几轮），其余字段与 _daily_chat_web_once 一致。
+        轮数由候选序列推出（至少两轮：第二轮留给「会话只是慢」），所以面板上不再
+        需要「最多尝试次数」这个与候选数量互相覆盖的旋钮——旧实现里它被
+        `max(总次数, 候选数)` 顶掉，设 1 次也照样跑 6 次。
+
+        业务拒绝（建会话返回非 0 code）不再试：同一个被拒的请求再发一次也一样被拒。
+
+        返回里带 attempts（实际跑了几轮）、models_tried、model，其余字段与
+        _daily_chat_web_once 一致。
         """
-        base, total = self.daily_chat_web_policy()
-        directory = os.path.dirname(self.path) if self.path else ""
-        if directory and wb_settings.daily_chat_web_fallback(directory):
-            models = self.web_fallback_models()
-            if models:
-                # At least one try per candidate, so a combination the operator
-                # picked is actually walked; the configured attempt count still
-                # applies when it is larger (a second pass over the list).
-                attempts = max(total, len(models))
-                tried = []
-                last = None
-                for attempt in range(attempts):
-                    model = models[attempt % len(models)]
-                    res = self._daily_chat_web_once(
-                        prompt, wait_seconds=base * (2 ** attempt), model=model)
-                    res["attempts"] = attempt + 1
-                    res["models_tried"] = tried + [model]
-                    res["model"] = model
-                    if res.get("ok"):
-                        return res
-                    last = res
-                    if not res.get("retryable"):
-                        return res
-                    tried.append(model)
-                    if attempt + 1 < attempts:
-                        self._web_retry_pause(res, attempt)
-                return last
-        attempt = 0
-        while True:
-            res = self._daily_chat_web_once(prompt, wait_seconds=base * (attempt + 1))
-            res["attempts"] = attempt + 1
-            if res.get("ok") or attempt + 1 >= total or not res.get("retryable"):
+        models = self.web_fallback_models() or [self.daily_chat_model()]
+        turn_cap, rounds = self.daily_chat_web_policy()
+        budget = self.daily_chat_budget()
+        deadline = time.time() + budget if budget > 0 else None
+        tried = []
+        last = None
+        budget_hit = False
+        for index in range(rounds):
+            wait = turn_cap
+            if deadline is not None:
+                remaining = deadline - time.time()
+                if remaining < WEB_BUDGET_MIN_ROUND:
+                    budget_hit = True
+                    break
+                # 向上取整：面板上「单轮最长 120 秒」就该等满 120 秒，
+                # 别因为几毫秒的已用时间把它变成 119。
+                wait = min(turn_cap, int(remaining + 0.999))
+            model = models[index % len(models)]
+            res = self._daily_chat_web_once(prompt, wait_seconds=wait, model=model)
+            res["attempts"] = index + 1
+            res["models_tried"] = tried + [model]
+            res["model"] = model
+            if res.get("ok"):
                 return res
-            self._web_retry_pause(res, attempt)
-            attempt += 1
+            last = res
+            if not res.get("retryable"):
+                return res
+            tried.append(model)
+            if index + 1 >= rounds:
+                break
+            self._web_retry_pause(res, index)
+            if deadline is not None and deadline - time.time() < WEB_BUDGET_MIN_ROUND:
+                budget_hit = True
+                break
+        if last is None:
+            # 预算小到连第一轮都放不下：仍然要给一个明确结论，不能返回空。
+            return {"ok": False, "phase": "budget", "budget_exhausted": True,
+                    "attempts": 0,
+                    "error": "单账号预算 %ds 不足一轮（至少需要 %ds 秒）"
+                             % (budget, WEB_BUDGET_MIN_ROUND)}
+        if budget_hit:
+            last = dict(last)
+            last["phase"] = "budget"
+            last["budget_exhausted"] = True
+            last["error"] = ("单账号预算 %ds 用尽（尝试 %d 轮，最后状态 %s）：%s"
+                             % (budget, len(tried), last.get("status") or "未知",
+                                last.get("error") or "会话没有跑完"))
+        return last
 
     def _web_retry_pause(self, res, round_index):
         """还没跑到 turn 就失败时补一段退避，返回实际等了多少秒。
@@ -2109,23 +2134,36 @@ class Account(object):
         return wb_settings.daily_chat_web_retry_backoff(
             os.path.dirname(self.path), default=WEB_RETRY_BACKOFF)
 
-    def daily_chat_web_policy(self):
-        """(首轮等待秒数, 总尝试次数)。设置页改过就按设置页的来。
+    def daily_chat_budget(self):
+        """单账号跑完网页活跃的总预算（秒）；0 = 不限制。
 
-        重试开关默认开（见 wb_settings.daily_chat_web_retry），关掉就是只试一次。
-        等待时间没设过时用 WEB_TURN_TIMEOUT —— 它吃 WB_WEB_TURN_TIMEOUT 环境变量，
-        别让这个新设置项把它悄悄顶掉。没配 settings 的账号（单测里手工构造的）
-        同样按内置默认走。
+        这是这套流程里唯一的时间上限：每轮等待、建会话失败后的退避都从它里面扣，
+        所以「一次打卡最长占住调度器多久」是一个可预测的数（默认 600 秒）。旧实现
+        没有这个上限，一个卡在「会话永远 working」的账号能把整轮巡检拖住数小时。
         """
         if not self.path:
-            return WEB_TURN_TIMEOUT, WEB_TURN_ATTEMPTS
+            return WEB_BUDGET_DEFAULT
+        return wb_settings.daily_chat_budget(
+            os.path.dirname(self.path), default=WEB_BUDGET_DEFAULT)
+
+    def daily_chat_web_policy(self):
+        """(单轮最长等待秒数, 轮数)。设置页改过就按设置页的来。
+
+        轮数 = max(WEB_MIN_ROUNDS, 候选数)：候选序列每多一个模型就多一轮，最少两轮
+        —— 第二轮留给「会话只是慢」（状态=working），一轮没跑完不代表坏了。总时长由
+        单账号预算兜底（见 daily_chat_budget），所以这里不需要「最多尝试次数」这个
+        与候选数量互相覆盖的旋钮。
+
+        等待时间没设过时用 WEB_TURN_TIMEOUT —— 它吃 WB_WEB_TURN_TIMEOUT 环境变量，
+        别让这个设置项把它悄悄顶掉。没配 settings 的账号（单测里手工构造的）同样按
+        内置默认走。
+        """
+        rounds = max(WEB_MIN_ROUNDS, len(self.web_fallback_models()))
+        if not self.path:
+            return WEB_TURN_TIMEOUT, rounds
         directory = os.path.dirname(self.path)
-        total = 1
-        if wb_settings.daily_chat_web_retry(directory):
-            total = wb_settings.daily_chat_web_attempts(directory,
-                                                        default=WEB_TURN_ATTEMPTS)
         return (wb_settings.daily_chat_web_timeout(directory, default=WEB_TURN_TIMEOUT),
-                total)
+                rounds)
 
     def _daily_chat_web_once(self, prompt=None, wait_seconds=None, model=None):
         """网页通道的一轮尝试；返回形状见 daily_chat_web。

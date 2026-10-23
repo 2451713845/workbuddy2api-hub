@@ -128,8 +128,11 @@ class WebChannelTests(unittest.TestCase):
             wb_accounts.urlopen = old
         self.assertTrue(res.get("ok"), res)
         self.assertEqual(res.get("conversation"), "2102411494602919936")
-        req = calls[0]
-        self.assertEqual(req.method, "POST")
+        # 开跑前会先 GET 一次会话列表清扫残留，所以按方法挑建会话那条。
+        creates = [r for r in calls if r.method == "POST"
+                   and r.full_url == "https://www.workbuddy.ai/console/as/conversations/"]
+        self.assertEqual(len(creates), 1, [r.full_url for r in calls])
+        req = creates[0]
         self.assertEqual(req.full_url, "https://www.workbuddy.ai/console/as/conversations/")
         headers = {k.lower(): v for k, v in req.headers.items()}
         self.assertEqual(headers.get("authorization"), "Bearer dummy-token")

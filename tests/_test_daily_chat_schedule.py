@@ -233,5 +233,70 @@ class DueWindowTests(unittest.TestCase):
         self.assertEqual(self.sched._due_daily_chat_slot(self.at(9, 36)), "")
 
 
+class HangWatchdogTests(unittest.TestCase):
+    """一个账号卡在网络上，不能把整轮巡检拖住，也不能把活跃名额带走。"""
+
+    def setUp(self):
+        pool = mock.MagicMock()
+        pool.dir = ""
+        pool.accounts = []
+        self.sched = wb_scheduler.Scheduler(pool)
+        self.logs = []
+        self.sched.log = lambda msg, *a, **k: self.logs.append(msg)
+
+    def account(self, hang=True):
+        import threading
+        acc = mock.MagicMock()
+        acc.uid = "58eb0b70-0000-0000-0000-000000000001"
+        acc.can_daily_chat.return_value = True
+        release = threading.Event()
+        self.release = release
+
+        def daily_chat(trigger="unknown"):
+            if hang:
+                release.wait(30)          # 模拟卡在 socket 上：不返回
+            return {"ok": True, "msg": "done"}
+
+        acc.daily_chat.side_effect = daily_chat
+        acc.web_conversation_reclaim.return_value = 2
+        return acc
+
+    def test_a_hung_account_is_abandoned_and_its_conversations_reclaimed(self):
+        acc = self.account()
+        started = time.time()
+        try:
+            ok = self.sched._run_one_daily_chat(acc, wait=0.2)
+        finally:
+            self.release.set()
+        self.assertFalse(ok, "卡住的账号不能算成功")
+        self.assertLess(time.time() - started, 5, "不能等它自己返回")
+        acc.web_conversation_reclaim.assert_called_once_with(0)
+        self.assertIn("仍未返回", " ".join(self.logs))
+        self.assertEqual(self.sched._daily_chat_live, {}, "运行中状态要清掉")
+
+    def test_the_abandoned_account_still_gets_an_activity_record(self):
+        acc = self.account()
+        try:
+            with mock.patch("wb_activity.record_attempt") as record:
+                self.sched._run_one_daily_chat(acc, wait=0.2)
+        finally:
+            self.release.set()
+        self.assertTrue(record.called, "放弃也要落一条结论，面板上不能一片空白")
+        res = record.call_args[0][3]
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("phase"), "hang")
+
+    def test_a_normal_account_still_reports_success(self):
+        acc = self.account(hang=False)
+        self.assertTrue(self.sched._run_one_daily_chat(acc, wait=5))
+        acc.web_conversation_reclaim.assert_not_called()
+
+    def test_wait_zero_means_no_deadline(self):
+        """预算 0（不限制）时不能自己造一个截止时间出来。"""
+        acc = self.account(hang=False)
+        with mock.patch.object(self.sched, "_daily_chat_budget", return_value=0):
+            self.assertTrue(self.sched._run_one_daily_chat(acc))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

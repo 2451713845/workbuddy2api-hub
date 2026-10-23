@@ -541,17 +541,53 @@ class Scheduler:
             self.log("启动补跑：检查当天还没完成国际版每日活跃的账号")
         return enabled
 
-    def _run_one_daily_chat(self, acc):
-        """Run one account's daily activity; returns whether it succeeded."""
+    def _run_one_daily_chat(self, acc, wait=None):
+        """Run one account's daily activity; returns whether it succeeded.
+
+        wait 是硬性挂钟上限（秒，None = 按预算算、0 = 不限制）。真正的等待跑在
+        单独一条线程里，到点还没返回就不再等它——因为它可能卡在 socket 上（DNS
+        不吃 socket 超时，服务端也能一点一点滴数据），而那种卡法会让「单账号预算」
+        这条软限制彻底失效：预算只在代码回到 Python 时才起作用。放弃之前先让**本
+        线程**替它把网页会话收尾，否则那条会话会一直占着上游的活跃名额（#623 的
+        坑，只是换了个入口）。
+        """
         uid8 = acc.uid[:8] if acc.uid else "?"
         self.log(f"检测到国际版账号 [{uid8}] 今日尚未活跃，执行每日活跃打卡对话...")
+        budget = self._daily_chat_budget()
+        if wait is None:
+            wait = (budget + DAILY_CHAT_BATCH_SLACK) if budget > 0 else 0
         self._daily_chat_live[uid8] = {"uid": acc.uid, "started": time.time(),
-                                       "budget": self._daily_chat_budget()}
+                                       "budget": budget}
+        outcome = {}
+        done = threading.Event()
+
+        def work():
+            try:
+                outcome["res"] = acc.daily_chat(trigger="scheduler")
+            except Exception as exc:      # noqa: BLE001 - 记下来交给下面统一处理
+                outcome["exc"] = exc
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=work, name=f"daily-chat-{uid8}", daemon=True)
+        worker.start()
         try:
-            res = acc.daily_chat(trigger="scheduler")
-        except Exception as exc:
-            self.log(f"! 账号 [{uid8}] 每日活跃对话异常: {exc}")
-            return False
+            finished = done.wait(wait) if wait else done.wait()
+            if not finished:
+                reclaimed = 0
+                try:
+                    reclaimed = acc.web_conversation_reclaim(0)
+                except Exception:
+                    pass
+                self.log(f"! 账号 [{uid8}] 超过 {int(wait)}s 仍未返回（线程卡在网络上），"
+                         f"已代为收尾 {reclaimed} 条网页会话，本轮放弃、留到下一个时段")
+                self._record_daily_chat_hang(acc, wait, reclaimed)
+                return False
+            exc = outcome.get("exc")
+            if exc is not None:
+                self.log(f"! 账号 [{uid8}] 每日活跃对话异常: {exc}")
+                return False
+            res = outcome.get("res") or {}
         finally:
             self._daily_chat_live.pop(uid8, None)
         if res.get("ok"):
@@ -561,6 +597,18 @@ class Scheduler:
             return True
         self.log(f"! 账号 [{uid8}] 每日活跃对话失败: {res.get('error') or res.get('msg')}")
         return False
+
+    def _record_daily_chat_hang(self, acc, wait, reclaimed):
+        """给被放弃的账号补一条活动记录，免得面板上整天看不到这个账号的结论。"""
+        try:
+            import wb_activity
+            wb_activity.record_attempt(
+                acc, wb_activity.TASK_DAILY_CHAT, "scheduler",
+                {"ok": False, "phase": "hang",
+                 "error": "执行超过 %ds 仍未返回（线程卡在网络上），已代为收尾 %d 条网页会话"
+                          % (int(wait), reclaimed)})
+        except Exception:
+            pass
 
     def _run_daily_chat_batch(self, accounts):
         """Run today's intl daily activity, honouring the concurrency setting.
@@ -611,9 +659,16 @@ class Scheduler:
                         uid8 = acc.uid[:8] if acc.uid else "?"
                         self.log(f"! 账号 [{uid8}] 每日活跃并发执行异常: {exc}")
             except FutureTimeout:
-                pending = sum(1 for future in futures if not future.done())
+                pending = [acc for future, acc in futures.items() if not future.done()]
                 self.log("网页活跃本轮已到批次截止时间，%d 个账号留到下一个时段"
-                         % pending)
+                         % len(pending))
+                # 到点还挂着的大概率是卡在网络上：替它们把网页会话收尾，别让
+                # 一条卡住的线程把活跃名额带走（收尾用本线程的连接，不受影响）。
+                for acc in pending:
+                    try:
+                        acc.web_conversation_reclaim(0)
+                    except Exception:
+                        pass
         finally:
             # wait=False：卡住的 worker 不能把整轮巡检一起拖住（它自己的预算
             # 会结束它；这里只是不让 shutdown 去等）。

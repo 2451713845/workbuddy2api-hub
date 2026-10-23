@@ -1,5 +1,6 @@
 import re
 import base64
+import datetime
 import json
 import os
 import random
@@ -95,6 +96,56 @@ WEB_CONVERSATION_ACTIVE_LIMIT = 10
 WEB_CONVERSATION_PRUNE_KEEP = 8
 #: 上游把「还在跑」的会话记成这些状态；只有它们占活跃名额。
 WEB_CONVERSATION_ACTIVE_STATUSES = ("working", "creating", "pending")
+#: 本进程记着的「已建未收尾」网页会话，超过这个时长就当跑过头了，由别的线程代收尾。
+#: 取值是单轮上限的两倍——正常一轮最多 turn_cap 秒，翻倍后仍没注销就一定是卡住了。
+WEB_LIVE_STALE_FACTOR = 2
+#: 清扫「上一个进程留下的活跃会话」时只动创建超过这么久的：一轮最多几分钟，
+#: 半小时还没结束的一定不是正在跑的本轮（也避免误杀另一个网关实例正在跑的会话）。
+WEB_ORPHAN_SWEEP_SECONDS = 1800
+
+
+#: 本进程里「已经建出来、还没收尾」的网页会话：(uid, 会话 id) -> 登记信息。
+#:
+#: 正常路径靠 _daily_chat_web_once 的 finally 注销；但 finally 只有在那一轮**能
+#: 返回**时才跑得掉。getaddrinfo 不吃 socket 超时，服务端也可以一点一点滴数据，
+#: 于是存在「线程卡在 socket 上、永远走不到 finally」的窗口——那条会话就会一直
+#: 占着上游的活跃名额，直到进程重启。这张表让**别的线程**能在超时之后替它收尾：
+#: 收尾不能依赖那个卡住的线程本身。
+_WEB_LIVE = {}
+_WEB_LIVE_LOCK = threading.Lock()
+
+
+def web_live_register(uid, conversation, model=""):
+    """记下一条刚建出来、还没收尾的网页会话（供别的线程代收尾）。"""
+    if not uid or not conversation:
+        return
+    with _WEB_LIVE_LOCK:
+        _WEB_LIVE[(str(uid), str(conversation))] = {
+            "uid": str(uid), "conversation": str(conversation),
+            "model": model or "", "started": time.time(),
+        }
+
+
+def web_live_unregister(uid, conversation):
+    """这条会话已经收尾了，从登记表里去掉。"""
+    with _WEB_LIVE_LOCK:
+        _WEB_LIVE.pop((str(uid), str(conversation)), None)
+
+
+def web_live_snapshot(uid=None, min_age=0.0):
+    """还记着的未收尾会话；给了 uid 只看这个账号，min_age 只挑跑过头的。"""
+    now = time.time()
+    with _WEB_LIVE_LOCK:
+        items = [dict(item) for item in _WEB_LIVE.values()]
+    out = []
+    for item in items:
+        if uid and item["uid"] != str(uid):
+            continue
+        if min_age and now - item["started"] < min_age:
+            continue
+        out.append(item)
+    return out
+
 
 
 class TLSVerifyError(RuntimeError):
@@ -751,6 +802,27 @@ def _model_credit_rank(model, realm):
                 pass
         break
     return float("inf")
+
+
+def _parse_created_at(value):
+    """把上游的 createdAt 解析成 epoch 秒；解析不出来返回 0.0。
+
+    上游给的是带时区的 ISO 8601（如 2026-10-22T09:00:00+08:00）。解析不出来时
+    返回 0.0，调用方一律当「判断不了年龄」跳过——宁可漏收一条，也不要误停用户
+    或另一个实例正在跑的会话（漏掉的由撞 10105 时的 web_conversation_prune 兜）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return 0.0
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp.timestamp()
 
 
 def _active_conversation_limit(status, detail):
@@ -2064,6 +2136,16 @@ class Account(object):
         tried = []
         last = None
         budget_hit = False
+        # 开跑之前先把「上一次跑剩下的」收干净，两层：
+        # 1. 本进程登记着、却已经超过两轮上限还没注销的会话——上一轮卡在 socket 上，
+        #    它的 finally 永远跑不到，只能由本线程代收；
+        # 2. 上一个进程留下的（登记表跟着进程一起没了，只能按上游会话列表兜底）。
+        # 任何一步失败都不影响这一轮：名额真不够时建会话会走 10105 的清理重试。
+        try:
+            self.web_conversation_reclaim(max_age=turn_cap * WEB_LIVE_STALE_FACTOR)
+            self.web_conversation_sweep_orphans()
+        except Exception:
+            pass
         for index in range(rounds):
             wait = turn_cap
             if deadline is not None:
@@ -2209,6 +2291,9 @@ class Account(object):
                     "phase": "create"}
 
         keep = False
+        # 建出来就先登记：万一这一轮卡在 socket 上走不到 finally，别的线程还能
+        # 按这张表替它收尾（见 web_conversation_reclaim）。
+        web_live_register(self.uid, conversation, model)
         try:
             # 建完只是排队：接上沙箱、请求这一轮，它才会真的跑起来（issue #90）。
             try:
@@ -2247,7 +2332,10 @@ class Account(object):
             # 这个账号就再也建不出会话（HTTP 429 / 10105）。成功的一轮保留记录
             # （stop 只把状态改成 completed），失败的一轮直接删掉，免得网页端历史
             # 里堆满「Hi」。
-            self.web_conversation_release(conversation, delete=not keep)
+            try:
+                self.web_conversation_release(conversation, delete=not keep)
+            finally:
+                web_live_unregister(self.uid, conversation)
 
     def _web_conversation_get(self, conversation, suffix=""):
         """读一条网页端会话（suffix 为空拿会话本身，"/session" 拿沙箱信息）。"""
@@ -2350,6 +2438,58 @@ class Account(object):
             if str((conversation or {}).get("name") or "").strip() not in pool:
                 continue
             if self._web_conversation_call(conversation.get("id"), "stop"):
+                stopped += 1
+        return stopped
+
+    def web_conversation_reclaim(self, max_age=0.0):
+        """替**别的线程**收尾它建出来、却还没注销的网页会话；返回收掉的条数。
+
+        为什么需要它：_daily_chat_web_once 的 finally 只在这一轮能返回时才跑得掉，
+        而 socket 层存在走不到返回的窗口（getaddrinfo 不吃 socket 超时、服务端可
+        以一点一点滴数据）。那一路卡住时，那条会话会一直占着上游的活跃名额，攒够
+        十条这个账号就再也建不出会话——和 #623 修的是同一个坑，只是那条路径靠
+        finally 兜不住。
+
+        max_age=0 表示「这个账号登记着的一律收掉」；给了秒数就只收超过这个时长的
+        （正常一轮的 finally 会自己注销，只有跑过头的才会被收）。收尾用本线程自己
+        的短超时连接，与卡住的那条线程无关，所以它卡着也照样能收。
+        """
+        reclaimed = 0
+        for item in web_live_snapshot(self.uid, min_age=max_age):
+            conversation = item.get("conversation")
+            # 先从表里摘掉再收：万一收尾又卡住，不会在下一轮被反复重收。
+            web_live_unregister(self.uid, conversation)
+            if self.web_conversation_release(conversation, delete=True):
+                reclaimed += 1
+        return reclaimed
+
+    def web_conversation_sweep_orphans(self, older_than=WEB_ORPHAN_SWEEP_SECONDS):
+        """清扫**上一个进程**留下的活跃会话；返回停掉的条数。
+
+        进程被 kill 或崩掉时登记表跟着没了，靠 web_conversation_reclaim 收不到；
+        这里按上游的会话列表兜底：只停「名字来自每日活跃提示词池」且创建超过
+        older_than 秒、仍处于活跃状态的会话（用户自己在网页端的对话不碰）。
+
+        阈值默认 30 分钟——一轮最多几分钟，半小时还没结束的一定不是正在跑的本轮，
+        也避免误杀另一个网关实例正在跑的会话。只 stop 不 delete：历史留着。
+        """
+        try:
+            conversations = self.web_conversation_list()
+        except Exception:
+            return 0
+        cutoff = time.time() - max(0, older_than)
+        pool = self._daily_activity_prompt_pool()
+        stopped = 0
+        for conversation in conversations:
+            data = conversation or {}
+            if str(data.get("status") or "").lower() not in WEB_CONVERSATION_ACTIVE_STATUSES:
+                continue
+            if str(data.get("name") or "").strip() not in pool:
+                continue
+            created = _parse_created_at(data.get("createdAt"))
+            if not created or created > cutoff:
+                continue
+            if self._web_conversation_call(data.get("id"), "stop"):
                 stopped += 1
         return stopped
 

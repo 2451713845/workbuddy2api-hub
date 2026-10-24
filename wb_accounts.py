@@ -1844,7 +1844,10 @@ class Account(object):
             private_data=(wb_settings.identity_private_data(
                 os.path.dirname(self.path)) if self.path else "auto"),
         )
-        if self.is_cli_identity():
+        if self.is_cli_identity() or (
+                self.product == wb_identity.PRODUCT_DESKTOP
+                and wb_identity.desktop_chat_compat_enabled()):
+            # Opt-in desktop chat uses the SDK profile, not the billing web profile.
             # 官方 CLI 的 chat 请求由 OpenAI Node SDK 发出：浏览器头一个都没有
             # （X-Requested-With 也没有），Accept 就是 application/json。
             headers = {
